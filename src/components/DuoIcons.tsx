@@ -1,10 +1,16 @@
 import React, { useState } from 'react';
 
+import welcomeImg from '../assets/images/duo_mascot_welcome_1794842024620.jpg';
+import supervisorImg from '../assets/images/duo_supervisor_badge_1794842025115.jpg';
+import studentImg from '../assets/images/duo_student_badge_1794842025060.jpg';
+import trophyImg from '../assets/images/duo_trophy_celebration_1794842026722.jpg';
+
+// تُستورد عبر Vite ليعمل المسار الصحيح على أي استضافة (Netlify / GitHub Pages)
 export const DUO_IMAGES = {
-  welcome: '/src/assets/images/duo_mascot_welcome_1794842024620.jpg',
-  supervisor: '/src/assets/images/duo_supervisor_badge_1794842025115.jpg',
-  student: '/src/assets/images/duo_student_badge_1794842025060.jpg',
-  trophy: '/src/assets/images/duo_trophy_celebration_1794842026722.jpg',
+  welcome: welcomeImg,
+  supervisor: supervisorImg,
+  student: studentImg,
+  trophy: trophyImg,
 } as const;
 
 export const DuoArtwork: React.FC<{

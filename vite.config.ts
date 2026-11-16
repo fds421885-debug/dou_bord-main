@@ -6,6 +6,8 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // على GitHub Pages يُمرَّر VITE_BASE=/اسم-المستودع/ من ملف النشر
+    base: process.env.VITE_BASE || '/',
     plugins: [
       react(),
       tailwindcss(),

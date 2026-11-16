@@ -1,0 +1,624 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user profile containing verified identity and four-part name",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullNameQuad": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "fullNameQuad", "email", "createdAt", "updatedAt"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Synchronized classroom quiz session managed by a supervisor",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "supervisorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "supervisorName": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "active", "finished"]
+        },
+        "sessionType": {
+          "type": "string",
+          "enum": ["quiz", "interactive"]
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["quiz", "explain"]
+        },
+        "explainPresenterId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "explainPresenterName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "explainBlockedIds": {
+          "type": "array",
+          "description": "List of participant UIDs blocked by the supervisor from writing on the Explain Mode board"
+        },
+        "interactiveEditor": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "interactiveEditorName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "currentSlideIndex": {
+          "type": "integer"
+        },
+        "slideCount": {
+          "type": "integer"
+        },
+        "currentQuestionId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "questionCount": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "supervisorId",
+        "supervisorName",
+        "status",
+        "sessionType",
+        "mode",
+        "explainPresenterId",
+        "explainPresenterName",
+        "interactiveEditor",
+        "interactiveEditorName",
+        "currentSlideIndex",
+        "slideCount",
+        "currentQuestionId",
+        "questionCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Participant": {
+      "title": "Participant",
+      "description": "Student participating in a classroom room",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullNameQuad": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "score": {
+          "type": "integer"
+        },
+        "correctCount": {
+          "type": "integer"
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "roomId",
+        "fullNameQuad",
+        "score",
+        "correctCount",
+        "joinedAt",
+        "updatedAt"
+      ]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Question inserted by the supervisor for students to solve",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderIndex": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "imageData": {
+          "type": "string",
+          "maxLength": 280000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["solving", "correct", "unanswered"]
+        },
+        "attemptsUsed": {
+          "type": "integer"
+        },
+        "wrongStudentIds": {
+          "type": "array"
+        },
+        "winnerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "winnerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "timerSeconds": {
+          "type": "integer",
+          "description": "Optional per-question countdown duration in seconds (0 means unlimited)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "orderIndex",
+        "text",
+        "imageData",
+        "status",
+        "attemptsUsed",
+        "wrongStudentIds",
+        "winnerId",
+        "winnerName",
+        "timerSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudentBoard": {
+      "title": "StudentBoard",
+      "description": "Individual student whiteboard strokes and submission status for a question",
+      "type": "object",
+      "properties": {
+        "studentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentName": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "questionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "strokes": {
+          "type": "array"
+        },
+        "submitted": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["pending", "correct", "wrong"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "studentId",
+        "studentName",
+        "roomId",
+        "questionId",
+        "strokes",
+        "submitted",
+        "verdict",
+        "updatedAt"
+      ]
+    },
+    "SavedTest": {
+      "title": "SavedTest",
+      "description": "Personal saved test archive owned by a student or supervisor",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "userRole": {
+          "type": "string",
+          "enum": ["supervisor", "student"]
+        },
+        "supervisorName": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "totalQuestions": {
+          "type": "integer"
+        },
+        "participantsSummary": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "roomCode",
+        "title",
+        "userRole",
+        "supervisorName",
+        "totalQuestions",
+        "participantsSummary",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SavedQuestion": {
+      "title": "SavedQuestion",
+      "description": "Archived question with all student whiteboards inside a user's saved test",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderIndex": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "imageData": {
+          "type": "string",
+          "maxLength": 280000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["solving", "correct", "unanswered"]
+        },
+        "winnerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "boards": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "orderIndex",
+        "text",
+        "imageData",
+        "status",
+        "winnerName",
+        "boards",
+        "createdAt"
+      ]
+    },
+    "SharedExplainBoard": {
+      "title": "SharedExplainBoard",
+      "description": "Real-time shared whiteboard synchronized across all room members during Explain Mode",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "strokes": {
+          "type": "array"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedByName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["roomId", "strokes", "updatedBy", "updatedByName", "updatedAt"]
+    },
+    "ExplainLayer": {
+      "title": "ExplainLayer",
+      "description": "Per-user drawing layer on the collaborative Explain Mode whiteboard",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "strokes": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "roomId", "authorId", "authorName", "strokes", "updatedAt"]
+    },
+    "InteractiveSlide": {
+      "title": "InteractiveSlide",
+      "description": "Uploaded PDF page or image slide displayed full-screen in interactive mode",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "pageIndex": {
+          "type": "integer"
+        },
+        "imageData": {
+          "type": "string",
+          "maxLength": 480000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "roomId", "pageIndex", "imageData", "createdAt"]
+    },
+    "SlideLayer": {
+      "title": "SlideLayer",
+      "description": "Per-user annotation strokes layered live over an interactive slide",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slideId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "strokes": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "roomId", "slideId", "authorId", "authorName", "strokes", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile with email and four-part name"
+    },
+    "/users/{userId}/savedTests/{testId}": {
+      "schema": { "$ref": "#/entities/SavedTest" },
+      "description": "Personal saved test metadata owned by the user"
+    },
+    "/users/{userId}/savedTests/{testId}/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/SavedQuestion" },
+      "description": "Saved question and all student whiteboards for a saved test"
+    },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Live classroom room keyed by room code"
+    },
+    "/rooms/{roomId}/participants/{participantId}": {
+      "schema": { "$ref": "#/entities/Participant" },
+      "description": "Students joined to the room"
+    },
+    "/rooms/{roomId}/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Questions published by the supervisor"
+    },
+    "/rooms/{roomId}/questions/{questionId}/boards/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentBoard" },
+      "description": "Individual student whiteboard state per question"
+    },
+    "/rooms/{roomId}/sharedBoard/{boardId}": {
+      "schema": { "$ref": "#/entities/SharedExplainBoard" },
+      "description": "Live synchronized explain whiteboard for the room"
+    },
+    "/rooms/{roomId}/explainLayers/{layerId}": {
+      "schema": { "$ref": "#/entities/ExplainLayer" },
+      "description": "Per-user collaborative annotation layers in Explain Mode"
+    },
+    "/rooms/{roomId}/slides/{slideId}": {
+      "schema": { "$ref": "#/entities/InteractiveSlide" },
+      "description": "PDF page or image slides in interactive room mode"
+    },
+    "/rooms/{roomId}/slides/{slideId}/layers/{layerId}": {
+      "schema": { "$ref": "#/entities/SlideLayer" },
+      "description": "Real-time annotation layers per user on an interactive slide"
+    }
+  }
+}

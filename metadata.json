@@ -1,0 +1,6 @@
+{
+  "name": "DuoBoard | السبورة التفاعلية",
+  "description": "منصة اختبارات وسبورات تفاعلية متزامنة للمشرف والطلاب بتصميم دولنجو الكامل مع حفظ الاختبارات والصبورات",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

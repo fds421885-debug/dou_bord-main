@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --duo-green: #58cc02;
+    --duo-green-dark: #46a302;
+    --duo-green-light: #d7ffb8;
+    --duo-blue: #1cb0f6;
+    --duo-blue-dark: #1899d6;
+    --duo-blue-light: #ddf4ff;
+    --duo-red: #ff4b4b;
+    --duo-red-dark: #ea2b2b;
+    --duo-red-light: #ffdfe0;
+    --duo-gold: #ffc800;
+    --duo-gold-dark: #e5a400;
+    --duo-gold-light: #fff4cc;
+    --duo-purple: #ce82ff;
+    --duo-purple-dark: #a568cc;
+    --duo-ink: #3c3c3c;
+    --duo-muted: #777777;
+    --duo-border: #e5e5e5;
+    --duo-surface: #f7f7f7;
+  }
+
+  html,
+  body {
+    font-family: 'Cairo', 'Nunito', system-ui, -apple-system, sans-serif;
+    background-color: #ffffff;
+    color: #3c3c3c;
+    overflow-x: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.font-latin {
+  font-family: 'Nunito', 'Cairo', sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Iconic Duolingo 3D Tactile Button Press Mechanics */
+.duo-btn {
+  transition: transform 0.1s cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+  user-select: none;
+}
+
+.duo-btn:active:not(:disabled) {
+  transform: translateY(3px);
+  border-bottom-width: 2px !important;
+  margin-top: 2px;
+}
+
+/* Signature Duolingo Card Frame */
+.duo-card {
+  background-color: #ffffff;
+  border: 2px solid #e5e5e5;
+  border-bottom-width: 4px;
+  border-radius: 1.25rem;
+}
+
+/* Glossy Top-Stripe Duolingo Progress Bar */
+.duo-progress-fill {
+  position: relative;
+  overflow: hidden;
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.duo-progress-fill::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 8px;
+  right: 8px;
+  height: 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* Custom crisp dot-grid whiteboard pattern */
+.whiteboard-grid {
+  background-color: #ffffff;
+  background-image: radial-gradient(#e5e5e5 1.25px, transparent 1.25px);
+  background-size: 20px 20px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .duo-btn,
+  .duo-progress-fill {
+    transition: none !important;
+  }
+}

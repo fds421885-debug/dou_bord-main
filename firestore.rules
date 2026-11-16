@@ -1,0 +1,657 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function isNotExplainBlocked(roomData) {
+      return !('explainBlockedIds' in roomData) || !(request.auth.uid in roomData.explainBlockedIds);
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'fullNameQuad', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'fullNameQuad', 'email', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.fullNameQuad is string && data.fullNameQuad.size() >= 5 && data.fullNameQuad.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoom(data) {
+      return data.keys().hasAll([
+          'id', 'title', 'supervisorId', 'supervisorName', 'status',
+          'sessionType', 'mode', 'explainPresenterId', 'explainPresenterName',
+          'interactiveEditor', 'interactiveEditorName', 'currentSlideIndex', 'slideCount',
+          'currentQuestionId', 'questionCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'title', 'supervisorId', 'supervisorName', 'status',
+          'sessionType', 'mode', 'explainPresenterId', 'explainPresenterName', 'explainBlockedIds',
+          'interactiveEditor', 'interactiveEditorName', 'currentSlideIndex', 'slideCount',
+          'currentQuestionId', 'questionCount', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && isValidId(data.supervisorId)
+        && data.supervisorName is string && data.supervisorName.size() >= 5 && data.supervisorName.size() <= 120
+        && data.status in ['waiting', 'active', 'finished']
+        && data.sessionType in ['quiz', 'interactive']
+        && data.mode in ['quiz', 'explain']
+        && data.explainPresenterId is string && data.explainPresenterId.size() <= 128
+        && data.explainPresenterName is string && data.explainPresenterName.size() <= 120
+        && (!('explainBlockedIds' in data) || (
+          data.explainBlockedIds is list
+          && data.explainBlockedIds.size() <= 100
+          && (data.explainBlockedIds.size() == 0 || isValidId(data.explainBlockedIds[0]))
+        ))
+        && data.interactiveEditor is string && data.interactiveEditor.size() >= 1 && data.interactiveEditor.size() <= 128
+        && data.interactiveEditorName is string && data.interactiveEditorName.size() >= 1 && data.interactiveEditorName.size() <= 120
+        && data.currentSlideIndex is int && data.currentSlideIndex >= 0 && data.currentSlideIndex <= 100
+        && data.slideCount is int && data.slideCount >= 0 && data.slideCount <= 100
+        && data.currentQuestionId is string && data.currentQuestionId.size() <= 128
+        && data.questionCount is int && data.questionCount >= 0 && data.questionCount <= 200
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSharedBoard(data) {
+      return data.keys().hasAll([
+          'roomId', 'strokes', 'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'roomId', 'strokes', 'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && isValidId(data.roomId)
+        && data.strokes is list && data.strokes.size() <= 400
+        && (data.strokes.size() == 0 || data.strokes[0] is map)
+        && isValidId(data.updatedBy)
+        && data.updatedBy == request.auth.uid
+        && data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidExplainLayer(data) {
+      return data.keys().hasAll(['id', 'roomId', 'authorId', 'authorName', 'strokes', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'roomId', 'authorId', 'authorName', 'strokes', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
+        && data.strokes is list && data.strokes.size() <= 400
+        && (data.strokes.size() == 0 || data.strokes[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSlide(data) {
+      return data.keys().hasAll(['id', 'roomId', 'pageIndex', 'imageData', 'createdAt'])
+        && data.keys().hasOnly(['id', 'roomId', 'pageIndex', 'imageData', 'createdAt'])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && data.pageIndex is int && data.pageIndex >= 1 && data.pageIndex <= 100
+        && data.imageData is string && data.imageData.size() >= 10 && data.imageData.size() <= 480000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSlideLayer(data) {
+      return data.keys().hasAll(['id', 'roomId', 'slideId', 'authorId', 'authorName', 'strokes', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'roomId', 'slideId', 'authorId', 'authorName', 'strokes', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && isValidId(data.slideId)
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
+        && data.strokes is list && data.strokes.size() <= 400
+        && (data.strokes.size() == 0 || data.strokes[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidParticipant(data) {
+      return data.keys().hasAll([
+          'uid', 'roomId', 'fullNameQuad', 'score', 'correctCount', 'joinedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'roomId', 'fullNameQuad', 'score', 'correctCount', 'joinedAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && isValidId(data.roomId)
+        && data.fullNameQuad is string && data.fullNameQuad.size() >= 5 && data.fullNameQuad.size() <= 120
+        && data.score is int && data.score >= 0 && data.score <= 100000
+        && data.correctCount is int && data.correctCount >= 0 && data.correctCount <= 500
+        && data.joinedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidQuestion(data) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'status',
+          'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'status',
+          'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 200
+        && data.text is string && data.text.size() <= 1000
+        && data.imageData is string && data.imageData.size() <= 480000
+        && data.status in ['solving', 'correct', 'unanswered']
+        && data.attemptsUsed is int && data.attemptsUsed >= 0 && data.attemptsUsed <= 2
+        && data.wrongStudentIds is list && data.wrongStudentIds.size() <= 2
+        && (data.wrongStudentIds.size() == 0 || (data.wrongStudentIds[0] is string && data.wrongStudentIds[0].size() <= 128))
+        && (data.wrongStudentIds.size() < 2 || (data.wrongStudentIds[1] is string && data.wrongStudentIds[1].size() <= 128))
+        && data.winnerId is string && data.winnerId.size() <= 128
+        && data.winnerName is string && data.winnerName.size() <= 120
+        && (!('timerSeconds' in data) || (data.timerSeconds is int && data.timerSeconds >= 0 && data.timerSeconds <= 3600))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBoard(data) {
+      return data.keys().hasAll([
+          'studentId', 'studentName', 'roomId', 'questionId', 'strokes',
+          'submitted', 'verdict', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'studentId', 'studentName', 'roomId', 'questionId', 'strokes',
+          'submitted', 'verdict', 'updatedAt'
+        ])
+        && isValidId(data.studentId)
+        && data.studentName is string && data.studentName.size() >= 5 && data.studentName.size() <= 120
+        && isValidId(data.roomId)
+        && isValidId(data.questionId)
+        && data.strokes is list && data.strokes.size() <= 400
+        && (data.strokes.size() == 0 || data.strokes[0] is map)
+        && data.submitted is bool
+        && data.verdict in ['pending', 'correct', 'wrong']
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSavedTest(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'roomCode', 'title', 'userRole', 'supervisorName',
+          'totalQuestions', 'participantsSummary', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'roomCode', 'title', 'userRole', 'supervisorName',
+          'totalQuestions', 'participantsSummary', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.roomCode is string && data.roomCode.size() >= 4 && data.roomCode.size() <= 16
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.userRole in ['supervisor', 'student']
+        && data.supervisorName is string && data.supervisorName.size() >= 5 && data.supervisorName.size() <= 120
+        && data.totalQuestions is int && data.totalQuestions >= 0 && data.totalQuestions <= 200
+        && data.participantsSummary is list && data.participantsSummary.size() <= 100
+        && (data.participantsSummary.size() == 0 || data.participantsSummary[0] is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSavedQuestion(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'orderIndex', 'text', 'imageData', 'status',
+          'winnerName', 'boards', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'orderIndex', 'text', 'imageData', 'status',
+          'winnerName', 'boards', 'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 200
+        && data.text is string && data.text.size() <= 1000
+        && data.imageData is string && data.imageData.size() <= 480000
+        && data.status in ['solving', 'correct', 'unanswered']
+        && data.winnerName is string && data.winnerName.size() <= 120
+        && data.boards is list && data.boards.size() <= 100
+        && (data.boards.size() == 0 || data.boards[0] is map)
+        && data.createdAt is timestamp;
+    }
+
+    match /users/{userId}/private/{docId} {
+      allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+      allow create: if isValidId(userId) && isValidId(docId) && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(docId) && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['fullNameQuad', 'updatedAt']);
+      allow delete: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+    }
+
+    match /users/{userId}/savedTests/{testId} {
+      allow get: if isValidId(userId) && isValidId(testId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(testId) && isOwner(userId)
+        && isValidSavedTest(incoming())
+        && incoming().id == testId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(testId) && isOwner(userId)
+        && isValidSavedTest(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'totalQuestions', 'participantsSummary', 'updatedAt']);
+      allow delete: if isValidId(userId) && isValidId(testId) && isOwner(userId);
+
+      match /questions/{questionId} {
+        allow get: if isValidId(userId) && isValidId(testId) && isValidId(questionId) && isOwner(userId)
+          && get(/databases/$(database)/documents/users/$(userId)/savedTests/$(testId)).data.ownerId == request.auth.uid;
+        allow list: if isValidId(userId) && isValidId(testId) && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(testId) && isValidId(questionId) && isOwner(userId)
+          && isValidSavedQuestion(incoming())
+          && incoming().id == questionId
+          && incoming().createdAt == request.time
+          && existsAfter(/databases/$(database)/documents/users/$(userId)/savedTests/$(testId));
+        allow delete: if isValidId(userId) && isValidId(testId) && isValidId(questionId) && isOwner(userId);
+      }
+    }
+
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId) && isVerified();
+      allow list: if isVerified() && resource.data.supervisorId == request.auth.uid;
+      allow create: if isValidId(roomId) && isVerified()
+        && isValidRoom(incoming())
+        && incoming().id == roomId
+        && incoming().supervisorId == request.auth.uid
+        && incoming().status == 'waiting'
+        && incoming().mode == 'quiz'
+        && incoming().currentSlideIndex == 0
+        && incoming().slideCount == 0
+        && incoming().currentQuestionId == ''
+        && incoming().questionCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(roomId) && isVerified()
+        && isValidRoom(incoming())
+        && existing().status != 'finished'
+        && existing().supervisorId == request.auth.uid
+        && incoming().id == existing().id
+        && incoming().supervisorId == existing().supervisorId
+        && incoming().supervisorName == existing().supervisorName
+        && incoming().sessionType == existing().sessionType
+        && incoming().title == existing().title
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().status == 'waiting' && incoming().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['currentQuestionId', 'questionCount', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'explainPresenterId', 'explainPresenterName', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'explainPresenterId', 'explainPresenterName', 'explainBlockedIds', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['explainBlockedIds', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['currentSlideIndex', 'slideCount', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['interactiveEditor', 'interactiveEditorName', 'updatedAt']))
+          || (incoming().status == 'finished'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+
+      match /slides/{slideId} {
+        allow get: if isValidId(roomId) && isValidId(slideId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(slideId) && isVerified()
+          && isValidSlide(incoming())
+          && incoming().id == slideId
+          && incoming().roomId == roomId
+          && incoming().createdAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
+            || get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+          );
+        allow delete: if isValidId(roomId) && isValidId(slideId) && isVerified()
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
+
+        match /layers/{layerId} {
+          allow get: if isValidId(roomId) && isValidId(slideId) && isValidId(layerId) && isVerified()
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            );
+          allow list: if isValidId(roomId) && isValidId(slideId) && isVerified()
+            && resource.data.roomId == roomId && resource.data.slideId == slideId;
+          allow create: if isValidId(roomId) && isValidId(slideId) && isValidId(layerId) && isVerified()
+            && layerId == request.auth.uid
+            && isValidSlideLayer(incoming())
+            && incoming().id == layerId
+            && incoming().authorId == request.auth.uid
+            && incoming().roomId == roomId
+            && incoming().slideId == slideId
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/rooms/$(roomId)/slides/$(slideId))
+            && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || (
+                exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+                && (
+                  (
+                    get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
+                    && (
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == 'all'
+                      || get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == request.auth.uid
+                    )
+                  )
+                  || (
+                    get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+                    && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+                    && (
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                      || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+                    )
+                  )
+                )
+              )
+            );
+          allow update: if isValidId(roomId) && isValidId(slideId) && isValidId(layerId) && isVerified()
+            && isValidSlideLayer(incoming())
+            && incoming().id == existing().id
+            && incoming().roomId == existing().roomId
+            && incoming().slideId == existing().slideId
+            && incoming().authorId == existing().authorId
+            && incoming().authorName == existing().authorName
+            && incoming().updatedAt == request.time
+            && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'updatedAt'])
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || (
+                layerId == request.auth.uid
+                && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+                && (
+                  (
+                    get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
+                    && (
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == 'all'
+                      || get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == request.auth.uid
+                    )
+                  )
+                  || (
+                    get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+                    && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+                    && (
+                      get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                      || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+                    )
+                  )
+                )
+              )
+            );
+          allow delete: if isValidId(roomId) && isValidId(slideId) && isValidId(layerId) && isVerified()
+            && (
+              layerId == request.auth.uid
+              || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            );
+        }
+      }
+
+      match /sharedBoard/{boardId} {
+        allow get: if isValidId(roomId) && isValidId(boardId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow create: if isValidId(roomId) && isValidId(boardId) && isVerified()
+          && boardId == 'live'
+          && isValidSharedBoard(incoming())
+          && incoming().roomId == roomId
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+              && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+              )
+              && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            )
+          );
+        allow update: if isValidId(roomId) && isValidId(boardId) && isVerified()
+          && boardId == 'live'
+          && isValidSharedBoard(incoming())
+          && incoming().roomId == existing().roomId
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+              && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+              )
+              && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            )
+          )
+          && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'updatedBy', 'updatedByName', 'updatedAt']);
+      }
+
+      match /explainLayers/{layerId} {
+        allow get: if isValidId(roomId) && isValidId(layerId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(layerId) && isVerified()
+          && layerId == request.auth.uid
+          && isValidExplainLayer(incoming())
+          && incoming().id == layerId
+          && incoming().authorId == request.auth.uid
+          && incoming().roomId == roomId
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || (
+              exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+              && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+              )
+            )
+          );
+        allow update: if isValidId(roomId) && isValidId(layerId) && isVerified()
+          && isValidExplainLayer(incoming())
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().authorId == existing().authorId
+          && incoming().authorName == existing().authorName
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
+          && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'updatedAt'])
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || (
+              layerId == request.auth.uid
+              && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+              && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == 'all'
+                || get(/databases/$(database)/documents/rooms/$(roomId)).data.explainPresenterId == request.auth.uid
+              )
+            )
+          );
+        allow delete: if isValidId(roomId) && isValidId(layerId) && isVerified()
+          && (
+            layerId == request.auth.uid
+            || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          );
+      }
+
+      match /participants/{participantId} {
+        allow get: if isValidId(roomId) && isValidId(participantId) && isVerified()
+          && (
+            participantId == request.auth.uid
+            || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(participantId) && isVerified()
+          && participantId == request.auth.uid
+          && isValidParticipant(incoming())
+          && incoming().uid == request.auth.uid
+          && incoming().roomId == roomId
+          && incoming().score == 0
+          && incoming().correctCount == 0
+          && incoming().joinedAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/rooms/$(roomId))
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status != 'finished';
+        allow update: if isValidId(roomId) && isValidId(participantId) && isVerified()
+          && isValidParticipant(incoming())
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status != 'finished'
+          && incoming().uid == existing().uid
+          && incoming().roomId == existing().roomId
+          && incoming().fullNameQuad == existing().fullNameQuad
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['score', 'correctCount', 'updatedAt']);
+      }
+
+      match /questions/{questionId} {
+        allow get: if isValidId(roomId) && isValidId(questionId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(questionId) && isVerified()
+          && isValidQuestion(incoming())
+          && incoming().id == questionId
+          && incoming().roomId == roomId
+          && incoming().status == 'solving'
+          && incoming().attemptsUsed == 0
+          && incoming().wrongStudentIds.size() == 0
+          && incoming().winnerId == ''
+          && incoming().winnerName == ''
+          && 'timerSeconds' in incoming()
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
+        allow update: if isValidId(roomId) && isValidId(questionId) && isVerified()
+          && isValidQuestion(incoming())
+          && existing().status == 'solving'
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().orderIndex == existing().orderIndex
+          && incoming().text == existing().text
+          && incoming().imageData == existing().imageData
+          && ((!('timerSeconds' in existing()) && !('timerSeconds' in incoming()))
+            || ('timerSeconds' in existing() && 'timerSeconds' in incoming() && incoming().timerSeconds == existing().timerSeconds))
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (incoming().status == 'correct'
+              && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'winnerId', 'winnerName', 'updatedAt']))
+            || (incoming().status == 'solving' && incoming().attemptsUsed == 1
+              && incoming().diff(existing()).affectedKeys().hasOnly(['attemptsUsed', 'wrongStudentIds', 'updatedAt']))
+            || (incoming().status == 'unanswered'
+              && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'attemptsUsed', 'wrongStudentIds', 'updatedAt']))
+          );
+
+        match /boards/{studentId} {
+          allow get: if isValidId(roomId) && isValidId(questionId) && isValidId(studentId) && isVerified()
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            );
+          allow list: if isValidId(roomId) && isValidId(questionId) && isVerified()
+            && resource.data.roomId == roomId && resource.data.questionId == questionId;
+          allow create: if isValidId(roomId) && isValidId(questionId) && isValidId(studentId) && isVerified()
+            && studentId == request.auth.uid
+            && isValidBoard(incoming())
+            && incoming().studentId == request.auth.uid
+            && incoming().roomId == roomId
+            && incoming().questionId == questionId
+            && incoming().verdict == 'pending'
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            && get(/databases/$(database)/documents/rooms/$(roomId)/questions/$(questionId)).data.status == 'solving';
+          allow update: if isValidId(roomId) && isValidId(questionId) && isValidId(studentId) && isVerified()
+            && isValidBoard(incoming())
+            && incoming().studentId == existing().studentId
+            && incoming().studentName == existing().studentName
+            && incoming().roomId == existing().roomId
+            && incoming().questionId == existing().questionId
+            && incoming().updatedAt == request.time
+            && (
+              (studentId == request.auth.uid
+                && existing().submitted == false
+                && existing().verdict == 'pending'
+                && get(/databases/$(database)/documents/rooms/$(roomId)/questions/$(questionId)).data.status == 'solving'
+                && incoming().verdict == existing().verdict
+                && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'submitted', 'updatedAt']))
+              || (get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                && incoming().strokes == existing().strokes
+                && incoming().submitted == existing().submitted
+                && incoming().diff(existing()).affectedKeys().hasOnly(['verdict', 'updatedAt']))
+            );
+        }
+      }
+    }
+  }
+}

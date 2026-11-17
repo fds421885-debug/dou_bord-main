@@ -195,6 +195,23 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidMyQuiz(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'title', 'questions', 'questionCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'questions', 'questionCount', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 100
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidSavedTest(data) {
       return data.keys().hasAll([
           'id', 'ownerId', 'roomCode', 'title', 'userRole', 'supervisorName',
@@ -254,6 +271,24 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['fullNameQuad', 'updatedAt']);
       allow delete: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+    }
+
+    match /users/{userId}/myQuizzes/{quizId} {
+      allow get: if isValidId(userId) && isValidId(quizId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(quizId) && isOwner(userId)
+        && isValidMyQuiz(incoming())
+        && incoming().id == quizId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(quizId) && isOwner(userId)
+        && isValidMyQuiz(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'questions', 'questionCount', 'updatedAt']);
+      allow delete: if isValidId(userId) && isValidId(quizId) && isOwner(userId);
     }
 
     match /users/{userId}/savedTests/{testId} {

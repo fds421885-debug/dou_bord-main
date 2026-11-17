@@ -1,6 +1,8 @@
 import type { AiSolution } from './aiClient';
 import type {
   ExplainLayer,
+  MyQuiz,
+  QuizQuestion,
   InteractiveSlide,
   Participant,
   Question,
@@ -64,10 +66,28 @@ export interface StoredRoomSnapshot {
   updatedAt: number;
 }
 
+export interface StoredMyQuizzesSnapshot {
+  key: 'my_quizzes';
+  ownerId: string;
+  quizzes: MyQuiz[];
+  updatedAt: number;
+}
+
+export interface StoredMyQuizDraft {
+  key: 'my_quiz_draft';
+  ownerId: string;
+  editingId: string | null;
+  title: string;
+  questions: QuizQuestion[];
+  updatedAt: number;
+}
+
 export type SessionSnapshotRecord =
   | StoredUserProfileSnapshot
   | StoredSavedTestsSnapshot
-  | StoredRoomSnapshot;
+  | StoredRoomSnapshot
+  | StoredMyQuizzesSnapshot
+  | StoredMyQuizDraft;
 
 const DB_NAME = 'duoboard_local_store';
 const DB_VERSION = 2;
@@ -249,4 +269,28 @@ export async function saveSavedTestsListSnapshot(
   } catch {
     // Ignore errors gracefully
   }
+}
+
+export async function deleteSessionSnapshot(key: SessionSnapshotRecord['key']): Promise<void> {
+  try {
+    const db = await openDraftDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SNAPSHOT_STORE, 'readwrite');
+      tx.objectStore(SNAPSHOT_STORE).delete(key);
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    });
+  } catch {
+    // Ignore errors gracefully
+  }
+}
+
+export async function saveMyQuizzesSnapshot(ownerId: string, quizzes: MyQuiz[]): Promise<void> {
+  await saveSessionSnapshot({ key: 'my_quizzes', ownerId, quizzes, updatedAt: Date.now() });
 }

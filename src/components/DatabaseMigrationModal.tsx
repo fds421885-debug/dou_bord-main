@@ -259,6 +259,12 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                     {result.migratedSavedTestsCount}
                   </span>
                 </li>
+                <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
+                  📝 اختباراتي المنقولة:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedMyQuizzesCount}
+                  </span>
+                </li>
                 {result.migratedRoomId && (
                   <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40 sm:col-span-2">
                     {result.roomCreatedAsSupervisor ? (

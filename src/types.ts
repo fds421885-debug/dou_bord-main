@@ -153,3 +153,24 @@ export interface SavedTest {
   createdAt?: unknown;
   updatedAt?: unknown;
 }
+
+/** سؤال داخل "اختباراتي" — النصوص قد تحتوي رياضيات بصيغة $...$ */
+export interface QuizQuestion {
+  id: string;
+  text: string;
+  choices: string[];
+  /** فهرس الإجابة الصحيحة (يبدأ من 0)، أو -1 إن لم تُحدد */
+  correctIndex: number;
+  answer: string;
+  explanation: string;
+}
+
+export interface MyQuiz {
+  id: string;
+  ownerId: string;
+  title: string;
+  questions: QuizQuestion[];
+  questionCount: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}

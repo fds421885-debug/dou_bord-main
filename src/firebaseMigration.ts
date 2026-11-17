@@ -33,6 +33,7 @@ import {
   saveSessionSnapshot,
   type StoredRoomSnapshot,
   type StoredSavedTestsSnapshot,
+  type StoredMyQuizzesSnapshot,
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
 import type {
@@ -43,6 +44,7 @@ import type {
   Room,
   SavedQuestion,
   SavedTest,
+  MyQuiz,
   SharedExplainBoard,
   SlideLayer,
   StudentBoard,
@@ -57,6 +59,7 @@ export interface MigrationProgress {
     | 'migrating_profile'
     | 'migrating_room'
     | 'migrating_saved'
+    | 'migrating_quizzes'
     | 'done';
   message: string;
 }
@@ -72,6 +75,7 @@ export interface MigrationResult {
   migratedQuestionsCount: number;
   migratedSlidesCount: number;
   migratedSavedTestsCount: number;
+  migratedMyQuizzesCount: number;
 }
 
 export class MigrationNeedsSetupError extends Error {
@@ -272,6 +276,7 @@ interface CollectedSourceData {
   boards: StudentBoard[];
   savedTests: SavedTest[];
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
+  myQuizzes: MyQuiz[];
 }
 
 async function collectSourceData(
@@ -285,6 +290,8 @@ async function collectSourceData(
     await loadSessionSnapshot<StoredRoomSnapshot>('active_room');
   const cachedSaved =
     await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
+  const cachedQuizzes =
+    await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
 
   const oldUid =
     currentProfile?.uid ??
@@ -495,6 +502,26 @@ async function collectSourceData(
     }
   }
 
+  // "اختباراتي": قراءة حية من قاعدة المصدر، وإن تعذرت (حصة/شبكة) نستخدم النسخة المحلية المخزنة
+  let myQuizzes: MyQuiz[] =
+    cachedQuizzes && (!oldUid || cachedQuizzes.ownerId === oldUid) ? cachedQuizzes.quizzes : [];
+  if (oldUid) {
+    try {
+      const qzSnap = await withTimeout(
+        getDocs(
+          query(collection(sourceDb, 'users', oldUid, 'myQuizzes'), where('ownerId', '==', oldUid))
+        ),
+        8000
+      );
+      const live: MyQuiz[] = [];
+      qzSnap.forEach((d) => live.push(d.data() as MyQuiz));
+      // نجحت القراءة الحية: هي المرجع (بما فيها حالة عدم وجود اختبارات)
+      myQuizzes = live;
+    } catch {
+      // نبقى على النسخة المحلية
+    }
+  }
+
   return {
     oldUid,
     profile,
@@ -509,6 +536,7 @@ async function collectSourceData(
     boards,
     savedTests,
     savedQuestionsByTestId,
+    myQuizzes,
   };
 }
 
@@ -1091,6 +1119,45 @@ export async function runFirebaseMigration(params: {
       }
     }
 
+
+    // 4. Migrate "اختباراتي" (my quizzes) — كل اختبار مستند واحد، فالعملية ذرية وقابلة للاستكمال:
+    //    ما نُقل سابقاً يُتخطى، وما لم يُنقل بعد يُكمل عند إعادة المحاولة.
+    let migratedMyQuizzesCount = 0;
+    if (source.myQuizzes.length > 0) {
+      onProgress({
+        step: 'migrating_quizzes',
+        message: `جاري نقل اختباراتي (${source.myQuizzes.length})...`,
+      });
+
+      for (const quiz of source.myQuizzes) {
+        if (!quiz?.id || !Array.isArray(quiz.questions) || quiz.questions.length === 0) continue;
+        const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
+        const existingQuiz = await getDoc(quizRef);
+        if (existingQuiz.exists()) {
+          migratedMyQuizzesCount++;
+          continue;
+        }
+        const questions = quiz.questions.slice(0, 100).map((q) => ({
+          id: String(q.id || '').slice(0, 64) || `q_${Math.random().toString(36).slice(2, 10)}`,
+          text: String(q.text || '').slice(0, 2000),
+          choices: Array.isArray(q.choices) ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
+          correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
+          answer: String(q.answer || '').slice(0, 1000),
+          explanation: String(q.explanation || '').slice(0, 2000),
+        }));
+        await setDoc(quizRef, {
+          id: quiz.id,
+          ownerId: targetUid,
+          title: (quiz.title || 'اختبار').slice(0, 120),
+          questions,
+          questionCount: questions.length,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        migratedMyQuizzesCount++;
+      }
+    }
+
     // Activate target database locally and persist active room so reload resumes seamlessly
     activateCustomFirebaseConfig(targetConfig, migratedRoomId);
     if (migratedRoomId) {
@@ -1119,6 +1186,7 @@ export async function runFirebaseMigration(params: {
       migratedQuestionsCount,
       migratedSlidesCount,
       migratedSavedTestsCount,
+      migratedMyQuizzesCount,
     };
   } catch (err) {
     throw classifyMigrationError(err, targetConfig.projectId);

@@ -15,6 +15,7 @@ import {
   Archive,
   Database,
   Home,
+  ListChecks,
   LogOut,
   RefreshCw,
   X,
@@ -47,6 +48,7 @@ import { QuizArena } from './components/QuizArena';
 import { InteractiveArena } from './components/InteractiveArena';
 import { TestResultsView } from './components/TestResultsView';
 import { SavedTestsView } from './components/SavedTestsView';
+import { MyQuizzesView } from './components/MyQuizzesView';
 import { DatabaseMigrationModal } from './components/DatabaseMigrationModal';
 import { DuoOwlEmblem } from './components/DuoIcons';
 
@@ -153,7 +155,7 @@ export default function App() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<'home' | 'saved'>('home');
+  const [tab, setTab] = useState<'home' | 'saved' | 'quizzes'>('home');
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [room, setRoom] = useState<Room | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -176,7 +178,7 @@ export default function App() {
     }
   };
 
-  const handleLeaveRoom = (nextTab: 'home' | 'saved' = 'home') => {
+  const handleLeaveRoom = (nextTab: 'home' | 'saved' | 'quizzes' = 'home') => {
     setActiveRoomId(null);
     setTab(nextTab);
     if (firebaseUser) {
@@ -543,8 +545,20 @@ export default function App() {
                   }`}
                 >
                   <Archive className="w-4 h-4" />
-                  <span className="sm:hidden">اختباراتي</span>
-                  <span className="hidden sm:inline">اختباراتي المحفوظة</span>
+                  <span className="sm:hidden">الأرشيف</span>
+                  <span className="hidden sm:inline">أرشيف الجلسات</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTab('quizzes')}
+                  className={`flex items-center gap-1 sm:gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    tab === 'quizzes'
+                      ? 'border-[#A560E8] text-[#8938D6]'
+                      : 'border-transparent text-[#777777] hover:text-[#3C3C3C]'
+                  }`}
+                >
+                  <ListChecks className="w-4 h-4" />
+                  <span>اختباراتي</span>
                 </button>
               </nav>
             ) : (
@@ -694,6 +708,8 @@ export default function App() {
               onProfileUpdated={(next) => setProfile(next)}
               onEnterRoom={(roomId) => handleEnterRoom(roomId)}
             />
+          ) : tab === 'quizzes' ? (
+            <MyQuizzesView profile={profile} />
           ) : (
             <SavedTestsView profile={profile} />
           )}

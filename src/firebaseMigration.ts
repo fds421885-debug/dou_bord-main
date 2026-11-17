@@ -13,6 +13,7 @@ import {
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
+import { sanitizeChart } from './quizChart';
 import {
   activateCustomFirebaseConfig,
   auth as sourceAuth,
@@ -34,6 +35,7 @@ import {
   type StoredRoomSnapshot,
   type StoredSavedTestsSnapshot,
   type StoredMyQuizzesSnapshot,
+  type StoredQuizAttemptsSnapshot,
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
 import type {
@@ -45,6 +47,7 @@ import type {
   SavedQuestion,
   SavedTest,
   MyQuiz,
+  QuizAttempt,
   SharedExplainBoard,
   SlideLayer,
   StudentBoard,
@@ -60,6 +63,7 @@ export interface MigrationProgress {
     | 'migrating_room'
     | 'migrating_saved'
     | 'migrating_quizzes'
+    | 'migrating_attempts'
     | 'done';
   message: string;
 }
@@ -76,6 +80,7 @@ export interface MigrationResult {
   migratedSlidesCount: number;
   migratedSavedTestsCount: number;
   migratedMyQuizzesCount: number;
+  migratedAttemptsCount: number;
 }
 
 export class MigrationNeedsSetupError extends Error {
@@ -277,6 +282,7 @@ interface CollectedSourceData {
   savedTests: SavedTest[];
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
   myQuizzes: MyQuiz[];
+  quizAttempts: QuizAttempt[];
 }
 
 async function collectSourceData(
@@ -292,6 +298,8 @@ async function collectSourceData(
     await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
   const cachedQuizzes =
     await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
+  const cachedAttempts =
+    await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
 
   const oldUid =
     currentProfile?.uid ??
@@ -522,6 +530,25 @@ async function collectSourceData(
     }
   }
 
+  // محاولات الاختبار المحفوظة: قراءة حية ثم النسخة المحلية عند التعذر
+  let quizAttempts: QuizAttempt[] =
+    cachedAttempts && (!oldUid || cachedAttempts.ownerId === oldUid) ? cachedAttempts.attempts : [];
+  if (oldUid) {
+    try {
+      const atSnap = await withTimeout(
+        getDocs(
+          query(collection(sourceDb, 'users', oldUid, 'quizAttempts'), where('ownerId', '==', oldUid))
+        ),
+        8000
+      );
+      const live: QuizAttempt[] = [];
+      atSnap.forEach((d) => live.push(d.data() as QuizAttempt));
+      quizAttempts = live;
+    } catch {
+      // نبقى على النسخة المحلية
+    }
+  }
+
   return {
     oldUid,
     profile,
@@ -537,6 +564,7 @@ async function collectSourceData(
     savedTests,
     savedQuestionsByTestId,
     myQuizzes,
+    quizAttempts,
   };
 }
 
@@ -1138,6 +1166,7 @@ export async function runFirebaseMigration(params: {
           continue;
         }
         const questions = quiz.questions.slice(0, 100).map((q) => ({
+          ...(q.chart && sanitizeChart(q.chart) ? { chart: sanitizeChart(q.chart) } : {}),
           id: String(q.id || '').slice(0, 64) || `q_${Math.random().toString(36).slice(2, 10)}`,
           text: String(q.text || '').slice(0, 2000),
           choices: Array.isArray(q.choices) ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
@@ -1155,6 +1184,55 @@ export async function runFirebaseMigration(params: {
           updatedAt: serverTimestamp(),
         });
         migratedMyQuizzesCount++;
+      }
+    }
+
+
+    // 5. Migrate saved exam attempts (محاولات الاختبار) — مستند واحد لكل محاولة، قابلة للاستكمال
+    let migratedAttemptsCount = 0;
+    if (source.quizAttempts.length > 0) {
+      onProgress({
+        step: 'migrating_attempts',
+        message: `جاري نقل محاولات الاختبار (${source.quizAttempts.length})...`,
+      });
+
+      for (const at of source.quizAttempts) {
+        if (!at?.id || !Array.isArray(at.questions) || at.questions.length === 0) continue;
+        const atRef = doc(targetDb, 'users', targetUid, 'quizAttempts', at.id);
+        const existingAt = await getDoc(atRef);
+        if (existingAt.exists()) {
+          migratedAttemptsCount++;
+          continue;
+        }
+        const qs = at.questions.slice(0, 100).map((q) => ({
+          ...(q.chart && sanitizeChart(q.chart) ? { chart: sanitizeChart(q.chart) } : {}),
+          id: String(q.id || '').slice(0, 120) || `q_${Math.random().toString(36).slice(2, 10)}`,
+          sourceQuizId: String(q.sourceQuizId || '').slice(0, 120),
+          sourceTitle: String(q.sourceTitle || '').slice(0, 120),
+          text: String(q.text || '').slice(0, 2000),
+          choices: Array.isArray(q.choices) ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
+          correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
+          explanation: String(q.explanation || '').slice(0, 2000),
+        }));
+        const answers = qs.map((_, i) => (Number.isInteger(at.answers?.[i]) ? at.answers[i] : -1));
+        const score = Math.min(
+          qs.length,
+          Math.max(0, qs.reduce((n, q, i) => n + (answers[i] === q.correctIndex ? 1 : 0), 0))
+        );
+        await setDoc(atRef, {
+          id: at.id,
+          ownerId: targetUid,
+          title: String(at.title || 'اختبار').slice(0, 200),
+          settings: at.settings && typeof at.settings === 'object' ? at.settings : {},
+          questions: qs,
+          answers,
+          score,
+          total: qs.length,
+          durationSec: Math.max(0, Math.min(172800, Math.round(Number(at.durationSec) || 0))),
+          finishedAt: Number.isFinite(Number(at.finishedAt)) && Number(at.finishedAt) > 0 ? Math.round(Number(at.finishedAt)) : Date.now(),
+          createdAt: serverTimestamp(),
+        });
+        migratedAttemptsCount++;
       }
     }
 
@@ -1187,6 +1265,7 @@ export async function runFirebaseMigration(params: {
       migratedSlidesCount,
       migratedSavedTestsCount,
       migratedMyQuizzesCount,
+      migratedAttemptsCount,
     };
   } catch (err) {
     throw classifyMigrationError(err, targetConfig.projectId);

@@ -154,6 +154,23 @@ export interface SavedTest {
   updatedAt?: unknown;
 }
 
+export type ChartType = 'bar' | 'hbar' | 'line' | 'pie';
+
+export interface ChartSeries {
+  name: string;
+  values: number[];
+}
+
+/** رسم بياني يُرسم من القيم داخل السؤال */
+export interface QuizChart {
+  type: ChartType;
+  title: string;
+  xLabel: string;
+  yLabel: string;
+  labels: string[];
+  series: ChartSeries[];
+}
+
 /** سؤال داخل "اختباراتي" — النصوص قد تحتوي رياضيات بصيغة $...$ */
 export interface QuizQuestion {
   id: string;
@@ -163,6 +180,7 @@ export interface QuizQuestion {
   correctIndex: number;
   answer: string;
   explanation: string;
+  chart?: QuizChart;
 }
 
 export interface MyQuiz {
@@ -173,4 +191,49 @@ export interface MyQuiz {
   questionCount: number;
   createdAt?: unknown;
   updatedAt?: unknown;
+}
+
+/* ===================== وضع الاختبار ===================== */
+
+export type ExamTiming = 'none' | 'perQuestion' | 'total';
+
+export interface ExamSettings {
+  sourceMode: 'single' | 'mix';
+  /** في المزج: سؤال واحد من كل نموذج، أو عدد محدد موزّع على النماذج */
+  mixMode: 'onePerQuiz' | 'total';
+  quizIds: string[];
+  quizTitles: string[];
+  questionCount: number;
+  shuffleQuestions: boolean;
+  shuffleChoices: boolean;
+  timing: ExamTiming;
+  /** ثوانٍ لكل سؤال، أو ثوانٍ للاختبار كاملاً حسب timing */
+  seconds: number;
+}
+
+export interface ExamQuestion {
+  id: string;
+  sourceQuizId: string;
+  sourceTitle: string;
+  text: string;
+  choices: string[];
+  correctIndex: number;
+  explanation: string;
+  chart?: QuizChart;
+}
+
+export interface QuizAttempt {
+  id: string;
+  ownerId: string;
+  title: string;
+  settings: ExamSettings;
+  questions: ExamQuestion[];
+  /** الخيار المختار لكل سؤال (-1 = بلا إجابة) */
+  answers: number[];
+  score: number;
+  total: number;
+  durationSec: number;
+  /** وقت الانتهاء بالملي ثانية (يبقى ثابتاً عند النقل بين القواعد) */
+  finishedAt: number;
+  createdAt?: unknown;
 }

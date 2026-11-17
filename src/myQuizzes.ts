@@ -1,6 +1,7 @@
 import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase';
 import type { QuizQuestion } from './types';
+import { chartProblem, parseChart, sanitizeChart } from './quizChart';
 
 export const LIMITS = {
   maxQuestions: 100,
@@ -26,7 +27,7 @@ export function newQuizId(): string {
 }
 
 export function emptyQuestion(): QuizQuestion {
-  return { id: newQuestionId(), text: '', choices: [], correctIndex: -1, answer: '', explanation: '' };
+  return { id: newQuestionId(), text: '', choices: ['', '', '', ''], correctIndex: -1, answer: '', explanation: '' };
 }
 
 /* ------------------------------------------------------------------ */
@@ -39,16 +40,24 @@ export const IMPORT_PROMPT = String.raw`أنت مساعد متخصص في إعد
   "title": "عنوان مناسب ومختصر للاختبار",
   "questions": [
     {
-      "text": "نص السؤال الاختياري",
+      "text": "نص السؤال",
       "choices": ["الخيار الأول", "الخيار الثاني", "الخيار الثالث", "الخيار الرابع"],
-      "correctIndex": 0,
+      "correctIndex": 1,
       "explanation": "شرح مختصر للحل (اختياري)"
     },
     {
-      "text": "سؤال مقالي بدون خيارات",
-      "choices": [],
-      "answer": "الإجابة النموذجية",
-      "explanation": ""
+      "text": "حسب الرسم البياني، في أي شهر كانت المبيعات الأعلى؟",
+      "chart": {
+        "type": "bar",
+        "title": "مبيعات المتجر",
+        "xLabel": "الشهر",
+        "yLabel": "عدد القطع",
+        "labels": ["يناير", "فبراير", "مارس"],
+        "series": [ { "name": "المبيعات", "values": [10, 25, 18] } ]
+      },
+      "choices": ["يناير", "فبراير", "مارس", "لا يمكن التحديد"],
+      "correctIndex": 1,
+      "explanation": "أعلى عمود هو فبراير بقيمة 25"
     }
   ]
 }
@@ -56,11 +65,27 @@ export const IMPORT_PROMPT = String.raw`أنت مساعد متخصص في إعد
 القواعد (التزم بها حرفياً):
 1) الناتج JSON صالح 100%: علامات اقتباس مزدوجة فقط، بدون فواصل زائدة، بدون تعليقات، بدون أي نص خارج الكتلة.
 2) title: عنوان قصير مناسب لمحتوى الاختبار. questions: مصفوفة بحد أقصى 100 سؤال.
-3) لكل سؤال: الحقل text إلزامي.
-   - الأسئلة الاختيارية: choices مصفوفة من 2 إلى 8 خيارات، و correctIndex رقم الخيار الصحيح ويبدأ العد من 0 (0 = الخيار الأول).
-   - الأسئلة المقالية: choices تكون [] (فارغة) ويُكتب الجواب في answer.
+3) كل الأسئلة اختيارية (اختيار من متعدد) بدون استثناء:
+   - text: نص السؤال (إلزامي).
+   - choices: مصفوفة من 2 إلى 8 خيارات (يفضّل 4).
+   - correctIndex: رقم الخيار الصحيح ويبدأ العد من 0 (0 = الخيار الأول، 1 = الثاني، 2 = الثالث، 3 = الرابع). خيار واحد فقط صحيح، ولا تكتب نص الإجابة بدل الرقم.
    - explanation: شرح الحل (اختياري، يمكن تركه "").
-4) الرياضيات: ضع كل رمز أو معادلة رياضية بين علامتي دولار $...$ بصيغة LaTeX، والنص العادي يبقى خارجها. الصيغ المطلوبة:
+4) تحديد الإجابة الصحيحة: احسب الجواب بنفسك أولاً (من النص أو من بيانات الرسم)، ثم اعدّ ترتيب الخيارات، ثم ضع في correctIndex موضع الخيار الصحيح بالضبط. تحقق في النهاية من أن choices[correctIndex] هو الجواب الصحيح فعلاً. وزّع مواضع الإجابات الصحيحة بين 0 و1 و2 و3 ولا تجعلها كلها في الموضع نفسه.
+5) الرسوم البيانية (اختيارية): إن احتاج السؤال إلى رسم أو أعمدة بيانية أضف الحقل chart داخل السؤال، وإن لم يحتج فلا تضع الحقل أبداً. يرسم البرنامج الرسم بنفسه من القيم، فلا تكتب صورة ولا رابطاً. الشكل:
+   "chart": {
+     "type": "bar",
+     "title": "عنوان الرسم (اختياري)",
+     "xLabel": "اسم المحور الأفقي (اختياري)",
+     "yLabel": "اسم المحور الرأسي أو الوحدة (اختياري)",
+     "labels": ["تسمية 1", "تسمية 2", "تسمية 3"],
+     "series": [ { "name": "اسم السلسلة", "values": [10, 25, 18] } ]
+   }
+   - type أحد أربعة فقط: "bar" أعمدة رأسية، "hbar" أعمدة أفقية، "line" خط بياني، "pie" رسم دائري.
+   - labels: تسميات المحور الأفقي (أو شرائح الدائرة). values: أرقام حقيقية بدون علامات اقتباس، وعددها يساوي عدد labels تماماً.
+   - للمقارنة بين مجموعتين أو ثلاث (أعمدة أو خط) استخدم أكثر من عنصر داخل series (حتى 3 سلاسل)، ولكل واحدة name مختلف. الرسم الدائري يقبل سلسلة واحدة فقط وقيمها موجبة.
+   - الحد الأقصى 20 تسمية لكل رسم. لا تذكر ألوان الأعمدة في نص السؤال أو الخيارات لأن البرنامج هو من يختار الألوان؛ أشر إلى السلسلة باسمها (name).
+   - يجب أن يكون جواب السؤال قابلاً للاستنتاج من بيانات الرسم نفسها (أعلى قيمة، الفرق، المجموع، المتوسط، النسبة...).
+6) الرياضيات: ضع كل رمز أو معادلة رياضية بين علامتي دولار $...$ بصيغة LaTeX، والنص العادي يبقى خارجها. الصيغ المطلوبة:
    - كسر: $\\frac{3}{4}$   (البسط ثم المقام)
    - جذر تربيعي: $\\sqrt{x}$   — جذر تكعيبي: $\\sqrt[3]{x}$   — جذر من الدرجة n: $\\sqrt[n]{x}$
    - أس: $x^{2}$ ، $2^{n+1}$   — دليل سفلي: $x_{1}$
@@ -74,12 +99,71 @@ export const IMPORT_PROMPT = String.raw`أنت مساعد متخصص في إعد
    - أسهم ومجموعات: $\\to$ ، $\\Rightarrow$ ، $\\in$ ، $\\cup$ ، $\\cap$ ، $\\subset$
    - معادلة كاملة مثال: $x = \\frac{-b \\pm \\sqrt{b^{2}-4ac}}{2a}$
    - إذا احتجت علامة الدولار كعملة اكتبها هكذا: \\$
-5) مهم جداً بخصوص الشرطة المائلة: لأن الملف JSON يجب كتابة كل شرطة مائلة "\" مرتين "\\" كما في الأمثلة أعلاه. الصحيح: "$\\frac{1}{2}$" والخطأ: "$\frac{1}{2}$".
-6) لا تستخدم Markdown أو HTML داخل النصوص. اكتب بلغة المادة (غالباً العربية الفصحى).
-7) اجعل الخيارات متقاربة الطول، وخيار واحد فقط صحيح في كل سؤال اختياري.
+7) مهم جداً بخصوص الشرطة المائلة: لأن الملف JSON يجب كتابة كل شرطة مائلة "\" مرتين "\\" كما في الأمثلة أعلاه. الصحيح: "$\\frac{1}{2}$" والخطأ: "$\frac{1}{2}$".
+8) لا تستخدم Markdown أو HTML داخل النصوص. اكتب بلغة المادة (غالباً العربية الفصحى). اجعل الخيارات متقاربة الطول.
 
 المادة المطلوب تحويلها إلى اختبار:
 (الصق هنا المادة أو الأسئلة أو أرفق الملف)`;
+
+/** مثال كامل جاهز للتجربة داخل شاشة الاستيراد */
+export const EXAMPLE_JSON = JSON.stringify(
+  {
+    title: 'مثال: الجذور والرسوم البيانية',
+    questions: [
+      {
+        text: 'ما قيمة $\\sqrt{49} + \\frac{1}{2}$ ؟',
+        choices: ['$7.5$', '$7$', '$8$', '$6.5$'],
+        correctIndex: 0,
+        explanation: '$\\sqrt{49}=7$ ثم نضيف $\\frac{1}{2}$ فيكون الناتج $7.5$',
+      },
+      {
+        text: 'حسب الرسم، في أي شهر كانت المبيعات الأعلى؟',
+        chart: {
+          type: 'bar',
+          title: 'مبيعات المتجر',
+          xLabel: 'الشهر',
+          yLabel: 'عدد القطع',
+          labels: ['يناير', 'فبراير', 'مارس'],
+          series: [{ name: 'المبيعات', values: [10, 25, 18] }],
+        },
+        choices: ['يناير', 'فبراير', 'مارس', 'لا يمكن التحديد'],
+        correctIndex: 1,
+        explanation: 'أعلى عمود هو فبراير بقيمة 25',
+      },
+      {
+        text: 'ما نسبة من اختار "كرة القدم" إلى المجموع؟',
+        chart: {
+          type: 'pie',
+          title: 'الرياضة المفضلة',
+          labels: ['كرة القدم', 'السباحة', 'الجري'],
+          series: [{ name: 'عدد الطلاب', values: [50, 30, 20] }],
+        },
+        choices: ['$20\\%$', '$30\\%$', '$50\\%$', '$60\\%$'],
+        correctIndex: 2,
+        explanation: '$\\frac{50}{100}=50\\%$',
+      },
+      {
+        text: 'قارن بين الصفين: أي صف زادت درجاته أكثر في الاختبار الثالث عن الأول؟',
+        chart: {
+          type: 'line',
+          title: 'متوسط الدرجات',
+          xLabel: 'الاختبار',
+          yLabel: 'الدرجة',
+          labels: ['الأول', 'الثاني', 'الثالث'],
+          series: [
+            { name: 'الصف أ', values: [60, 70, 85] },
+            { name: 'الصف ب', values: [65, 68, 72] },
+          ],
+        },
+        choices: ['الصف أ', 'الصف ب', 'تساوى الصفان', 'لا يمكن التحديد'],
+        correctIndex: 0,
+        explanation: 'الصف أ: 85 − 60 = 25، الصف ب: 72 − 65 = 7',
+      },
+    ],
+  },
+  null,
+  2
+);
 
 /* ------------------------------------------------------------------ */
 /*  قراءة ملف JSON بشكل متسامح                                         */
@@ -231,8 +315,8 @@ export function parseQuizJson(input: string): ParsedQuiz {
         })
         .filter((c) => c.length > 0);
     }
-    if (choices.length === 1) {
-      warnings.push(`السؤال ${n}: فيه خيار واحد فقط فتم اعتباره سؤالاً مقالياً.`);
+    if (choices.length < 2) {
+      warnings.push(`السؤال ${n}: كل الأسئلة يجب أن تكون باختيارات (خياران على الأقل)، أضفها وحدد الإجابة الصحيحة أثناء المراجعة.`);
       choices = [];
     }
     if (choices.length > LIMITS.maxChoices) {
@@ -270,8 +354,17 @@ export function parseQuizJson(input: string): ParsedQuiz {
       return s;
     };
 
+    let chart: QuizQuestion['chart'];
+    const rawChart = o.chart ?? o.graph ?? o['رسم'];
+    if (rawChart !== undefined && rawChart !== null) {
+      const pc = parseChart(rawChart);
+      pc.warnings.forEach((w) => warnings.push(`السؤال ${n}: ${w}`));
+      if (pc.chart) chart = pc.chart;
+    }
+
     questions.push({
       id: newQuestionId(),
+      ...(chart ? { chart } : {}),
       text: cut(qText, LIMITS.text, 'نص السؤال'),
       choices: choices.map((c) => cut(c, LIMITS.choice, 'أحد الخيارات')),
       correctIndex,
@@ -294,6 +387,7 @@ export function quizToExportJson(title: string, questions: QuizQuestion[]): stri
         correctIndex: q.correctIndex,
         answer: q.answer,
         explanation: q.explanation,
+        ...(q.chart ? { chart: q.chart } : {}),
       })),
     },
     null,
@@ -315,8 +409,10 @@ export function cleanQuestions(questions: QuizQuestion[]): QuizQuestion[] {
     let correctIndex = keep.findIndex((x) => x.i === q.correctIndex);
     if (choices.length < 2 || correctIndex < 0 || correctIndex >= choices.length) correctIndex = -1;
     const finalChoices = choices.length >= 2 ? choices : [];
+    const chart = q.chart ? sanitizeChart(q.chart) : null;
     out.push({
       id: q.id,
+      ...(chart ? { chart } : {}),
       text: text.slice(0, LIMITS.text),
       choices: finalChoices,
       correctIndex: finalChoices.length ? correctIndex : -1,
@@ -335,6 +431,18 @@ export function validateForSave(title: string, questions: QuizQuestion[]): strin
   if (title.trim().length > LIMITS.title) return `العنوان أطول من ${LIMITS.title} حرفاً.`;
   const cleaned = cleanQuestions(questions);
   if (cleaned.length === 0) return 'أضف سؤالاً واحداً على الأقل (نص السؤال لا يمكن أن يكون فارغاً).';
+  let num = 0;
+  for (const q of questions) {
+    if (!q.text.trim()) continue;
+    num++;
+    const filled = q.choices.map((c, i) => ({ c: c.trim(), i })).filter((x) => x.c.length > 0);
+    if (filled.length < 2) return `السؤال ${num}: أضف خيارين على الأقل (كل الأسئلة باختيارات).`;
+    if (!filled.some((x) => x.i === q.correctIndex)) return `السؤال ${num}: حدد الإجابة الصحيحة بالضغط على علامة ✓ بجانب الخيار.`;
+    if (q.chart) {
+      const prob = chartProblem(q.chart);
+      if (prob) return `السؤال ${num} (الرسم البياني): ${prob}`;
+    }
+  }
   if (cleaned.length > LIMITS.maxQuestions) return `الحد الأقصى ${LIMITS.maxQuestions} سؤال.`;
   const bytes = new TextEncoder().encode(JSON.stringify(cleaned)).length;
   if (bytes > LIMITS.maxBytes) return 'حجم الاختبار كبير جداً، قسّمه إلى اختبارين.';

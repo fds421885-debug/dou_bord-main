@@ -260,6 +260,12 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                   </span>
                 </li>
                 <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
+                  🏁 محاولات الاختبار المنقولة:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedAttemptsCount}
+                  </span>
+                </li>
+                <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
                   📝 اختباراتي المنقولة:{' '}
                   <span className="font-latin font-black">
                     {result.migratedMyQuizzesCount}

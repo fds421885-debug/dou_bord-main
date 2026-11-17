@@ -16,6 +16,7 @@ import {
 import type { QuizQuestion } from '../types';
 import { MathText } from '../mathText';
 import { applySnippet, MathToolbar } from './MathToolbar';
+import { QuizChartEditor } from './QuizChartEditor';
 import {
   cleanQuestions,
   createMyQuiz,
@@ -95,8 +96,15 @@ export const QuizEditor: React.FC<Props> = ({
   onCancel,
 }) => {
   const [title, setTitle] = useState(initialTitle);
-  const [questions, setQuestions] = useState<QuizQuestion[]>(
-    initialQuestions.length ? initialQuestions : [emptyQuestion()]
+  const [questions, setQuestions] = useState<QuizQuestion[]>(() =>
+    initialQuestions.length
+      ? initialQuestions.map((q) => {
+          if (q.choices.length >= 2) return q;
+          const choices = [...q.choices];
+          while (choices.length < 4) choices.push('');
+          return { ...q, choices, correctIndex: -1 };
+        })
+      : [emptyQuestion()]
   );
   const [showPreview, setShowPreview] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -185,13 +193,8 @@ export const QuizEditor: React.FC<Props> = ({
   const remove = (id: string) =>
     setQuestions((qs) => (qs.length <= 1 ? [emptyQuestion()] : qs.filter((q) => q.id !== id)));
 
-  const addQuestion = (withChoices: boolean) =>
-    setQuestions((qs) => {
-      if (qs.length >= LIMITS.maxQuestions) return qs;
-      const q = emptyQuestion();
-      if (withChoices) q.choices = ['', '', '', ''];
-      return [...qs, q];
-    });
+  const addQuestion = () =>
+    setQuestions((qs) => (qs.length >= LIMITS.maxQuestions ? qs : [...qs, emptyQuestion()]));
 
   const filled = useMemo(() => cleanQuestions(questions).length, [questions]);
 
@@ -323,6 +326,8 @@ export const QuizEditor: React.FC<Props> = ({
               </div>
             )}
 
+            <QuizChartEditor chart={q.chart} onChange={(c) => patch(q.id, { chart: c })} />
+
             {/* الخيارات */}
             {hasChoices ? (
               <div className="flex flex-col gap-2">
@@ -355,6 +360,7 @@ export const QuizEditor: React.FC<Props> = ({
                       />
                       <button
                         type="button"
+                        disabled={q.choices.length <= 2}
                         onClick={() => {
                           const choices = q.choices.filter((_, k) => k !== ci);
                           let correctIndex = q.correctIndex;
@@ -362,7 +368,7 @@ export const QuizEditor: React.FC<Props> = ({
                           else if (correctIndex > ci) correctIndex -= 1;
                           patch(q.id, { choices, correctIndex, answer: correctIndex >= 0 ? choices[correctIndex] : '' });
                         }}
-                        className="p-1.5 rounded-lg text-[#EA2B2B] cursor-pointer"
+                        className="p-1.5 rounded-lg text-[#EA2B2B] cursor-pointer disabled:opacity-30"
                         title="حذف الخيار"
                       >
                         <X className="w-4 h-4" />
@@ -385,41 +391,9 @@ export const QuizEditor: React.FC<Props> = ({
                       + إضافة خيار
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => patch(q.id, { choices: [], correctIndex: -1 })}
-                    className="text-xs font-black text-[#777777] cursor-pointer"
-                  >
-                    تحويل إلى سؤال مقالي
-                  </button>
                 </div>
               </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <span className="text-xs font-black text-[#3C3C3C]">الإجابة النموذجية (اختياري)</span>
-                <MathField
-                  multiline
-                  rows={2}
-                  value={q.answer}
-                  onChange={(v) => patch(q.id, { answer: v })}
-                  maxLength={LIMITS.answer}
-                  placeholder="الجواب الصحيح…"
-                  onFocusField={onFocusField}
-                />
-                {showPreview && q.answer.includes('$') && (
-                  <div className="rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] px-3 py-2 text-sm font-bold">
-                    <MathText text={q.answer} />
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => patch(q.id, { choices: ['', '', '', ''], correctIndex: -1, answer: '' })}
-                  className="self-start text-xs font-black text-[#1899D6] cursor-pointer"
-                >
-                  تحويل إلى سؤال اختيارات
-                </button>
-              </div>
-            )}
+            ) : null}
 
             <label className="flex flex-col gap-1.5">
               <span className="text-xs font-black text-[#3C3C3C]">شرح الحل (اختياري)</span>
@@ -452,19 +426,11 @@ export const QuizEditor: React.FC<Props> = ({
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => addQuestion(true)}
+          onClick={addQuestion}
           disabled={questions.length >= LIMITS.maxQuestions}
           className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-white border-2 border-[#E5E5E5] border-b-4 text-sm font-black text-[#1899D6] cursor-pointer disabled:opacity-50"
         >
-          <PlusCircle className="w-4 h-4" /> سؤال باختيارات
-        </button>
-        <button
-          type="button"
-          onClick={() => addQuestion(false)}
-          disabled={questions.length >= LIMITS.maxQuestions}
-          className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-white border-2 border-[#E5E5E5] border-b-4 text-sm font-black text-[#3C3C3C] cursor-pointer disabled:opacity-50"
-        >
-          <PlusCircle className="w-4 h-4" /> سؤال مقالي
+          <PlusCircle className="w-4 h-4" /> إضافة سؤال
         </button>
       </div>
 

@@ -9,20 +9,31 @@ import {
   FilePlus2,
   FolderOpen,
   Loader2,
+  History,
   Pencil,
+  Play,
   Trash2,
   Upload,
 } from 'lucide-react';
 import { db, formatTimestamp, getTimestampMillis } from '../firebase';
-import type { MyQuiz, QuizQuestion, UserProfile } from '../types';
+import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion, UserProfile } from '../types';
 import {
   deleteSessionSnapshot,
   loadSessionSnapshot,
   saveMyQuizzesSnapshot,
+  saveSessionSnapshot,
+  type StoredExamSession,
   type StoredMyQuizDraft,
   type StoredMyQuizzesSnapshot,
+  type StoredQuizAttemptsSnapshot,
 } from '../localDraftStore';
-import { deleteMyQuiz, IMPORT_PROMPT, parseQuizJson, quizToExportJson } from '../myQuizzes';
+import { deleteMyQuiz, EXAMPLE_JSON, IMPORT_PROMPT, parseQuizJson, quizToExportJson } from '../myQuizzes';
+import { ChartView } from './ChartView';
+import { ExamSetup } from './ExamSetup';
+import { ExamRunner, type ExamInitialState } from './ExamRunner';
+import { ExamResult } from './ExamResult';
+import { ExamReview } from './ExamReview';
+import { deleteAttempt, describeTiming, formatDuration, newAttemptId } from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 
@@ -36,7 +47,19 @@ type Mode =
       questions: QuizQuestion[];
       warnings: string[];
     }
-  | { kind: 'view'; quiz: MyQuiz };
+  | { kind: 'view'; quiz: MyQuiz }
+  | { kind: 'examSetup' }
+  | { kind: 'examRun'; settings: ExamSettings; questions: ExamQuestion[]; initial?: ExamInitialState }
+  | {
+      kind: 'examResult';
+      attemptId: string;
+      settings: ExamSettings;
+      questions: ExamQuestion[];
+      answers: number[];
+      durationSec: number;
+      finishedAt: number;
+    }
+  | { kind: 'attempt'; attempt: QuizAttempt };
 
 interface Props {
   profile: UserProfile;
@@ -53,11 +76,16 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [draft, setDraft] = useState<StoredMyQuizDraft | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
+  const [session, setSession] = useState<StoredExamSession | null>(null);
+  const [confirmDeleteAttemptId, setConfirmDeleteAttemptId] = useState<string | null>(null);
 
   const refreshDraft = async () => {
     const d = await loadSessionSnapshot<StoredMyQuizDraft>('my_quiz_draft');
     const has = d && d.ownerId === profile.uid && (d.title.trim() || d.questions.some((q) => q.text.trim()));
     setDraft(has ? d : null);
+    const sess = await loadSessionSnapshot<StoredExamSession>('exam_session');
+    setSession(sess && sess.ownerId === profile.uid && sess.questions?.length ? sess : null);
   };
 
   useEffect(() => {
@@ -96,9 +124,31 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         setLoading(false);
       }
     );
+    void loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts').then((snap) => {
+      if (alive && snap && snap.ownerId === profile.uid) setAttempts(snap.attempts);
+    });
+    const unsubAttempts = onSnapshot(
+      query(collection(db, 'users', profile.uid, 'quizAttempts'), where('ownerId', '==', profile.uid)),
+      (snap) => {
+        const list: QuizAttempt[] = [];
+        snap.forEach((d) => list.push(d.data() as QuizAttempt));
+        list.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+        setAttempts(list);
+        void saveSessionSnapshot({
+          key: 'quiz_attempts',
+          ownerId: profile.uid,
+          attempts: list.slice(0, 30),
+          updatedAt: Date.now(),
+        });
+      },
+      (err) => {
+        console.error('quizAttempts listener error', err);
+      }
+    );
     return () => {
       alive = false;
       unsub();
+      unsubAttempts();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.uid]);
@@ -131,6 +181,85 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       setDeleting(false);
     }
   };
+
+  /* ---------------- وضع الاختبار ---------------- */
+  if (mode.kind === 'examSetup') {
+    return (
+      <ExamSetup
+        quizzes={quizzes}
+        onBack={() => setMode({ kind: 'list' })}
+        onStart={(settings, questions) => {
+          void deleteSessionSnapshot('exam_session');
+          setMode({ kind: 'examRun', settings, questions });
+        }}
+      />
+    );
+  }
+
+  if (mode.kind === 'examRun') {
+    return (
+      <ExamRunner
+        key={mode.questions.map((q) => q.id).join('|')}
+        ownerId={profile.uid}
+        settings={mode.settings}
+        questions={mode.questions}
+        initial={mode.initial}
+        onExit={() => {
+          setMode({ kind: 'list' });
+          void refreshDraft();
+        }}
+        onFinish={(answers, durationSec) =>
+          setMode({
+            kind: 'examResult',
+            attemptId: newAttemptId(),
+            settings: mode.settings,
+            questions: mode.questions,
+            answers,
+            durationSec,
+            finishedAt: Date.now(),
+          })
+        }
+      />
+    );
+  }
+
+  if (mode.kind === 'examResult') {
+    return (
+      <ExamResult
+        key={mode.attemptId}
+        ownerId={profile.uid}
+        attemptId={mode.attemptId}
+        settings={mode.settings}
+        questions={mode.questions}
+        answers={mode.answers}
+        durationSec={mode.durationSec}
+        finishedAt={mode.finishedAt}
+        onBack={() => {
+          setMode({ kind: 'list' });
+          void refreshDraft();
+        }}
+        onRetake={() => setMode({ kind: 'examSetup' })}
+      />
+    );
+  }
+
+  if (mode.kind === 'attempt') {
+    const a = mode.attempt;
+    return (
+      <div className="max-w-3xl mx-auto w-full flex flex-col gap-4" dir="rtl">
+        <button type="button" onClick={() => setMode({ kind: 'list' })} className="self-start flex items-center gap-1 text-xs font-black text-[#777777] cursor-pointer">
+          <ArrowRight className="w-4 h-4" /> العودة إلى اختباراتي
+        </button>
+        <div>
+          <h2 className="text-lg font-black text-[#3C3C3C]">{a.title}</h2>
+          <p className="text-[11px] font-extrabold text-[#777777]">
+            {new Date(a.finishedAt).toLocaleString('ar')} · {describeTiming(a.settings)}
+          </p>
+        </div>
+        <ExamReview questions={a.questions} answers={a.answers} score={a.score} total={a.total} durationSec={a.durationSec} />
+      </div>
+    );
+  }
 
   /* ---------------- تحرير / إنشاء ---------------- */
   if (mode.kind === 'edit') {
@@ -184,6 +313,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           <div key={qq.id} className={`${card} p-4 flex flex-col gap-2`}>
             <span className="self-start px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">السؤال {i + 1}</span>
             <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C]" />
+            {qq.chart && <ChartView chart={qq.chart} />}
             {qq.choices.length > 0 ? (
               <div className="flex flex-col gap-1.5">
                 {qq.choices.map((c, ci) => (
@@ -227,6 +357,18 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <button
           type="button"
+          onClick={() => setMode({ kind: 'examSetup' })}
+          disabled={quizzes.length === 0}
+          className="duo-btn sm:col-span-2 flex items-center gap-3 p-4 rounded-3xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-white text-right cursor-pointer disabled:opacity-50"
+        >
+          <Play className="w-7 h-7 shrink-0" />
+          <span>
+            <span className="block text-base font-black">بدء اختبار</span>
+            <span className="block text-[11px] font-bold opacity-90">اختر نموذجاً أو امزج عدة نماذج، وحدد العدد والوقت</span>
+          </span>
+        </button>
+        <button
+          type="button"
           onClick={() => setMode({ kind: 'edit', editingId: null, title: '', questions: [], warnings: [] })}
           className="duo-btn flex items-center gap-3 p-4 rounded-3xl bg-[#58CC02] border-2 border-[#46A302] border-b-4 text-white text-right cursor-pointer"
         >
@@ -248,6 +390,57 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           </span>
         </button>
       </div>
+
+      {session && (
+        <div className="rounded-2xl border-2 border-[#A560E8] bg-[#F5ECFF] p-3 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-extrabold text-[#5C1A99]">
+            {session.finished
+              ? 'لديك نتيجة اختبار لم تُحفظ بعد.'
+              : `لديك اختبار غير مكتمل (${session.answers.filter((a) => a >= 0).length} من ${session.questions.length} مُجاب) — تابع من حيث توقفت.`}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                session.finished
+                  ? setMode({
+                      kind: 'examResult',
+                      attemptId: newAttemptId(),
+                      settings: session.settings,
+                      questions: session.questions,
+                      answers: session.answers,
+                      durationSec: Math.round(session.elapsedMs / 1000),
+                      finishedAt: session.updatedAt,
+                    })
+                  : setMode({
+                      kind: 'examRun',
+                      settings: session.settings,
+                      questions: session.questions,
+                      initial: {
+                        answers: session.answers,
+                        index: session.index,
+                        remainingMs: session.remainingMs,
+                        elapsedMs: session.elapsedMs,
+                      },
+                    })
+              }
+              className="px-3 py-1.5 rounded-xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-xs font-black text-white cursor-pointer"
+            >
+              {session.finished ? 'عرض وحفظ النتيجة' : 'متابعة الاختبار'}
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await deleteSessionSnapshot('exam_session');
+                setSession(null);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] cursor-pointer"
+            >
+              تجاهل
+            </button>
+          </div>
+        </div>
+      )}
 
       {draft && (
         <div className="rounded-2xl border-2 border-[#FFC800] bg-[#FFF4CC] p-3 flex flex-wrap items-center justify-between gap-2">
@@ -330,6 +523,61 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           ))}
         </div>
       )}
+
+      {attempts.length > 0 && (
+        <div className="flex flex-col gap-3 mt-2">
+          <h3 className="flex items-center gap-2 text-base font-black text-[#3C3C3C]">
+            <History className="w-5 h-5 text-[#8938D6]" /> محاولاتي السابقة
+          </h3>
+          {attempts.slice(0, 30).map((a) => {
+            const pct = a.total > 0 ? Math.round((a.score / a.total) * 100) : 0;
+            const tone = pct >= 85 ? 'text-[#46A302]' : pct >= 50 ? 'text-[#8A6500]' : 'text-[#EA2B2B]';
+            return (
+              <div key={a.id} className={`${card} p-4 flex flex-col gap-2`}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="text-sm font-black text-[#3C3C3C] truncate">{a.title}</h4>
+                    <p className="text-[11px] font-extrabold text-[#777777]">
+                      {new Date(a.finishedAt).toLocaleString('ar')} · {describeTiming(a.settings)} · {formatDuration(a.durationSec)}
+                    </p>
+                  </div>
+                  <div dir="ltr" className={`text-lg font-black font-latin shrink-0 ${tone}`}>
+                    {a.score}/{a.total} <span className="text-xs">({pct}%)</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setMode({ kind: 'attempt', attempt: a })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F5ECFF] border-2 border-[#A560E8] text-xs font-black text-[#8938D6] cursor-pointer">
+                    <FolderOpen className="w-3.5 h-3.5" /> مراجعة
+                  </button>
+                  {confirmDeleteAttemptId === a.id ? (
+                    <span className="flex items-center gap-2 text-xs font-black">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await deleteAttempt(profile.uid, a.id);
+                          } catch {
+                            setNotice('تعذر حذف المحاولة، حاول مرة أخرى.');
+                          }
+                          setConfirmDeleteAttemptId(null);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-[#FF4B4B] text-white cursor-pointer"
+                      >
+                        تأكيد الحذف
+                      </button>
+                      <button type="button" onClick={() => setConfirmDeleteAttemptId(null)} className="text-[#777777] cursor-pointer">إلغاء</button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => setConfirmDeleteAttemptId(a.id)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] cursor-pointer">
+                      <Trash2 className="w-3.5 h-3.5" /> حذف
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };
@@ -404,6 +652,27 @@ const ImportPanel: React.FC<{
             {IMPORT_PROMPT}
           </pre>
         )}
+      </div>
+
+      <div className={`${card} p-4 flex flex-col gap-2`}>
+        <h3 className="text-sm font-black text-[#3C3C3C]">كيف تُضاف الرسوم وتُحدد الإجابة الصحيحة؟</h3>
+        <ul className="text-xs font-bold text-[#555] leading-relaxed list-disc pr-5 flex flex-col gap-1">
+          <li>كل الأسئلة باختيارات: <span className="font-latin">choices</span> مصفوفة الخيارات، و <span className="font-latin">correctIndex</span> رقم الخيار الصحيح ويبدأ من 0 (0 الأول، 1 الثاني، 2 الثالث، 3 الرابع).</li>
+          <li>لإضافة رسم لسؤال ضع داخله الحقل <span className="font-latin">chart</span> وسيرسمه البرنامج من القيم: <span className="font-latin">type</span> = <span className="font-latin">bar</span> أعمدة، <span className="font-latin">hbar</span> أعمدة أفقية، <span className="font-latin">line</span> خطي، <span className="font-latin">pie</span> دائري.</li>
+          <li><span className="font-latin">labels</span> هي التسميات، و <span className="font-latin">series</span> فيها القيم (أرقام بلا علامات اقتباس) بنفس عدد التسميات. للمقارنة أضف حتى 3 سلاسل (ما عدا الدائري: سلسلة واحدة).</li>
+          <li>اجعل جواب السؤال قابلاً للحساب من بيانات الرسم، ثم ضع رقم الخيار الصحيح في <span className="font-latin">correctIndex</span>.</li>
+          <li>بعد الاستيراد تستطيع تعديل الرسم والقيم والإجابة الصحيحة من شاشة المراجعة.</li>
+        </ul>
+        <button
+          type="button"
+          onClick={() => {
+            setRaw(EXAMPLE_JSON);
+            setError(null);
+          }}
+          className="self-start text-xs font-black text-[#1899D6] cursor-pointer"
+        >
+          تجربة مثال كامل (أعمدة + دائري + خطي)
+        </button>
       </div>
 
       <div className={`${card} p-4 flex flex-col gap-3`}>

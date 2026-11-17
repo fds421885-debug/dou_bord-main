@@ -3,6 +3,9 @@ import type {
   ExplainLayer,
   MyQuiz,
   QuizQuestion,
+  QuizAttempt,
+  ExamSettings,
+  ExamQuestion,
   InteractiveSlide,
   Participant,
   Question,
@@ -82,12 +85,36 @@ export interface StoredMyQuizDraft {
   updatedAt: number;
 }
 
+export interface StoredQuizAttemptsSnapshot {
+  key: 'quiz_attempts';
+  ownerId: string;
+  attempts: QuizAttempt[];
+  updatedAt: number;
+}
+
+/** اختبار جارٍ (أو منتهٍ ولم تُحفظ نتيجته بعد) — يُستكمل من حيث توقف */
+export interface StoredExamSession {
+  key: 'exam_session';
+  ownerId: string;
+  settings: ExamSettings;
+  questions: ExamQuestion[];
+  answers: number[];
+  index: number;
+  /** الوقت المتبقي بالملي ثانية (للكلي: كل الاختبار، لكل سؤال: السؤال الحالي) */
+  remainingMs: number;
+  elapsedMs: number;
+  finished: boolean;
+  updatedAt: number;
+}
+
 export type SessionSnapshotRecord =
   | StoredUserProfileSnapshot
   | StoredSavedTestsSnapshot
   | StoredRoomSnapshot
   | StoredMyQuizzesSnapshot
-  | StoredMyQuizDraft;
+  | StoredMyQuizDraft
+  | StoredQuizAttemptsSnapshot
+  | StoredExamSession;
 
 const DB_NAME = 'duoboard_local_store';
 const DB_VERSION = 2;

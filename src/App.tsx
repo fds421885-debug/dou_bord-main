@@ -1,4 +1,4 @@
-import React, { Component, useEffect, useState } from 'react';
+import React, { Component, useCallback, useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   collection,
@@ -30,6 +30,7 @@ import {
   consumeConsolidatedProjectNotice,
   CURRENT_DB_EPOCH,
   db,
+  defaultFirebaseConfig,
   firebaseTargetKey,
   getPendingRejoinRoom,
   getPreviousFirebaseConfigs,
@@ -40,9 +41,12 @@ import {
   isSameFirebaseTarget,
   justConsolidatedFrom,
   OperationType,
+  resetToDefaultFirebaseConfig,
   sanitizeFirebaseConfig,
   subscribeQuotaError,
   UPGRADE_FIRESTORE_URL,
+  type FirebaseAppConfig,
+  type ServerPlatformPointer,
 } from './firebase';
 import {
   syncPersonalAccountFromPreviousDbs,
@@ -218,7 +222,183 @@ export default function App() {
     });
   }, []);
 
-  // Watch platform/migration pointer safely BOTH pre-login and post-login so all old/new users switch automatically
+  const activeRoomIdRef = useRef(activeRoomId);
+  activeRoomIdRef.current = activeRoomId;
+  const firebaseUserRef = useRef(firebaseUser);
+  firebaseUserRef.current = firebaseUser;
+  const switchingInProgressRef = useRef(false);
+
+  const applyRemotePlatformPointer = useCallback(
+    (incoming: {
+      config: FirebaseAppConfig;
+      resetToDefault?: boolean;
+      migratedRoomId?: string | null;
+      previousConfigs?: FirebaseAppConfig[];
+      revision?: string | number;
+    }) => {
+      if (justConsolidatedFrom || switchingInProgressRef.current) return;
+      const ptrCfg = sanitizeFirebaseConfig(incoming.config);
+      if (!ptrCfg) return;
+
+      const targetKey = firebaseTargetKey(ptrCfg);
+      const wantsDefault =
+        Boolean(incoming.resetToDefault) || isSameFirebaseTarget(ptrCfg, defaultFirebaseConfig);
+
+      // Already on requested DB
+      if (wantsDefault && !isCustomFirebaseConfig) return;
+      if (!wantsDefault && isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
+
+      // Do not interrupt the initiating device while its migration summary modal is on screen
+      try {
+        if (sessionStorage.getItem('duoboard_self_migrated_target') === targetKey) {
+          return;
+        }
+      } catch {
+        // Ignore sessionStorage restrictions
+      }
+
+      const switchRevision = String(incoming.revision || CURRENT_DB_EPOCH);
+      const switchToken = `${targetKey}::${wantsDefault ? 'default' : 'custom'}::${switchRevision}`;
+      try {
+        if (sessionStorage.getItem('duoboard_auto_switched_to') === switchToken) {
+          return;
+        }
+        sessionStorage.setItem('duoboard_auto_switched_to', switchToken);
+      } catch {
+        // Ignore storage restrictions
+      }
+
+      switchingInProgressRef.current = true;
+      setAutoSwitchNotice(wantsDefault ? defaultFirebaseConfig.projectId : ptrCfg.projectId);
+
+      const currentUserPresent = Boolean(firebaseUserRef.current);
+      const currentRoomPresent = activeRoomIdRef.current;
+      const roomToKeep = wantsDefault
+        ? null
+        : currentRoomPresent ||
+          (currentUserPresent && incoming.migratedRoomId ? incoming.migratedRoomId : null);
+
+      window.setTimeout(async () => {
+        try {
+          await signOut(auth);
+        } catch {
+          // Ignore signOut errors on detached DB
+        }
+
+        if (wantsDefault) {
+          resetToDefaultFirebaseConfig();
+          window.location.replace(buildCleanPrimaryUrl());
+          return;
+        }
+
+        activateCustomFirebaseConfig(
+          ptrCfg,
+          roomToKeep,
+          Array.isArray(incoming.previousConfigs) ? incoming.previousConfigs : []
+        );
+        const url = new URL(window.location.href);
+        url.searchParams.delete('fb');
+        if (roomToKeep) {
+          url.searchParams.set('room', roomToKeep);
+        } else {
+          url.searchParams.delete('room');
+        }
+        window.location.replace(url.toString());
+      }, 450);
+    },
+    []
+  );
+
+  // Clear self-migration marker once reloaded onto the migrated DB
+  useEffect(() => {
+    try {
+      const marker = sessionStorage.getItem('duoboard_self_migrated_target');
+      if (marker && marker === firebaseTargetKey(activeFirebaseConfig)) {
+        sessionStorage.removeItem('duoboard_self_migrated_target');
+      }
+    } catch {
+      // Ignore sessionStorage errors
+    }
+  }, []);
+
+  // Watch real-time server SSE stream + focus/poll so ALL open devices switch immediately (pre-login or active)
+  useEffect(() => {
+    if (justConsolidatedFrom) return;
+    let disposed = false;
+    let es: EventSource | null = null;
+
+    const handleServerPayload = (ptr: ServerPlatformPointer | null | undefined) => {
+      if (!ptr || !ptr.config || disposed) return;
+      applyRemotePlatformPointer({
+        config: ptr.config,
+        resetToDefault: ptr.resetToDefault,
+        migratedRoomId: ptr.migratedRoomId,
+        previousConfigs: ptr.previousConfigs,
+        revision: ptr.updatedAt || ptr.migrationEpoch || CURRENT_DB_EPOCH,
+      });
+    };
+
+    const checkServerPointer = async () => {
+      if (disposed) return;
+      try {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 2000);
+        const resp = await fetch('/api/platform-db', {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        window.clearTimeout(timer);
+        if (!resp.ok) return;
+        const data = (await resp.json()) as { pointer?: ServerPlatformPointer | null };
+        handleServerPayload(data?.pointer);
+      } catch {
+        // Static hosting or temporary offline — handled gracefully
+      }
+    };
+
+    try {
+      es = new EventSource('/api/platform-db/stream');
+      es.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data) as {
+            type?: string;
+            pointer?: ServerPlatformPointer | null;
+          };
+          handleServerPayload(msg?.pointer);
+        } catch {
+          // Ignore malformed SSE payload
+        }
+      };
+      es.onerror = () => {
+        // Browser auto-reconnects; fallback poll also active
+      };
+    } catch {
+      // EventSource unsupported or static host
+    }
+
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        void checkServerPointer();
+      }
+    };
+    window.addEventListener('focus', onVisibilityOrFocus);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+    const pollTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void checkServerPointer();
+      }
+    }, 15_000);
+
+    return () => {
+      disposed = true;
+      es?.close();
+      window.removeEventListener('focus', onVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+      window.clearInterval(pollTimer);
+    };
+  }, [applyRemotePlatformPointer]);
+
+  // Also watch Firestore platform/migration pointer as static-host fallback (both pre-login and post-login)
   useEffect(() => {
     if (justConsolidatedFrom) return;
     const unsub = onSnapshot(
@@ -226,48 +406,23 @@ export default function App() {
       (snap) => {
         if (!snap.exists()) return;
         const ptr = snap.data() as PlatformMigrationPointer;
-        if (ptr.migrationEpoch !== CURRENT_DB_EPOCH) return;
+        if (ptr.migrationEpoch && ptr.migrationEpoch !== CURRENT_DB_EPOCH) return;
         const ptrCfg = sanitizeFirebaseConfig(ptr);
-        if (!ptrCfg || isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
-
-        const targetKey = firebaseTargetKey(ptrCfg);
-        try {
-          if (sessionStorage.getItem('duoboard_auto_switched_to') === targetKey) {
-            return;
-          }
-          sessionStorage.setItem('duoboard_auto_switched_to', targetKey);
-        } catch {
-          // Ignore storage restrictions
-        }
-
-        setAutoSwitchNotice(ptrCfg.projectId);
-        window.setTimeout(async () => {
-          try {
-            await signOut(auth);
-          } catch {
-            // Ignore signOut errors on detached DB
-          }
-          activateCustomFirebaseConfig(
-            ptrCfg,
-            ptr.migratedRoomId || activeRoomId || null,
-            Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : []
-          );
-          const url = new URL(window.location.href);
-          url.searchParams.delete('fb');
-          if (ptr.migratedRoomId) {
-            url.searchParams.set('room', ptr.migratedRoomId);
-          } else {
-            url.searchParams.delete('room');
-          }
-          window.location.replace(url.toString());
-        }, 700);
+        if (!ptrCfg) return;
+        applyRemotePlatformPointer({
+          config: ptrCfg,
+          resetToDefault: isSameFirebaseTarget(ptrCfg, defaultFirebaseConfig),
+          migratedRoomId: ptr.migratedRoomId,
+          previousConfigs: Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : [],
+          revision: getTimestampMillis(ptr.updatedAt) || CURRENT_DB_EPOCH,
+        });
       },
       () => {
         // Silent fallback when unauthenticated on older rules or quota-limited DB
       }
     );
     return () => unsub();
-  }, [firebaseUser?.uid, firebaseUser?.emailVerified]);
+  }, [applyRemotePlatformPointer, firebaseUser?.uid, firebaseUser?.emailVerified]);
 
   const handleInteractivePersonalSync = async () => {
     if (!firebaseUser) return;
@@ -656,6 +811,15 @@ export default function App() {
             </div>
           </div>
         </div>
+        {autoSwitchNotice && (
+          <DuoLoading
+            variant="overlay"
+            title="تم اعتماد قاعدة بيانات جديدة للمنصة!"
+            subtitle={`جاري تحويلك تلقائياً إلى المشروع (${autoSwitchNotice}) لاستكمال العمل...`}
+            percent={100}
+            accent="blue"
+          />
+        )}
         {migrationModal}
       </>
     );
@@ -725,6 +889,15 @@ export default function App() {
             subtitle={personalSyncProgress.detail || 'يرجى الانتظار لحين اكتمال المزامنة...'}
             percent={personalSyncProgress.percent}
             accent="purple"
+          />
+        )}
+        {autoSwitchNotice && (
+          <DuoLoading
+            variant="overlay"
+            title="تم اعتماد قاعدة بيانات جديدة للمنصة!"
+            subtitle={`جاري تحويلك تلقائياً إلى المشروع (${autoSwitchNotice}) لتسجيل الدخول ومتابعة العمل...`}
+            percent={100}
+            accent="blue"
           />
         )}
         {migrationModal}

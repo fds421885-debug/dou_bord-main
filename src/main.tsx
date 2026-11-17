@@ -1,5 +1,11 @@
-import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
+import { createRoot } from 'react-dom/client';
+import { syncPlatformDbBeforeBoot } from './firebaseConfigBootstrap';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(<App />);
+async function bootstrap() {
+  await syncPlatformDbBeforeBoot();
+  const { default: App } = await import('./App.tsx');
+  createRoot(document.getElementById('root')!).render(<App />);
+}
+
+void bootstrap();

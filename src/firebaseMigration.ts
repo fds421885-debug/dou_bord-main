@@ -107,6 +107,7 @@ export interface MigrationResult {
   deletedOldDocsCount: number;
   oldAuthSignedOut: boolean;
   platformPointerUpdated: boolean;
+  serverPointerUpdated: boolean;
 }
 
 export interface PlatformMigrationPointer {
@@ -251,6 +252,113 @@ export function getOrInitFirebaseApp(config: FirebaseAppConfig): FirebaseApp {
     return existing;
   }
   return initializeApp(config, appName);
+}
+
+export async function publishServerPlatformPointer(params: {
+  config: FirebaseAppConfig;
+  idToken: string;
+  tokenProjectId: string;
+  tokenApiKey: string;
+  resetToDefault?: boolean;
+  migratedRoomId?: string | null;
+  previousConfigs?: FirebaseAppConfig[];
+}): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch('/api/platform-db', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.idToken}`,
+      },
+      body: JSON.stringify({
+        config: params.config,
+        tokenProjectId: params.tokenProjectId,
+        tokenApiKey: params.tokenApiKey,
+        resetToDefault: Boolean(params.resetToDefault),
+        migratedRoomId: params.migratedRoomId || null,
+        migrationEpoch: CURRENT_DB_EPOCH,
+        previousConfigs: params.previousConfigs ?? [],
+      }),
+      signal: controller.signal,
+    });
+    window.clearTimeout(timer);
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function publishServerResetToDefault(currentUser: User | null): Promise<boolean> {
+  try {
+    sessionStorage.setItem(
+      'duoboard_self_migrated_target',
+      firebaseTargetKey(defaultFirebaseConfig)
+    );
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+
+  const prevChain = [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]
+    .filter(
+      (c, idx, arr) =>
+        !isSameFirebaseTarget(c, defaultFirebaseConfig) &&
+        arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
+    )
+    .slice(0, 6);
+
+  if (!currentUser) {
+    return false;
+  }
+
+  // Update Firestore pointer on current custom DB if possible (for static-host fallback)
+  try {
+    await withTimeout(
+      setDoc(doc(sourceDb, 'platform', 'migration'), {
+        id: 'migration',
+        projectId: defaultFirebaseConfig.projectId,
+        apiKey: defaultFirebaseConfig.apiKey,
+        authDomain: defaultFirebaseConfig.authDomain,
+        appId: defaultFirebaseConfig.appId,
+        ...(defaultFirebaseConfig.storageBucket
+          ? { storageBucket: defaultFirebaseConfig.storageBucket }
+          : {}),
+        ...(defaultFirebaseConfig.messagingSenderId
+          ? { messagingSenderId: defaultFirebaseConfig.messagingSenderId }
+          : {}),
+        ...(defaultFirebaseConfig.measurementId
+          ? { measurementId: defaultFirebaseConfig.measurementId }
+          : {}),
+        ...(defaultFirebaseConfig.firestoreDatabaseId
+          ? { firestoreDatabaseId: defaultFirebaseConfig.firestoreDatabaseId }
+          : {}),
+        migratedBy: currentUser.uid,
+        migratedByName: 'مشرف المنصة',
+        migrationEpoch: CURRENT_DB_EPOCH,
+        previousConfigs: prevChain,
+        updatedAt: serverTimestamp(),
+      }),
+      2500
+    );
+  } catch {
+    // Ignore if rules/quota restrict
+  }
+
+  try {
+    const idToken = await currentUser.getIdToken();
+    const ok = await publishServerPlatformPointer({
+      config: defaultFirebaseConfig,
+      idToken,
+      tokenProjectId: activeFirebaseConfig.projectId,
+      tokenApiKey: activeFirebaseConfig.apiKey,
+      resetToDefault: true,
+      previousConfigs: prevChain,
+    });
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
@@ -2150,6 +2258,31 @@ export async function runFirebaseMigration(params: {
       updatedAt: serverTimestamp(),
     });
 
+    // Mark this tab as the initiator so it shows the 100% summary instead of mid-modal auto-reloading
+    try {
+      sessionStorage.setItem(
+        'duoboard_self_migrated_target',
+        firebaseTargetKey(targetConfig)
+      );
+    } catch {
+      // Ignore sessionStorage restrictions
+    }
+
+    let serverPointerUpdated = false;
+    try {
+      const idToken = await targetUser.getIdToken();
+      serverPointerUpdated = await publishServerPlatformPointer({
+        config: targetConfig,
+        idToken,
+        tokenProjectId: targetConfig.projectId,
+        tokenApiKey: targetConfig.apiKey,
+        migratedRoomId,
+        previousConfigs: priorChain as FirebaseAppConfig[],
+      });
+    } catch {
+      // Fallback gracefully on static hosts without backend server
+    }
+
     let platformPointerUpdated = false;
     try {
       await setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid));
@@ -2267,6 +2400,7 @@ export async function runFirebaseMigration(params: {
       deletedOldDocsCount,
       oldAuthSignedOut,
       platformPointerUpdated,
+      serverPointerUpdated,
     };
   } catch (err) {
     throw classifyMigrationError(err, targetConfig.projectId);

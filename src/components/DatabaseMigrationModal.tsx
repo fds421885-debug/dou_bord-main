@@ -14,9 +14,11 @@ import {
   ShieldAlert,
   X,
 } from 'lucide-react';
+import { signOut } from 'firebase/auth';
 import firestoreRulesRaw from '../../firestore.rules?raw';
 import {
   activeProjectId,
+  auth,
   buildCleanPrimaryUrl,
   defaultFirebaseConfig,
   isCustomFirebaseConfig,
@@ -25,6 +27,7 @@ import {
 import {
   MigrationNeedsSetupError,
   parseFirebaseConfigSnippet,
+  publishServerResetToDefault,
   runFirebaseMigration,
   type MigrationProgress,
   type MigrationResult,
@@ -169,6 +172,11 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
   };
 
   const handleActivateAndReload = () => {
+    try {
+      sessionStorage.removeItem('duoboard_self_migrated_target');
+    } catch {
+      // Ignore storage errors
+    }
     if (result?.migratedRoomId) {
       const url = new URL(window.location.href);
       url.searchParams.delete('fb');
@@ -179,9 +187,15 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     window.location.replace(buildCleanPrimaryUrl());
   };
 
-  const handleResetToDefault = () => {
-    resetToDefaultFirebaseConfig();
-    window.location.replace(buildCleanPrimaryUrl());
+  const handleResetToDefault = async () => {
+    setMigrating(true);
+    try {
+      await publishServerResetToDefault(auth.currentUser);
+      await signOut(auth).catch(() => {});
+    } finally {
+      resetToDefaultFirebaseConfig();
+      window.location.replace(buildCleanPrimaryUrl());
+    }
   };
 
   return (
@@ -360,9 +374,11 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                 </li>
                 <li className="px-3 py-2 rounded-xl bg-[#D7FFB8]/80 border border-[#58CC02] text-[#46A302] sm:col-span-2">
                   🌐{' '}
-                  {result.platformPointerUpdated
-                    ? 'تم اعتماد القاعدة الجديدة رسمياً لجميع مستخدمي المنصة من كل القواعد (سينتقل الطلاب والمشرفون تلقائياً سواء قبل أو بعد تسجيل الدخول).'
-                    : 'أصبحت هذه القاعدة معتمدة لديك بالكامل، وشارك الرابط أدناه مع بقية الطلاب والمشرفين لتحويلهم فوراً.'}
+                  {result.serverPointerUpdated
+                    ? 'تم اعتماد القاعدة الجديدة رسمياً على الخادم لجميع الأجهزة: أي جهاز مفتوح الآن سينتقل فوراً، وأي مستخدم جديد سيدخل مباشرة على القاعدة الجديدة في تسجيل الدخول والبيانات!'
+                    : result.platformPointerUpdated
+                    ? 'تم اعتماد القاعدة الجديدة عبر مؤشر القاعدة: الأجهزة المتصلة بالقاعدة السابقة ستنتقل تلقائياً، وللأجهزة الجديدة تماماً على الاستضافة الثابتة يُنصح بمشاركة الرابط أدناه.'
+                    : 'أصبحت هذه القاعدة معتمدة لديك بالكامل. إذا وصلت القاعدة القديمة للحد اليومي أو لم يدعم المضيف مزامنة الخادم، شارك الرابط أدناه مع بقية الطلاب لتحويلهم فوراً.'}
                 </li>
               </ul>
             </div>
@@ -649,7 +665,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                 <button
                   type="button"
                   disabled={migrating}
-                  onClick={handleResetToDefault}
+                  onClick={() => void handleResetToDefault()}
                   className="duo-btn flex items-center justify-center gap-1.5 px-4 py-3.5 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs sm:text-sm font-black text-[#777777] hover:text-[#3C3C3C] cursor-pointer"
                 >
                   <RotateCcw className="w-4 h-4" />

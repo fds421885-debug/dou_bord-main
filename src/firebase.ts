@@ -26,6 +26,10 @@ const CUSTOM_CONFIG_STORAGE_KEY = 'duoboard_custom_firebase_config_v1';
 const PREV_CONFIGS_STORAGE_KEY = 'duoboard_prev_firebase_configs_v1';
 const PENDING_REJOIN_ROOM_KEY = 'duoboard_pending_rejoin_room';
 const SYNCED_SOURCES_KEY_PREFIX = 'duoboard_synced_sources_v1_';
+const ACTIVE_ROOM_STORAGE_PREFIX = 'duoboard_active_room_';
+const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
+const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
+export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18';
 
 function toBase64Url(jsonText: string): string {
   const bytes = new TextEncoder().encode(jsonText);
@@ -110,6 +114,7 @@ export function encodeCompactFirebaseConfig(
     authDomain: config.authDomain,
     projectId: config.projectId,
     appId: config.appId,
+    epoch: CURRENT_DB_EPOCH,
   };
   if (config.storageBucket) payload.storageBucket = config.storageBucket;
   if (config.messagingSenderId) {
@@ -121,16 +126,29 @@ export function encodeCompactFirebaseConfig(
   return toBase64Url(JSON.stringify(payload));
 }
 
-export function decodeCompactFirebaseConfig(
-  encoded: string
-): FirebaseAppConfig | null {
+function decodeCompactFirebasePayload(encoded: string): {
+  config: FirebaseAppConfig;
+  epoch: string | null;
+} | null {
   try {
     const json = fromBase64Url(encoded.trim());
     const parsed = JSON.parse(json) as unknown;
-    return sanitizeFirebaseConfig(parsed);
+    const config = sanitizeFirebaseConfig(parsed);
+    if (!config) return null;
+    const rawEpoch =
+      parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).epoch === 'string'
+        ? ((parsed as Record<string, unknown>).epoch as string).trim()
+        : null;
+    return { config, epoch: rawEpoch || null };
   } catch {
     return null;
   }
+}
+
+export function decodeCompactFirebaseConfig(
+  encoded: string
+): FirebaseAppConfig | null {
+  return decodeCompactFirebasePayload(encoded)?.config ?? null;
 }
 
 export function isSameFirebaseTarget(
@@ -211,15 +229,105 @@ export function markSourceKeySynced(uid: string, sourceKey: string): void {
   }
 }
 
+function clearStaleRoomAndSessionKeys(): void {
+  try {
+    localStorage.removeItem(PENDING_REJOIN_ROOM_KEY);
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(ACTIVE_ROOM_STORAGE_PREFIX)) {
+        toRemove.push(k);
+      }
+    }
+    toRemove.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    // Ignore localStorage errors
+  }
+  try {
+    sessionStorage.removeItem('duoboard_auto_switched_to');
+  } catch {
+    // Ignore sessionStorage errors
+  }
+}
+
 function resolveInitialConfig(): {
   config: FirebaseAppConfig;
   isCustom: boolean;
+  justConsolidatedFrom: string | null;
 } {
   if (typeof window !== 'undefined') {
     try {
       const url = new URL(window.location.href);
       const fbParam = url.searchParams.get('fb');
       const roomParam = url.searchParams.get('room');
+      const savedEpoch = localStorage.getItem(DB_EPOCH_STORAGE_KEY);
+      const savedRaw = localStorage.getItem(CUSTOM_CONFIG_STORAGE_KEY);
+      let savedCustom: FirebaseAppConfig | null = null;
+      if (savedRaw) {
+        try {
+          const parsedSaved = sanitizeFirebaseConfig(JSON.parse(savedRaw));
+          if (parsedSaved && !isSameFirebaseTarget(parsedSaved, defaultFirebaseConfig)) {
+            savedCustom = parsedSaved;
+          }
+        } catch {
+          savedCustom = null;
+        }
+      }
+
+      const decodedPayload = fbParam ? decodeCompactFirebasePayload(fbParam) : null;
+      const isNewEpochLink = decodedPayload?.epoch === CURRENT_DB_EPOCH;
+      const legacyUrlCustom =
+        decodedPayload &&
+        !isNewEpochLink &&
+        !isSameFirebaseTarget(decodedPayload.config, defaultFirebaseConfig)
+          ? decodedPayload.config
+          : null;
+
+      // Consolidate anyone still on a custom database under the old system back to the primary database
+      if (savedEpoch !== CURRENT_DB_EPOCH || legacyUrlCustom) {
+        localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+
+        if (!isNewEpochLink && (savedCustom || legacyUrlCustom)) {
+          const legacyList: FirebaseAppConfig[] = [];
+          if (savedCustom) legacyList.push(savedCustom);
+          if (legacyUrlCustom) legacyList.push(legacyUrlCustom);
+
+          savePreviousFirebaseConfigs(
+            [...legacyList, ...getPreviousFirebaseConfigs()],
+            defaultFirebaseConfig
+          );
+          localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
+          clearStaleRoomAndSessionKeys();
+
+          let urlChanged = false;
+          if (url.searchParams.has('fb')) {
+            url.searchParams.delete('fb');
+            urlChanged = true;
+          }
+          if (url.searchParams.has('room')) {
+            url.searchParams.delete('room');
+            urlChanged = true;
+          }
+          if (urlChanged) {
+            window.history.replaceState({}, '', url.toString());
+          }
+
+          const consolidatedProject =
+            savedCustom?.projectId || legacyUrlCustom?.projectId || defaultFirebaseConfig.projectId;
+          try {
+            sessionStorage.setItem(CONSOLIDATED_FROM_SESSION_KEY, consolidatedProject);
+          } catch {
+            // Ignore sessionStorage restrictions
+          }
+
+          return {
+            config: defaultFirebaseConfig,
+            isCustom: false,
+            justConsolidatedFrom: consolidatedProject,
+          };
+        }
+      }
+
       if (roomParam && /^[A-Z0-9_-]{4,16}$/i.test(roomParam.trim())) {
         localStorage.setItem(
           PENDING_REJOIN_ROOM_KEY,
@@ -227,50 +335,42 @@ function resolveInitialConfig(): {
         );
       }
 
-      if (fbParam) {
-        const decoded = decodeCompactFirebaseConfig(fbParam);
-        if (decoded) {
-          // Record whatever DB the browser was previously using so personal data can sync across
-          const prevList = getPreviousFirebaseConfigs();
-          try {
-            const priorRaw = localStorage.getItem(CUSTOM_CONFIG_STORAGE_KEY);
-            const priorCfg = priorRaw ? sanitizeFirebaseConfig(JSON.parse(priorRaw)) : null;
-            const outgoing = priorCfg ?? defaultFirebaseConfig;
-            if (!isSameFirebaseTarget(outgoing, decoded)) {
-              savePreviousFirebaseConfigs([outgoing, defaultFirebaseConfig, ...prevList], decoded);
-            }
-          } catch {
-            savePreviousFirebaseConfigs([defaultFirebaseConfig, ...prevList], decoded);
-          }
-
-          if (isSameFirebaseTarget(decoded, defaultFirebaseConfig)) {
-            localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
-          } else {
-            localStorage.setItem(
-              CUSTOM_CONFIG_STORAGE_KEY,
-              JSON.stringify(decoded)
-            );
-          }
-          url.searchParams.delete('fb');
-          window.history.replaceState({}, '', url.toString());
-          const custom = !isSameFirebaseTarget(decoded, defaultFirebaseConfig);
-          return { config: decoded, isCustom: custom };
+      if (decodedPayload && (isNewEpochLink || isSameFirebaseTarget(decodedPayload.config, defaultFirebaseConfig))) {
+        const decoded = decodedPayload.config;
+        const prevList = getPreviousFirebaseConfigs();
+        const outgoing = savedCustom ?? defaultFirebaseConfig;
+        if (!isSameFirebaseTarget(outgoing, decoded)) {
+          savePreviousFirebaseConfigs([outgoing, defaultFirebaseConfig, ...prevList], decoded);
         }
+
+        if (isSameFirebaseTarget(decoded, defaultFirebaseConfig)) {
+          localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
+        } else {
+          localStorage.setItem(
+            CUSTOM_CONFIG_STORAGE_KEY,
+            JSON.stringify(decoded)
+          );
+        }
+        localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+        url.searchParams.delete('fb');
+        window.history.replaceState({}, '', url.toString());
+        const custom = !isSameFirebaseTarget(decoded, defaultFirebaseConfig);
+        return { config: decoded, isCustom: custom, justConsolidatedFrom: null };
       }
 
-      const savedRaw = localStorage.getItem(CUSTOM_CONFIG_STORAGE_KEY);
-      if (savedRaw) {
-        const parsed = sanitizeFirebaseConfig(JSON.parse(savedRaw));
-        if (parsed && !isSameFirebaseTarget(parsed, defaultFirebaseConfig)) {
-          return { config: parsed, isCustom: true };
-        }
+      if (savedCustom) {
+        return { config: savedCustom, isCustom: true, justConsolidatedFrom: null };
       }
     } catch {
       // Ignore URL/storage errors in restricted contexts
     }
   }
 
-  return { config: defaultFirebaseConfig, isCustom: false };
+  return {
+    config: defaultFirebaseConfig,
+    isCustom: false,
+    justConsolidatedFrom: null,
+  };
 }
 
 export function getTargetFirebaseAppName(projectId: string, firestoreDatabaseId?: string): string {
@@ -295,6 +395,33 @@ const resolved = resolveInitialConfig();
 export const activeFirebaseConfig: FirebaseAppConfig = resolved.config;
 export const isCustomFirebaseConfig: boolean = resolved.isCustom;
 export const activeProjectId: string = activeFirebaseConfig.projectId;
+export const justConsolidatedFrom: string | null = resolved.justConsolidatedFrom;
+
+export function consumeConsolidatedProjectNotice(): string | null {
+  try {
+    const val = sessionStorage.getItem(CONSOLIDATED_FROM_SESSION_KEY);
+    if (val) {
+      sessionStorage.removeItem(CONSOLIDATED_FROM_SESSION_KEY);
+      return val;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildCleanPrimaryUrl(): string {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('fb');
+    url.searchParams.delete('room');
+    return url.toString();
+  } catch {
+    return typeof window !== 'undefined'
+      ? `${window.location.origin}${window.location.pathname}`
+      : '/';
+  }
+}
 
 const app = isCustomFirebaseConfig
   ? initializeApp(
@@ -321,6 +448,7 @@ export function activateCustomFirebaseConfig(
   extraPreviousConfigs: FirebaseAppConfig[] = []
 ): void {
   try {
+    localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
     const existingPrev = getPreviousFirebaseConfigs();
     savePreviousFirebaseConfigs(
       [activeFirebaseConfig, defaultFirebaseConfig, ...extraPreviousConfigs, ...existingPrev],
@@ -341,9 +469,11 @@ export function activateCustomFirebaseConfig(
 
 export function resetToDefaultFirebaseConfig(): void {
   try {
+    localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
     const existingPrev = getPreviousFirebaseConfigs();
     savePreviousFirebaseConfigs([activeFirebaseConfig, ...existingPrev], defaultFirebaseConfig);
     localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
+    clearStaleRoomAndSessionKeys();
   } catch {
     // Ignore storage errors
   }

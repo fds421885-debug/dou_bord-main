@@ -17,6 +17,7 @@ import {
 import firestoreRulesRaw from '../../firestore.rules?raw';
 import {
   activeProjectId,
+  buildCleanPrimaryUrl,
   defaultFirebaseConfig,
   isCustomFirebaseConfig,
   resetToDefaultFirebaseConfig,
@@ -178,7 +179,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
 
   const handleResetToDefault = () => {
     resetToDefaultFirebaseConfig();
-    window.location.reload();
+    window.location.replace(buildCleanPrimaryUrl());
   };
 
   return (

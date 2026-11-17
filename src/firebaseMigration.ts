@@ -20,6 +20,7 @@ import {
   activeFirebaseConfig,
   auth as sourceAuth,
   createFirestoreInstance,
+  CURRENT_DB_EPOCH,
   db as sourceDb,
   decodeCompactFirebaseConfig,
   encodeCompactFirebaseConfig,
@@ -113,6 +114,7 @@ export interface PlatformMigrationPointer {
   migratedBy: string;
   migratedByName: string;
   migratedRoomId?: string;
+  migrationEpoch?: string;
   previousConfigs?: FirebaseAppConfig[];
   updatedAt?: unknown;
 }
@@ -1738,6 +1740,7 @@ export async function runFirebaseMigration(params: {
         120
       ),
       ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
+      migrationEpoch: CURRENT_DB_EPOCH,
       previousConfigs: priorChain,
       updatedAt: serverTimestamp(),
     });

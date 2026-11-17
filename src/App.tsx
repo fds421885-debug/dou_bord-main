@@ -25,7 +25,10 @@ import {
   activeFirebaseConfig,
   activeProjectId,
   auth,
+  buildCleanPrimaryUrl,
   clearPendingRejoinRoom,
+  consumeConsolidatedProjectNotice,
+  CURRENT_DB_EPOCH,
   db,
   firebaseTargetKey,
   getPendingRejoinRoom,
@@ -35,6 +38,7 @@ import {
   isCustomFirebaseConfig,
   isQuadNameValid,
   isSameFirebaseTarget,
+  justConsolidatedFrom,
   OperationType,
   sanitizeFirebaseConfig,
   subscribeQuotaError,
@@ -179,6 +183,34 @@ export default function App() {
     useState<MigrationProgress | null>(null);
   const [needsInteractiveSync, setNeedsInteractiveSync] = useState<boolean>(false);
   const [syncSuccessNotice, setSyncSuccessNotice] = useState<string | null>(null);
+  const [consolidatedNoticeProject, setConsolidatedNoticeProject] = useState<
+    string | null
+  >(() => (justConsolidatedFrom ? null : consumeConsolidatedProjectNotice()));
+
+  useEffect(() => {
+    if (!justConsolidatedFrom) return;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      if (cancelled) return;
+      try {
+        if ('caches' in window) {
+          const keys = await window.caches.keys();
+          await Promise.all(keys.map((k) => window.caches.delete(k)));
+        }
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((r) => r.update().catch(() => undefined)));
+        }
+      } catch {
+        // Ignore cache or SW errors in restricted browsers
+      }
+      window.location.replace(buildCleanPrimaryUrl());
+    }, 950);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     return subscribeQuotaError(() => {
@@ -188,12 +220,13 @@ export default function App() {
 
   // Watch platform/migration pointer safely (never crash on permission-denied on older source rules)
   useEffect(() => {
-    if (!firebaseUser || !firebaseUser.emailVerified) return;
+    if (justConsolidatedFrom || !firebaseUser || !firebaseUser.emailVerified) return;
     const unsub = onSnapshot(
       doc(db, 'platform', 'migration'),
       (snap) => {
         if (!snap.exists()) return;
         const ptr = snap.data() as PlatformMigrationPointer;
+        if (ptr.migrationEpoch !== CURRENT_DB_EPOCH) return;
         const ptrCfg = sanitizeFirebaseConfig(ptr);
         if (!ptrCfg || isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
 
@@ -522,6 +555,18 @@ export default function App() {
     });
   }, [room, participants, profile?.uid]);
 
+  if (justConsolidatedFrom) {
+    return (
+      <DuoLoading
+        variant="fullscreen"
+        title="تم تحديث المنصة وتوحيد قاعدة البيانات!"
+        subtitle={`جاري إرجاعك تلقائياً من القاعدة السابقة (${justConsolidatedFrom}) وإعادة فتح البرنامج على القاعدة الأساسية (${activeProjectId})...`}
+        percent={100}
+        accent="green"
+      />
+    );
+  }
+
   if (!authReady || profileLoading) {
     return (
       <DuoLoading
@@ -614,13 +659,35 @@ export default function App() {
   if (!firebaseUser || !profile) {
     return (
       <AppErrorBoundary onOpenMigration={() => setMigrationModalOpen(true)}>
+        {consolidatedNoticeProject && (
+          <div className="bg-[#D7FFB8] border-b-2 border-[#58CC02] px-4 py-3">
+            <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3 text-[#46A302] text-xs sm:text-sm font-black">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 shrink-0" />
+                <span>
+                  تم تحديث المنصة وإرجاعك إلى القاعدة الأساسية الموحدة (
+                  <span className="font-latin">{activeProjectId}</span>) ليجتمع الجميع في مكان واحد! تم حفظ مرجع قاعدتك السابقة (
+                  <span className="font-latin">{consolidatedNoticeProject}</span>) لاستيراد بياناتك.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConsolidatedNoticeProject(null)}
+                className="p-1 rounded-lg hover:bg-white/60 cursor-pointer"
+                title="إخفاء"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
         {firebaseUser && needsInteractiveSync && (
           <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-4 py-3">
             <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
                 <Database className="w-5 h-5 shrink-0" />
                 <span>
-                  أهلاً بك في القاعدة الجديدة! يمكنك استيراد حسابك واختباراتك من القاعدة السابقة بضغطة واحدة.
+                  أهلاً بك في القاعدة الموحدة! يمكنك استيراد حسابك واختباراتك من القاعدة السابقة بضغطة واحدة.
                 </span>
               </div>
               <button
@@ -802,6 +869,29 @@ export default function App() {
           </div>
         )}
 
+        {consolidatedNoticeProject && !activeRoomId && (
+          <div className="bg-[#D7FFB8] border-b-2 border-[#58CC02] px-3 sm:px-6 py-3">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm font-black text-[#46A302]">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 shrink-0" />
+                <span>
+                  تم تحديث المنصة وإرجاعك تلقائياً إلى القاعدة الأساسية الموحدة (
+                  <span className="font-latin">{activeProjectId}</span>) ليجتمع الجميع في مكان واحد، مع حفظ مرجع قاعدتك السابقة (
+                  <span className="font-latin">{consolidatedNoticeProject}</span>).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConsolidatedNoticeProject(null)}
+                className="p-1.5 rounded-lg hover:bg-white/60 cursor-pointer"
+                title="إخفاء"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Auto-import Personal Data Banner when user arrives on a switched DB with unsynced source DBs */}
         {needsInteractiveSync && !activeRoomId && (
           <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-3 sm:px-6 py-3">
@@ -809,7 +899,7 @@ export default function App() {
               <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
                 <Database className="w-5 h-5 shrink-0" />
                 <span>
-                  تم نقل المنصة إلى قاعدة بيانات جديدة! اضغط لاستيراد اختباراتك المحفوظة ونماذج «اختباراتي» من القاعدة السابقة لحسابك فوراً.
+                  يمكنك استيراد اختباراتك المحفوظة ونماذج «اختباراتي» من القاعدة السابقة لحسابك في القاعدة الحالية بضغطة واحدة.
                 </span>
               </div>
               <div className="flex items-center gap-2">

@@ -99,6 +99,7 @@ const CHOICE_LETTERS = ['أ', 'ب', 'ج', 'د', 'هـ', 'و', 'ز', 'ح'];
 const PER_Q_PRESETS = [15, 30, 45, 60, 90, 120];
 const TOTAL_MIN_PRESETS = [1, 2, 3, 5, 10, 15];
 const DEFAULT_COUNTDOWN_SEC = 3;
+const REVEAL_DELAY_MS = 2200;
 
 export function formatTimeSeconds(ms: number): string {
   const safe = Math.max(0, ms);
@@ -407,23 +408,80 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
   };
 
   // ====================== Live Gameplay State ======================
-  const activeQuestion =
-    activeComp && compQuestions.length > 0
-      ? compQuestions[Math.min(activeComp.currentIndex, compQuestions.length - 1)] ?? null
-      : null;
+  const activeQuestion = useMemo(() => {
+    if (!activeComp || compQuestions.length === 0) return null;
+    const byId = compQuestions.find((q) => q.id === `q_${activeComp.currentIndex}`);
+    if (byId) return byId;
+    return compQuestions[Math.min(activeComp.currentIndex, compQuestions.length - 1)] ?? null;
+  }, [activeComp, compQuestions]);
 
   // Live ticker for countdown & timers (grounded on local snapshot entry to avoid clock-skew bugs)
   const phaseKey = activeComp
     ? `${activeComp.id}:${activeComp.status}:${activeComp.phase}:${activeComp.currentIndex}`
     : 'none';
+  const revealKey =
+    activeComp && activeQuestion
+      ? `${activeComp.id}:${activeComp.currentIndex}:${activeQuestion.id}:${activeQuestion.status}`
+      : 'none';
+
   const phaseEnteredLocalMsRef = useRef<number>(Date.now());
+  const questionOpenedLocalMsRef = useRef<number>(Date.now());
+  const revealEnteredLocalMsRef = useRef<number>(Date.now());
   const lastSoundPhaseRef = useRef<string>('');
+  const playedResolvedSoundRef = useRef<string>('');
+  const frozenSolveMsRef = useRef<Record<string, number>>({});
+  const advancingRef = useRef<string>('');
+  const moveToCountdownRef = useRef<string>('');
+  const timeoutGuardRef = useRef<string>('');
+
   const [tickNowMs, setTickNowMs] = useState<number>(() => Date.now());
+  const [retryNonce, setRetryNonce] = useState<number>(0);
+
+  // Answer confirmation & race feedback
+  const [pendingChoiceIdx, setPendingChoiceIdx] = useState<number | null>(null);
+  const [raceNotice, setRaceNotice] = useState<string | null>(null);
 
   useEffect(() => {
     phaseEnteredLocalMsRef.current = Date.now();
     setTickNowMs(Date.now());
-  }, [phaseKey]);
+    if (activeComp?.phase !== 'countdown') {
+      advancingRef.current = '';
+    }
+    if (activeComp?.phase !== 'question') {
+      moveToCountdownRef.current = '';
+    }
+    timeoutGuardRef.current = '';
+  }, [phaseKey, activeComp?.phase]);
+
+  useEffect(() => {
+    setPendingChoiceIdx(null);
+    setRaceNotice(null);
+    if (activeComp?.phase === 'question' && activeQuestion?.status === 'solving') {
+      questionOpenedLocalMsRef.current = Date.now();
+    }
+  }, [activeComp?.id, activeComp?.currentIndex, activeComp?.phase, activeQuestion?.id]);
+
+  // Capture exact resolve time & play sound once when a question transitions from solving -> resolved
+  useEffect(() => {
+    if (!activeComp || !activeQuestion || activeComp.status !== 'active') return;
+    if (activeQuestion.status === 'solving') return;
+
+    setPendingChoiceIdx(null);
+    revealEnteredLocalMsRef.current = Date.now();
+    setTickNowMs(Date.now());
+
+    if (frozenSolveMsRef.current[activeQuestion.id] === undefined) {
+      frozenSolveMsRef.current[activeQuestion.id] =
+        activeQuestion.status === 'correct' && activeQuestion.winnerTimeMs > 0
+          ? activeQuestion.winnerTimeMs
+          : Math.max(100, Date.now() - questionOpenedLocalMsRef.current);
+    }
+
+    if (playedResolvedSoundRef.current !== activeQuestion.id) {
+      playedResolvedSoundRef.current = activeQuestion.id;
+      playDuoSound(activeQuestion.status === 'correct' ? 'correct' : 'wrong');
+    }
+  }, [activeComp?.id, activeComp?.status, activeQuestion?.id, activeQuestion?.status, activeQuestion?.winnerTimeMs]);
 
   useEffect(() => {
     if (!activeComp || activeComp.status !== 'active') return;
@@ -432,6 +490,15 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
   }, [activeComp?.id, activeComp?.status]);
 
   const phaseElapsedMs = Math.max(0, tickNowMs - phaseEnteredLocalMsRef.current);
+  const questionSolvingMs =
+    activeComp?.phase === 'question' && activeQuestion
+      ? activeQuestion.status === 'solving'
+        ? Math.max(0, tickNowMs - questionOpenedLocalMsRef.current)
+        : frozenSolveMsRef.current[activeQuestion.id] ??
+          (activeQuestion.status === 'correct' && activeQuestion.winnerTimeMs > 0
+            ? activeQuestion.winnerTimeMs
+            : 0)
+      : 0;
 
   const countdownRemainingSec = useMemo(() => {
     if (!activeComp || activeComp.phase !== 'countdown') return 0;
@@ -451,15 +518,102 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     }
   }, [activeComp?.status, activeComp?.phase, phaseKey, countdownRemainingSec]);
 
+  // Transition resolved question (after green/red color reveal) -> countdown phase
+  const runMoveResolvedToCountdown = useCallback(async () => {
+    if (!activeComp || !activeQuestion || activeComp.status !== 'active') return;
+    if (activeComp.phase !== 'question' || activeQuestion.status === 'solving') return;
+
+    const guardKey = `${activeComp.id}:reveal:${activeComp.currentIndex}:${activeQuestion.id}`;
+    if (moveToCountdownRef.current === guardKey) return;
+    moveToCountdownRef.current = guardKey;
+
+    const compRef = doc(db, 'rooms', room.id, 'competitions', activeComp.id);
+    const qRef = doc(
+      db,
+      'rooms',
+      room.id,
+      'competitions',
+      activeComp.id,
+      'questions',
+      activeQuestion.id
+    );
+
+    try {
+      await runTransaction(db, async (tx) => {
+        const [compSnap, qSnap] = await Promise.all([tx.get(compRef), tx.get(qRef)]);
+        if (!compSnap.exists() || !qSnap.exists()) return;
+        const freshComp = compSnap.data() as Competition;
+        const freshQ = qSnap.data() as CompetitionQuestion;
+        if (freshComp.status !== 'active' || freshComp.phase !== 'question') return;
+        if (freshQ.status === 'solving') return;
+
+        const spentMs =
+          freshQ.status === 'correct' && freshQ.winnerTimeMs > 0
+            ? freshQ.winnerTimeMs
+            : Math.max(
+                0,
+                Math.round(
+                  frozenSolveMsRef.current[freshQ.id] ??
+                    Date.now() - questionOpenedLocalMsRef.current
+                )
+              );
+
+        tx.update(compRef, {
+          phase: 'countdown',
+          phaseStartedAt: serverTimestamp(),
+          totalElapsedMs: Math.min(172800000, freshComp.totalElapsedMs + spentMs),
+          updatedAt: serverTimestamp(),
+        });
+      });
+    } catch {
+      moveToCountdownRef.current = '';
+      window.setTimeout(() => setRetryNonce((n) => n + 1), 500);
+    }
+  }, [activeComp, activeQuestion, room.id]);
+
+  // Auto-advance from resolved green/red color reveal -> countdown
+  useEffect(() => {
+    if (!activeComp || !activeQuestion || activeComp.status !== 'active') return;
+    if (activeComp.phase !== 'question' || activeQuestion.status === 'solving') return;
+
+    const canControl = isSupervisor || activeComp.createdBy === profile.uid;
+    const isCompetitor = activeComp.competitorIds.includes(profile.uid);
+    if (!canControl && !isCompetitor) return;
+
+    const alreadyRevealedMs = Math.max(0, Date.now() - revealEnteredLocalMsRef.current);
+    const delayMs = canControl
+      ? Math.max(60, REVEAL_DELAY_MS - alreadyRevealedMs)
+      : Math.max(60, REVEAL_DELAY_MS + 1100 - alreadyRevealedMs);
+
+    const timer = window.setTimeout(() => {
+      void runMoveResolvedToCountdown();
+    }, delayMs);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeComp?.id,
+    activeComp?.status,
+    activeComp?.phase,
+    activeComp?.currentIndex,
+    activeComp?.createdBy,
+    activeQuestion?.id,
+    activeQuestion?.status,
+    revealKey,
+    isSupervisor,
+    profile.uid,
+    retryNonce,
+    runMoveResolvedToCountdown,
+  ]);
+
   // Advance from countdown -> next question OR finished
-  const advancingRef = useRef<string>('');
   const runAdvanceFromCountdown = useCallback(async () => {
     if (!activeComp || activeComp.status !== 'active' || activeComp.phase !== 'countdown') {
       return;
     }
     if (compQuestions.length < activeComp.totalQuestions) return;
 
-    const guardKey = `${activeComp.id}:${activeComp.currentIndex}`;
+    const qStatus = activeQuestion?.status ?? 'solving';
+    const guardKey = `${activeComp.id}:cd:${activeComp.currentIndex}:${qStatus}`;
     if (advancingRef.current === guardKey) return;
     advancingRef.current = guardKey;
 
@@ -512,10 +666,11 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
       });
     } catch {
       advancingRef.current = '';
+      window.setTimeout(() => setRetryNonce((n) => n + 1), 600);
     }
-  }, [activeComp, compQuestions.length, room.id]);
+  }, [activeComp, activeQuestion?.status, compQuestions.length, room.id]);
 
-  // Auto-trigger countdown progression
+  // Auto-trigger countdown progression (scheduled once per countdown phase, never cancelled every 120ms)
   useEffect(() => {
     if (!activeComp || activeComp.status !== 'active' || activeComp.phase !== 'countdown') {
       return;
@@ -527,9 +682,10 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     if (!canControl && !isCompetitor) return;
 
     const countdownMs = (activeComp.countdownSec || DEFAULT_COUNTDOWN_SEC) * 1000;
+    const alreadyElapsed = Math.max(0, Date.now() - phaseEnteredLocalMsRef.current);
     const delayMs = canControl
-      ? Math.max(50, countdownMs - phaseElapsedMs)
-      : Math.max(50, countdownMs + 1400 - phaseElapsedMs);
+      ? Math.max(50, countdownMs - alreadyElapsed)
+      : Math.max(50, countdownMs + 1200 - alreadyElapsed);
 
     const timer = window.setTimeout(() => {
       void runAdvanceFromCountdown();
@@ -543,21 +699,36 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     activeComp?.currentIndex,
     activeComp?.countdownSec,
     activeComp?.totalQuestions,
+    activeComp?.createdBy,
+    activeQuestion?.status,
     compQuestions.length,
     isSupervisor,
     profile.uid,
+    retryNonce,
     runAdvanceFromCountdown,
-    phaseElapsedMs,
   ]);
 
-  // Handle per-question & total competition timer expiry
-  const timeoutGuardRef = useRef<string>('');
+  // Handle per-question timer expiry or supervisor skip (marks question unanswered -> triggers green/red reveal -> advances)
   const handleForceCloseCurrentQuestion = useCallback(
     async (elapsedMsOverride?: number) => {
       if (!activeComp || !activeQuestion || activeComp.status !== 'active') return;
-      const guard = `close:${activeComp.id}:${activeQuestion.id}:${activeComp.phase}`;
+      if (activeComp.phase !== 'question') return;
+
+      // If question is already resolved (during reveal), skip directly to countdown
+      if (activeQuestion.status !== 'solving') {
+        await runMoveResolvedToCountdown();
+        return;
+      }
+
+      const guard = `close:${activeComp.id}:${activeQuestion.id}`;
       if (timeoutGuardRef.current === guard) return;
       timeoutGuardRef.current = guard;
+
+      const spentMs = Math.max(
+        0,
+        Math.round(elapsedMsOverride ?? Date.now() - questionOpenedLocalMsRef.current)
+      );
+      frozenSolveMsRef.current[activeQuestion.id] = spentMs;
 
       const compRef = doc(db, 'rooms', room.id, 'competitions', activeComp.id);
       const qRef = doc(
@@ -576,25 +747,11 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
           if (!compSnap.exists() || !qSnap.exists()) return;
           const freshComp = compSnap.data() as Competition;
           const freshQ = qSnap.data() as CompetitionQuestion;
-          if (freshComp.status !== 'active') return;
-
-          const spentMs = Math.max(
-            0,
-            Math.round(elapsedMsOverride ?? Date.now() - phaseEnteredLocalMsRef.current)
-          );
+          if (freshComp.status !== 'active' || freshComp.phase !== 'question') return;
 
           if (freshQ.status === 'solving') {
             tx.update(qRef, {
               status: 'unanswered',
-              updatedAt: serverTimestamp(),
-            });
-          }
-
-          if (freshComp.phase === 'question') {
-            tx.update(compRef, {
-              phase: 'countdown',
-              phaseStartedAt: serverTimestamp(),
-              totalElapsedMs: Math.min(172800000, freshComp.totalElapsedMs + spentMs),
               updatedAt: serverTimestamp(),
             });
           }
@@ -603,7 +760,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         timeoutGuardRef.current = '';
       }
     },
-    [activeComp, activeQuestion, room.id]
+    [activeComp, activeQuestion, room.id, runMoveResolvedToCountdown]
   );
 
   const handleFinishCompTimeout = useCallback(async () => {
@@ -623,7 +780,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         const targetTotalMs =
           fresh.settings.timing === 'total'
             ? fresh.settings.seconds * 1000
-            : Math.min(172800000, fresh.totalElapsedMs + phaseElapsedMs);
+            : Math.min(172800000, fresh.totalElapsedMs + questionSolvingMs);
 
         tx.update(compRef, {
           status: 'finished',
@@ -634,7 +791,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     } catch {
       timeoutGuardRef.current = '';
     }
-  }, [activeComp, room.id, phaseElapsedMs]);
+  }, [activeComp, room.id, questionSolvingMs]);
 
   useEffect(() => {
     if (!activeComp || activeComp.status !== 'active') return;
@@ -644,9 +801,13 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
 
     const extraDelay = canControl ? 80 : 1200;
 
-    if (activeComp.settings.timing === 'perQuestion' && activeComp.phase === 'question') {
+    if (
+      activeComp.settings.timing === 'perQuestion' &&
+      activeComp.phase === 'question' &&
+      activeQuestion?.status === 'solving'
+    ) {
       const limitMs = Math.max(1000, activeComp.settings.seconds * 1000);
-      if (phaseElapsedMs >= limitMs + extraDelay && activeQuestion?.status === 'solving') {
+      if (questionSolvingMs >= limitMs + extraDelay) {
         void handleForceCloseCurrentQuestion(limitMs);
       }
     }
@@ -654,7 +815,10 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     if (activeComp.settings.timing === 'total') {
       const limitMs = Math.max(1000, activeComp.settings.seconds * 1000);
       const currentLiveMs =
-        activeComp.totalElapsedMs + (activeComp.phase === 'question' ? phaseElapsedMs : 0);
+        activeComp.totalElapsedMs +
+        (activeComp.phase === 'question' && activeQuestion?.status === 'solving'
+          ? questionSolvingMs
+          : 0);
       if (currentLiveMs >= limitMs + extraDelay) {
         void handleFinishCompTimeout();
       }
@@ -663,7 +827,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     activeComp,
     activeQuestion?.id,
     activeQuestion?.status,
-    phaseElapsedMs,
+    questionSolvingMs,
     isSupervisor,
     profile.uid,
     handleForceCloseCurrentQuestion,
@@ -821,7 +985,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     void flushBoardSaveQueue();
   };
 
-  // ====================== Answering a Question (First-Correct Wins) ======================
+  // ====================== Answering a Question (First-Correct Wins + Atomic Lock) ======================
   const [answering, setAnswering] = useState(false);
 
   const handleAnswerChoice = async (choiceIndex: number) => {
@@ -831,8 +995,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     if (!activeComp.competitorIds.includes(profile.uid)) return;
     if (activeQuestion.wrongPlayerIds.includes(profile.uid)) return;
 
-    const spentMs = Math.max(100, Math.round(Date.now() - phaseEnteredLocalMsRef.current));
+    const spentMs = Math.max(100, Math.round(Date.now() - questionOpenedLocalMsRef.current));
     setAnswering(true);
+    setRaceNotice(null);
 
     const compRef = doc(db, 'rooms', room.id, 'competitions', activeComp.id);
     const qRef = doc(
@@ -846,25 +1011,35 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
     );
 
     try {
-      type AnswerOutcome = 'won' | 'wrong' | 'allWrong' | 'ignored';
-      const outcome = await runTransaction<AnswerOutcome>(db, async (tx) => {
+      type AnswerResult =
+        | { outcome: 'won' }
+        | { outcome: 'wrong' | 'allWrong' | 'ignored' }
+        | { outcome: 'alreadySolved'; winnerName: string; winnerTimeMs: number };
+
+      const result = await runTransaction<AnswerResult>(db, async (tx) => {
         const [compSnap, qSnap] = await Promise.all([tx.get(compRef), tx.get(qRef)]);
-        if (!compSnap.exists() || !qSnap.exists()) return 'ignored';
+        if (!compSnap.exists() || !qSnap.exists()) return { outcome: 'ignored' };
         const freshComp = compSnap.data() as Competition;
         const freshQ = qSnap.data() as CompetitionQuestion;
 
-        if (
-          freshComp.status !== 'active' ||
-          freshComp.phase !== 'question' ||
-          freshQ.status !== 'solving'
-        ) {
-          return 'ignored';
+        if (freshComp.status !== 'active' || freshComp.phase !== 'question') {
+          return { outcome: 'ignored' };
+        }
+        if (freshQ.status !== 'solving') {
+          if (freshQ.status === 'correct' && freshQ.winnerId && freshQ.winnerId !== profile.uid) {
+            return {
+              outcome: 'alreadySolved',
+              winnerName: freshQ.winnerName,
+              winnerTimeMs: freshQ.winnerTimeMs,
+            };
+          }
+          return { outcome: 'ignored' };
         }
         if (
           !freshComp.competitorIds.includes(profile.uid) ||
           freshQ.wrongPlayerIds.includes(profile.uid)
         ) {
-          return 'ignored';
+          return { outcome: 'ignored' };
         }
 
         const isCorrect = choiceIndex === freshQ.question.correctIndex;
@@ -878,6 +1053,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         const nextAttempts = [...(freshQ.attempts || []), attempt];
 
         if (isCorrect) {
+          frozenSolveMsRef.current[freshQ.id] = spentMs;
           tx.update(qRef, {
             status: 'correct',
             winnerId: profile.uid,
@@ -887,17 +1063,14 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             attempts: nextAttempts,
             updatedAt: serverTimestamp(),
           });
-          tx.update(compRef, {
-            phase: 'countdown',
-            phaseStartedAt: serverTimestamp(),
-            totalElapsedMs: Math.min(172800000, freshComp.totalElapsedMs + spentMs),
-            updatedAt: serverTimestamp(),
-          });
-          return 'won';
+          return { outcome: 'won' };
         }
 
         const nextWrong = [...(freshQ.wrongPlayerIds || []), profile.uid];
         const everyoneWrong = nextWrong.length >= freshComp.competitorIds.length;
+        if (everyoneWrong) {
+          frozenSolveMsRef.current[freshQ.id] = spentMs;
+        }
 
         tx.update(qRef, {
           status: everyoneWrong ? 'unanswered' : 'solving',
@@ -906,19 +1079,25 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
           updatedAt: serverTimestamp(),
         });
 
-        if (everyoneWrong) {
-          tx.update(compRef, {
-            phase: 'countdown',
-            phaseStartedAt: serverTimestamp(),
-            totalElapsedMs: Math.min(172800000, freshComp.totalElapsedMs + spentMs),
-            updatedAt: serverTimestamp(),
-          });
-        }
-        return everyoneWrong ? 'allWrong' : 'wrong';
+        return { outcome: everyoneWrong ? 'allWrong' : 'wrong' };
       });
 
-      if (outcome === 'won') playDuoSound('correct');
-      else if (outcome === 'wrong' || outcome === 'allWrong') playDuoSound('wrong');
+      setPendingChoiceIdx(null);
+      if (result.outcome === 'won') {
+        playedResolvedSoundRef.current = activeQuestion.id;
+        playDuoSound('correct');
+      } else if (result.outcome === 'wrong' || result.outcome === 'allWrong') {
+        if (result.outcome === 'allWrong') {
+          playedResolvedSoundRef.current = activeQuestion.id;
+        }
+        playDuoSound('wrong');
+      } else if (result.outcome === 'alreadySolved') {
+        playedResolvedSoundRef.current = activeQuestion.id;
+        playDuoSound('wrong');
+        setRaceNotice(
+          `سبقك ${result.winnerName} بالإجابة الأسرع (${formatTimeSeconds(result.winnerTimeMs)})!`
+        );
+      }
     } catch (err) {
       handleFirestoreError(
         err,
@@ -1410,6 +1589,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                   </div>
 
                   {q.chart && <ChartView chart={q.chart} className="max-w-lg" />}
+                  {q.figure && <FigureView figure={q.figure} className="max-w-lg" />}
 
                   {q.choices && q.choices.length > 0 && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1441,10 +1621,12 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                     </div>
                   )}
 
-                  {q.explanation && (
-                    <div className="p-3 rounded-xl bg-[#FFFDF2] border-2 border-[#FFC800] text-xs sm:text-sm font-bold text-[#3C3C3C]">
-                      <span className="font-black text-[#9A6B00] ml-1.5">التفسير:</span>
-                      <MathText text={q.explanation} className="inline" />
+                  {(q.explanation || q.explanationChart || q.explanationFigure) && (
+                    <div className="p-3 rounded-xl bg-[#FFFDF2] border-2 border-[#FFC800] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
+                      <span className="font-black text-[#9A6B00] text-[11px]">شرح الإجابة:</span>
+                      {q.explanation && <MathText text={q.explanation} />}
+                      {q.explanationChart && <ChartView chart={q.explanationChart} className="max-w-lg" />}
+                      {q.explanationFigure && <FigureView figure={q.explanationFigure} compact className="max-w-lg" />}
                     </div>
                   )}
 
@@ -1559,6 +1741,12 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
       activeQuestion?.wrongPlayerIds?.includes(profile.uid) ?? false;
     const isQuestionOpen =
       activeComp.phase === 'question' && activeQuestion?.status === 'solving';
+    const isQuestionResolved =
+      activeComp.phase === 'question' &&
+      Boolean(activeQuestion) &&
+      activeQuestion?.status !== 'solving';
+    const myAttempt =
+      activeQuestion?.attempts?.find((a) => a.uid === profile.uid) ?? null;
     const isInitialCountdown =
       activeComp.phase === 'countdown' &&
       activeComp.currentIndex === 0 &&
@@ -1569,7 +1757,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
       activeComp.settings.timing === 'perQuestion' && activeComp.phase === 'question'
         ? Math.max(
             0,
-            Math.ceil((activeComp.settings.seconds * 1000 - phaseElapsedMs) / 1000)
+            Math.ceil((activeComp.settings.seconds * 1000 - questionSolvingMs) / 1000)
           )
         : null;
 
@@ -1580,7 +1768,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             Math.ceil(
               (activeComp.settings.seconds * 1000 -
                 (activeComp.totalElapsedMs +
-                  (activeComp.phase === 'question' ? phaseElapsedMs : 0))) /
+                  (activeComp.phase === 'question' && activeQuestion?.status === 'solving'
+                    ? questionSolvingMs
+                    : 0))) /
                 1000
             )
           )
@@ -1591,7 +1781,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         ? `${perQRemainingSec} ث`
         : totalRemainingSec !== null
         ? formatDuration(totalRemainingSec)
-        : formatTimeSeconds(phaseElapsedMs);
+        : formatTimeSeconds(activeComp.phase === 'question' ? questionSolvingMs : phaseElapsedMs);
 
     const inspectedBoard =
       questionBoards.find((b) => b.studentId === inspectedBoardUid) ??
@@ -1620,8 +1810,8 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <div
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border-2 text-xs font-black ${
-                  (perQRemainingSec !== null && perQRemainingSec <= 5) ||
-                  (totalRemainingSec !== null && totalRemainingSec <= 15)
+                  (perQRemainingSec !== null && perQRemainingSec <= 5 && isQuestionOpen) ||
+                  (totalRemainingSec !== null && totalRemainingSec <= 15 && isQuestionOpen)
                     ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B] animate-pulse'
                     : 'bg-[#DDF4FF] border-[#1CB0F6] text-[#1899D6]'
                 }`}
@@ -1645,7 +1835,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                       onClick={() => void handleForceCloseCurrentQuestion()}
                       className="duo-btn px-3 py-1.5 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] hover:border-[#FFC800] text-xs font-black text-[#3C3C3C] cursor-pointer"
                     >
-                      تخطي السؤال
+                      {isQuestionResolved ? 'انتقال الآن' : 'تخطي السؤال'}
                     </button>
                   )}
                   <button
@@ -1813,11 +2003,45 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                 <FigureView figure={activeQuestion.question.figure} />
               )}
 
-              {hasWrongAttempt && (
+              {isQuestionResolved && activeQuestion.status === 'correct' && (
+                <div className="p-3.5 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-[#46A302] text-xs sm:text-sm font-black flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <DuoCheckBadge className="w-5 h-5 shrink-0" />
+                    <span>
+                      الأسرع بالإجابة الصحيحة: {activeQuestion.winnerName} (
+                      {formatTimeSeconds(activeQuestion.winnerTimeMs)})
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-extrabold text-[#46A302]/80 shrink-0">
+                    جاري الانتقال...
+                  </span>
+                </div>
+              )}
+
+              {isQuestionResolved && activeQuestion.status === 'unanswered' && (
+                <div className="p-3.5 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs sm:text-sm font-black flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <DuoCrossBadge className="w-5 h-5 shrink-0" />
+                    <span>انتهى السؤال — الإجابة الصحيحة بالأخضر</span>
+                  </div>
+                  <span className="text-[11px] font-extrabold shrink-0">
+                    جاري الانتقال...
+                  </span>
+                </div>
+              )}
+
+              {raceNotice && (
+                <div className="p-3 rounded-xl bg-[#FFF4CC] border-2 border-[#FFC800] text-[#9A6B00] text-xs sm:text-sm font-black flex items-center gap-2">
+                  <Timer className="w-4 h-4 shrink-0" />
+                  <span>{raceNotice}</span>
+                </div>
+              )}
+
+              {!isQuestionResolved && hasWrongAttempt && (
                 <div className="p-3 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs sm:text-sm font-black flex items-center gap-2">
                   <XCircle className="w-5 h-5 shrink-0" />
                   <span>
-                    إجابتك غير صحيحة لهذا السؤال — تم قفل الاختيارات عليك لحين حسم السؤال أو انتهاء الوقت.
+                    إجابتك غير صحيحة لهذا السؤال — تم قفل الاختيارات عليك وستظهر الإجابة الصحيحة فور حسم السؤال.
                   </span>
                 </div>
               )}
@@ -1831,31 +2055,129 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
 
               <div className="flex flex-col gap-2.5">
                 {activeQuestion.question.choices.map((ch, idx) => {
+                  const isCorrectOption = idx === activeQuestion.question.correctIndex;
+                  const isMyPickedOption = myAttempt?.choiceIndex === idx;
+                  const isSelectedPending = isQuestionOpen && pendingChoiceIdx === idx;
                   const lockedForMe =
                     !isCompetitor || !isQuestionOpen || hasWrongAttempt || answering;
+
+                  let btnStyle =
+                    'bg-white border-[#E5E5E5] hover:border-[#1CB0F6] hover:bg-[#DDF4FF]/40 text-[#3C3C3C] cursor-pointer';
+                  let letterStyle =
+                    'bg-[#F7F7F7] border-[#E5E5E5] text-[#1899D6]';
+
+                  if (isQuestionResolved) {
+                    if (isCorrectOption) {
+                      btnStyle =
+                        'bg-[#D7FFB8] border-[#58CC02] text-[#46A302] cursor-default shadow-sm';
+                      letterStyle = 'bg-[#58CC02] border-[#46A302] text-white';
+                    } else {
+                      btnStyle =
+                        'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B] cursor-default';
+                      letterStyle = 'bg-[#FF4B4B] border-[#EA2B2B] text-white';
+                    }
+                  } else if (hasWrongAttempt) {
+                    if (isMyPickedOption) {
+                      btnStyle =
+                        'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B] cursor-not-allowed';
+                      letterStyle = 'bg-[#FF4B4B] border-[#EA2B2B] text-white';
+                    } else {
+                      btnStyle =
+                        'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777] opacity-65 cursor-not-allowed';
+                    }
+                  } else if (isSelectedPending) {
+                    btnStyle =
+                      'bg-[#F3E8FF] border-[#A560E8] text-[#5C1A99] cursor-pointer shadow-sm';
+                    letterStyle = 'bg-[#A560E8] border-[#8938D6] text-white';
+                  } else if (lockedForMe) {
+                    btnStyle =
+                      'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777] opacity-70 cursor-not-allowed';
+                  }
+
                   return (
                     <button
                       key={idx}
                       type="button"
                       disabled={lockedForMe}
-                      onClick={() => void handleAnswerChoice(idx)}
-                      className={`duo-btn w-full text-right p-3.5 rounded-2xl border-2 border-b-4 flex items-center gap-3 transition-all ${
-                        lockedForMe
-                          ? 'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777] opacity-70 cursor-not-allowed'
-                          : 'bg-white border-[#E5E5E5] hover:border-[#1CB0F6] hover:bg-[#DDF4FF]/40 text-[#3C3C3C] cursor-pointer'
-                      }`}
+                      onClick={() => {
+                        if (lockedForMe) return;
+                        setPendingChoiceIdx(idx);
+                        playDuoSound('pop');
+                      }}
+                      className={`duo-btn w-full text-right p-3.5 rounded-2xl border-2 border-b-4 flex items-center gap-3 transition-all ${btnStyle}`}
                     >
-                      <span className="w-8 h-8 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] text-[#1899D6] font-black text-sm flex items-center justify-center shrink-0">
+                      <span
+                        className={`w-8 h-8 rounded-xl border-2 font-black text-sm flex items-center justify-center shrink-0 ${letterStyle}`}
+                      >
                         {CHOICE_LETTERS[idx] ?? idx + 1}
                       </span>
                       <MathText
                         text={ch}
                         className="text-sm sm:text-base font-extrabold flex-1"
                       />
+                      {isQuestionResolved && isCorrectOption && (
+                        <span className="flex items-center gap-1 text-xs font-black text-[#46A302] bg-white/80 px-2 py-0.5 rounded-lg border border-[#58CC02] shrink-0">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>الصحيحة</span>
+                        </span>
+                      )}
+                      {isQuestionResolved && !isCorrectOption && (
+                        <span className="flex items-center gap-1 text-xs font-black text-[#EA2B2B] shrink-0">
+                          {isMyPickedOption && (
+                            <span className="text-[10px] bg-white/80 px-1.5 py-0.5 rounded-md border border-[#FF4B4B]">
+                              اختيارك
+                            </span>
+                          )}
+                          <XCircle className="w-4 h-4" />
+                        </span>
+                      )}
+                      {!isQuestionResolved && hasWrongAttempt && isMyPickedOption && (
+                        <XCircle className="w-4 h-4 text-[#EA2B2B] shrink-0" />
+                      )}
+                      {isSelectedPending && (
+                        <span className="text-[11px] font-black px-2 py-0.5 rounded-lg bg-[#A560E8] text-white shrink-0">
+                          محدد
+                        </span>
+                      )}
                     </button>
                   );
                 })}
               </div>
+
+              {/* Inline Answer Confirmation Bar */}
+              {isQuestionOpen && isCompetitor && !hasWrongAttempt && pendingChoiceIdx !== null && (
+                <div className="p-3.5 rounded-2xl bg-[#F3E8FF]/70 border-2 border-[#A560E8] flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#5C1A99]">
+                    <span className="w-7 h-7 rounded-xl bg-[#A560E8] text-white flex items-center justify-center shrink-0">
+                      {CHOICE_LETTERS[pendingChoiceIdx] ?? pendingChoiceIdx + 1}
+                    </span>
+                    <span>هل تؤكد اعتماد هذه الإجابة؟</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={answering}
+                      onClick={() => setPendingChoiceIdx(null)}
+                      className="duo-btn px-3.5 py-2 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#777777] hover:text-[#3C3C3C] cursor-pointer disabled:opacity-50"
+                    >
+                      تغيير
+                    </button>
+                    <button
+                      type="button"
+                      disabled={answering}
+                      onClick={() => void handleAnswerChoice(pendingChoiceIdx)}
+                      className="duo-btn flex items-center gap-1.5 px-5 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs sm:text-sm font-black cursor-pointer disabled:opacity-60"
+                    >
+                      {answering ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4" />
+                      )}
+                      <span>{answering ? 'جاري التأكيد...' : 'تأكيد الإجابة'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Left/Bottom Column: Live Whiteboard (Scratchpad for Competitor / Monitor for Observer) */}

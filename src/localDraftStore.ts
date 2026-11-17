@@ -2,6 +2,8 @@ import type { AiSolution } from './aiClient';
 import type {
   ExplainLayer,
   MyQuiz,
+  QuizChart,
+  QuizFigure,
   QuizQuestion,
   QuizAttempt,
   ExamSettings,
@@ -30,6 +32,10 @@ export interface StoredQuizAnswerMeta {
   correctIndex: number;
   answer: string;
   explanation: string;
+  chart?: QuizChart;
+  figure?: QuizFigure;
+  explanationChart?: QuizChart;
+  explanationFigure?: QuizFigure;
   sourceQuizTitle?: string;
 }
 

@@ -64,6 +64,7 @@ import type {
   Participant,
   Question,
   QuizChart,
+  QuizFigure,
   QuizQuestion,
   Room,
   SharedExplainBoard,
@@ -97,6 +98,7 @@ import {
 } from './WhiteboardCanvas';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import {
   buildRoomQuizPool,
   type RoomQuizEntry,
@@ -189,6 +191,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [draftQuizAttachment, setDraftQuizAttachment] = useState<{
     choices?: string[];
     chart?: QuizChart;
+    figure?: QuizFigure;
     answerMeta?: StoredQuizAnswerMeta;
   } | null>(null);
   const [quizAnswerCache, setQuizAnswerCache] = useState<Record<string, StoredQuizAnswerMeta>>({});
@@ -883,6 +886,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     imageData: string;
     choices?: string[];
     chart?: QuizChart;
+    figure?: QuizFigure;
     sourceQuizTitle?: string;
     answerMeta?: StoredQuizAnswerMeta;
   }) => {
@@ -917,6 +921,9 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       }
       if (params.chart) {
         payload.chart = params.chart;
+      }
+      if (params.figure) {
+        payload.figure = params.figure;
       }
       if (params.sourceQuizTitle) {
         payload.sourceQuizTitle = params.sourceQuizTitle.slice(0, 120);
@@ -959,7 +966,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
 
     const { text: cleanText, imageData: finalImageData } = getDraftPayload();
 
-    if (!cleanText && !finalImageData && !draftQuizAttachment?.chart) {
+    if (!cleanText && !finalImageData && !draftQuizAttachment?.chart && !draftQuizAttachment?.figure) {
       setDraftError(
         composerTab === 'pdf'
           ? 'ارفع ملف PDF وحدد الصفحة المطلوب إظهارها للطلاب أولاً'
@@ -978,6 +985,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
           ? draftQuizAttachment.choices
           : undefined,
       chart: draftQuizAttachment?.chart,
+      figure: draftQuizAttachment?.figure,
       sourceQuizTitle: draftQuizAttachment?.answerMeta?.sourceQuizTitle,
       answerMeta: draftQuizAttachment?.answerMeta,
     });
@@ -993,12 +1001,15 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       imageData: '',
       choices: includeQuizChoices && qq.choices?.length ? qq.choices : undefined,
       chart: qq.chart,
+      figure: qq.figure,
       sourceQuizTitle: entry.quiz.title,
       answerMeta: {
         choices: qq.choices || [],
         correctIndex: qq.correctIndex,
         answer: answerText,
         explanation: qq.explanation || '',
+        ...(qq.explanationChart ? { explanationChart: qq.explanationChart } : {}),
+        ...(qq.explanationFigure ? { explanationFigure: qq.explanationFigure } : {}),
         sourceQuizTitle: entry.quiz.title,
       },
     });
@@ -1014,11 +1025,14 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     setDraftQuizAttachment({
       choices: qq.choices,
       chart: qq.chart,
+      figure: qq.figure,
       answerMeta: {
         choices: qq.choices || [],
         correctIndex: qq.correctIndex,
         answer: answerText,
         explanation: qq.explanation || '',
+        ...(qq.explanationChart ? { explanationChart: qq.explanationChart } : {}),
+        ...(qq.explanationFigure ? { explanationFigure: qq.explanationFigure } : {}),
         sourceQuizTitle: entry.quiz.title,
       },
     });
@@ -2436,6 +2450,10 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               <ChartView chart={currentQuestion.chart} className="max-w-xl w-full" />
             )}
 
+            {currentQuestion.figure && (
+              <FigureView figure={currentQuestion.figure} className="max-w-xl w-full" />
+            )}
+
             {currentQuestion.choices && currentQuestion.choices.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {currentQuestion.choices.map((ch, idx) => {
@@ -2468,7 +2486,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
             )}
 
             {isSupervisor && quizAnswerCache[currentQuestion.id] && (
-              <div className="rounded-2xl bg-[#D7FFB8]/65 border-2 border-[#58CC02] p-3.5 flex flex-col gap-1.5">
+              <div className="rounded-2xl bg-[#D7FFB8]/65 border-2 border-[#58CC02] p-3.5 flex flex-col gap-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-black text-[#46A302]">
                     الإجابة الصحيحة (سري للمشرف فقط):
@@ -2483,10 +2501,20 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     className="text-sm sm:text-base font-black text-[#264E00]"
                   />
                 )}
-                {quizAnswerCache[currentQuestion.id].explanation && (
-                  <div className="text-xs sm:text-sm font-bold text-[#3C3C3C] pt-1 border-t border-[#58CC02]/30">
-                    <span className="font-black text-[#46A302]">الشرح: </span>
-                    <MathText text={quizAnswerCache[currentQuestion.id].explanation} className="inline" />
+                {(quizAnswerCache[currentQuestion.id].explanation ||
+                  quizAnswerCache[currentQuestion.id].explanationChart ||
+                  quizAnswerCache[currentQuestion.id].explanationFigure) && (
+                  <div className="text-xs sm:text-sm font-bold text-[#3C3C3C] pt-1.5 border-t border-[#58CC02]/30 flex flex-col gap-2">
+                    <span className="font-black text-[#46A302] text-[11px]">الشرح:</span>
+                    {quizAnswerCache[currentQuestion.id].explanation && (
+                      <MathText text={quizAnswerCache[currentQuestion.id].explanation} />
+                    )}
+                    {quizAnswerCache[currentQuestion.id].explanationChart && (
+                      <ChartView chart={quizAnswerCache[currentQuestion.id].explanationChart!} />
+                    )}
+                    {quizAnswerCache[currentQuestion.id].explanationFigure && (
+                      <FigureView figure={quizAnswerCache[currentQuestion.id].explanationFigure!} />
+                    )}
                   </div>
                 )}
               </div>
@@ -2535,9 +2563,10 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     <span className="text-xs font-black text-[#46A302]">
                       الإجابة الصحيحة النهائية:
                     </span>
-                    <p className="text-base sm:text-lg font-black text-[#264E00] whitespace-pre-wrap">
-                      {activeAiCache[currentQuestion.id].finalAnswer}
-                    </p>
+                    <MathText
+                      text={activeAiCache[currentQuestion.id].finalAnswer}
+                      className="text-base sm:text-lg font-black text-[#264E00]"
+                    />
                   </div>
 
                   {activeAiCache[currentQuestion.id].steps.length > 0 && (
@@ -2554,7 +2583,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                             <span className="font-latin w-6 h-6 rounded-lg bg-[#CE82FF]/25 text-[#6D23B6] flex items-center justify-center text-xs font-black shrink-0 mt-0.5">
                               {idx + 1}
                             </span>
-                            <span className="whitespace-pre-wrap">{step}</span>
+                            <MathText text={step} className="flex-1 min-w-0" />
                           </li>
                         ))}
                       </ol>
@@ -2562,9 +2591,9 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                   )}
 
                   {activeAiCache[currentQuestion.id].explanation && (
-                    <div className="rounded-2xl bg-white/80 border border-[#E7C6FF] p-3 text-xs sm:text-sm font-bold text-[#524364] leading-relaxed whitespace-pre-wrap">
-                      <span className="font-black text-[#8938D6]">توضيح وفكرة الحل: </span>
-                      {activeAiCache[currentQuestion.id].explanation}
+                    <div className="rounded-2xl bg-white/80 border border-[#E7C6FF] p-3 text-xs sm:text-sm font-bold text-[#524364] leading-relaxed flex flex-col gap-1">
+                      <span className="font-black text-[#8938D6] text-[11px]">توضيح وفكرة الحل:</span>
+                      <MathText text={activeAiCache[currentQuestion.id].explanation} />
                     </div>
                   )}
                 </div>
@@ -2947,6 +2976,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                                 />
 
                                 {qq.chart && <ChartView chart={qq.chart} className="max-w-md w-full" />}
+                                {qq.figure && <FigureView figure={qq.figure} className="max-w-md w-full" compact />}
 
                                 {qq.choices && qq.choices.length > 0 && (
                                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
@@ -2968,10 +2998,12 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                                   </div>
                                 )}
 
-                                {qq.explanation && (
-                                  <div className="text-xs font-bold text-[#6D23B6] bg-[#F8EDFF] rounded-xl px-3 py-1.5">
-                                    <span className="font-black">الشرح السري: </span>
-                                    <MathText text={qq.explanation} className="inline" />
+                                {(qq.explanation || qq.explanationChart || qq.explanationFigure) && (
+                                  <div className="text-xs font-bold text-[#6D23B6] bg-[#F8EDFF] rounded-xl px-3 py-2 flex flex-col gap-1.5">
+                                    <span className="font-black text-[11px]">الشرح السري:</span>
+                                    {qq.explanation && <MathText text={qq.explanation} />}
+                                    {qq.explanationChart && <ChartView chart={qq.explanationChart} className="max-w-sm" />}
+                                    {qq.explanationFigure && <FigureView figure={qq.explanationFigure} className="max-w-sm" compact />}
                                   </div>
                                 )}
                               </div>
@@ -2989,6 +3021,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                       <span className="text-xs font-black text-[#6D23B6]">
                         مرفق سؤال من الاختبار ({draftQuizAttachment.answerMeta?.sourceQuizTitle || 'اختبار'})
                         {draftQuizAttachment.chart ? ' · يحتوي رسم بياني' : ''}
+                        {draftQuizAttachment.figure ? ' · يحتوي شكل هندسي' : ''}
                         {draftQuizAttachment.choices?.length ? ` · ${draftQuizAttachment.choices.length} خيارات` : ''}
                       </span>
                       <button
@@ -3404,9 +3437,10 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     <span className="text-xs font-black text-[#46A302]">
                       الإجابة الصحيحة النهائية:
                     </span>
-                    <p className="text-base sm:text-lg font-black text-[#264E00] whitespace-pre-wrap">
-                      {draftAiSolution.finalAnswer}
-                    </p>
+                    <MathText
+                      text={draftAiSolution.finalAnswer}
+                      className="text-base sm:text-lg font-black text-[#264E00]"
+                    />
                   </div>
 
                   {draftAiSolution.steps.length > 0 && (
@@ -3423,7 +3457,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                             <span className="font-latin w-6 h-6 rounded-lg bg-[#CE82FF]/25 text-[#6D23B6] flex items-center justify-center text-xs font-black shrink-0 mt-0.5">
                               {idx + 1}
                             </span>
-                            <span className="whitespace-pre-wrap">{step}</span>
+                            <MathText text={step} className="flex-1 min-w-0" />
                           </li>
                         ))}
                       </ol>
@@ -3431,9 +3465,9 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                   )}
 
                   {draftAiSolution.explanation && (
-                    <div className="rounded-2xl bg-white/80 border border-[#E7C6FF] p-3 text-xs sm:text-sm font-bold text-[#524364] leading-relaxed whitespace-pre-wrap">
-                      <span className="font-black text-[#8938D6]">توضيح وفكرة الحل: </span>
-                      {draftAiSolution.explanation}
+                    <div className="rounded-2xl bg-white/80 border border-[#E7C6FF] p-3 text-xs sm:text-sm font-bold text-[#524364] leading-relaxed flex flex-col gap-1">
+                      <span className="font-black text-[#8938D6] text-[11px]">توضيح وفكرة الحل:</span>
+                      <MathText text={draftAiSolution.explanation} />
                     </div>
                   )}
                 </div>

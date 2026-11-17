@@ -72,6 +72,7 @@ import type {
   UserProfile,
 } from '../types';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import {
   DuoCheckBadge,
   DuoCrossBadge,
@@ -1051,6 +1052,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             correctIndex: cq.question.correctIndex,
             explanation: (cq.question.explanation || '').slice(0, 2000),
             ...(cq.question.chart ? { chart: cq.question.chart } : {}),
+            ...(cq.question.figure ? { figure: cq.question.figure } : {}),
+            ...(cq.question.explanationChart ? { explanationChart: cq.question.explanationChart } : {}),
+            ...(cq.question.explanationFigure ? { explanationFigure: cq.question.explanationFigure } : {}),
             winnerTimeMs: cq.winnerTimeMs || 0,
             status: cq.status,
             winnerName: (cq.winnerName || '').slice(0, 120),
@@ -1156,6 +1160,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                     : {}),
                   ...(sq.explanation ? { explanation: sq.explanation } : {}),
                   ...(sq.chart ? { chart: sq.chart } : {}),
+                  ...(sq.figure ? { figure: sq.figure } : {}),
+                  ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
+                  ...(sq.explanationFigure ? { explanationFigure: sq.explanationFigure } : {}),
                   ...(typeof sq.winnerTimeMs === 'number'
                     ? { winnerTimeMs: sq.winnerTimeMs }
                     : {}),
@@ -1185,6 +1192,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                       : {}),
                     ...(sq.explanation ? { explanation: sq.explanation } : {}),
                     ...(sq.chart ? { chart: sq.chart } : {}),
+                    ...(sq.figure ? { figure: sq.figure } : {}),
+                    ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
+                    ...(sq.explanationFigure ? { explanationFigure: sq.explanationFigure } : {}),
                     ...(typeof sq.winnerTimeMs === 'number'
                       ? { winnerTimeMs: sq.winnerTimeMs }
                       : {}),
@@ -1734,13 +1744,20 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                   </div>
                 )}
 
-                {activeQuestion.question.explanation && (
-                  <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] text-xs font-bold text-[#3C3C3C]">
-                    <span className="font-black text-[#9A6B00] ml-1">التفسير:</span>
-                    <MathText
-                      text={activeQuestion.question.explanation}
-                      className="inline"
-                    />
+                {(activeQuestion.question.explanation ||
+                  activeQuestion.question.explanationChart ||
+                  activeQuestion.question.explanationFigure) && (
+                  <div className="p-3 rounded-xl bg-white/95 border border-[#E5E5E5] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
+                    <span className="font-black text-[#9A6B00] text-[11px]">شرح الإجابة:</span>
+                    {activeQuestion.question.explanation && (
+                      <MathText text={activeQuestion.question.explanation} />
+                    )}
+                    {activeQuestion.question.explanationChart && (
+                      <ChartView chart={activeQuestion.question.explanationChart} />
+                    )}
+                    {activeQuestion.question.explanationFigure && (
+                      <FigureView figure={activeQuestion.question.explanationFigure} compact />
+                    )}
                   </div>
                 )}
               </div>
@@ -1791,6 +1808,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
 
               {activeQuestion.question.chart && (
                 <ChartView chart={activeQuestion.question.chart} />
+              )}
+              {activeQuestion.question.figure && (
+                <FigureView figure={activeQuestion.question.figure} />
               )}
 
               {hasWrongAttempt && (

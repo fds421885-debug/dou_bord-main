@@ -3,6 +3,7 @@ import { CheckCircle2, XCircle, MinusCircle } from 'lucide-react';
 import type { ExamQuestion } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import { formatDuration } from '../exam';
 
 const LETTERS = ['أ', 'ب', 'ج', 'د', 'هـ', 'و', 'ز', 'ح'];
@@ -73,6 +74,7 @@ export const ExamReview: React.FC<Props> = ({ questions, answers, score, total, 
             {q.sourceTitle && <div className="text-[10px] font-extrabold text-[#777777]">من: {q.sourceTitle}</div>}
             <MathText text={q.text} className="text-sm font-black text-[#3C3C3C]" />
             {q.chart && <ChartView chart={q.chart} />}
+            {q.figure && <FigureView figure={q.figure} />}
             <div className="flex flex-col gap-1.5">
               {q.choices.map((c, ci) => {
                 const isCorrect = ci === q.correctIndex;
@@ -98,10 +100,12 @@ export const ExamReview: React.FC<Props> = ({ questions, answers, score, total, 
                 );
               })}
             </div>
-            {q.explanation && (
-              <div className="px-3 py-2 rounded-2xl bg-[#F7F7F7] text-xs font-bold text-[#555]">
-                <span className="font-black">الشرح: </span>
-                <MathText text={q.explanation} className="inline" />
+            {(q.explanation || q.explanationChart || q.explanationFigure) && (
+              <div className="px-3.5 py-2.5 rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
+                <span className="font-black text-[#777777] text-[11px]">شرح الإجابة:</span>
+                {q.explanation && <MathText text={q.explanation} />}
+                {q.explanationChart && <ChartView chart={q.explanationChart} />}
+                {q.explanationFigure && <FigureView figure={q.explanationFigure} />}
               </div>
             )}
           </div>

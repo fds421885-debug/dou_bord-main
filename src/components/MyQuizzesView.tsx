@@ -29,6 +29,7 @@ import {
 } from '../localDraftStore';
 import { deleteMyQuiz, EXAMPLE_JSON, IMPORT_PROMPT, parseQuizJson, quizToExportJson } from '../myQuizzes';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import { ExamSetup } from './ExamSetup';
 import { ExamRunner, type ExamInitialState } from './ExamRunner';
 import { ExamResult } from './ExamResult';
@@ -314,6 +315,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             <span className="self-start px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">السؤال {i + 1}</span>
             <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C]" />
             {qq.chart && <ChartView chart={qq.chart} />}
+            {qq.figure && <FigureView figure={qq.figure} />}
             {qq.choices.length > 0 ? (
               <div className="flex flex-col gap-1.5">
                 {qq.choices.map((c, ci) => (
@@ -328,16 +330,19 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                 <MathText text={qq.answer} />
               </div>
             ) : null}
-            {qq.explanation && (
-              <div className="px-3 py-2 rounded-2xl bg-[#F7F7F7] text-xs font-bold text-[#555]">
-                <MathText text={qq.explanation} />
+            {(qq.explanation || qq.explanationChart || qq.explanationFigure) && (
+              <div className="px-3.5 py-2.5 rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
+                <span className="font-black text-[#777777] text-[11px]">شرح الإجابة:</span>
+                {qq.explanation && <MathText text={qq.explanation} />}
+                {qq.explanationChart && <ChartView chart={qq.explanationChart} />}
+                {qq.explanationFigure && <FigureView figure={qq.explanationFigure} />}
               </div>
             )}
           </div>
         ))}
         <button
           type="button"
-          onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => ({ ...x, choices: x.choices.slice() })), warnings: [] })}
+          onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion), warnings: [] })}
           className="duo-btn self-start flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-sm font-black cursor-pointer"
         >
           <Pencil className="w-4 h-4" /> تعديل
@@ -500,7 +505,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                 <button type="button" onClick={() => setMode({ kind: 'view', quiz: q })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer">
                   <FolderOpen className="w-3.5 h-3.5" /> فتح
                 </button>
-                <button type="button" onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => ({ ...x, choices: x.choices.slice() })), warnings: [] })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer">
+                <button type="button" onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion), warnings: [] })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer">
                   <Pencil className="w-3.5 h-3.5" /> تعديل
                 </button>
                 <button type="button" onClick={() => exportQuiz(q)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer">
@@ -655,13 +660,12 @@ const ImportPanel: React.FC<{
       </div>
 
       <div className={`${card} p-4 flex flex-col gap-2`}>
-        <h3 className="text-sm font-black text-[#3C3C3C]">كيف تُضاف الرسوم وتُحدد الإجابة الصحيحة؟</h3>
+        <h3 className="text-sm font-black text-[#3C3C3C]">كيف تُضاف الأشكال الهندسية والرسوم البيانية؟</h3>
         <ul className="text-xs font-bold text-[#555] leading-relaxed list-disc pr-5 flex flex-col gap-1">
-          <li>كل الأسئلة باختيارات: <span className="font-latin">choices</span> مصفوفة الخيارات، و <span className="font-latin">correctIndex</span> رقم الخيار الصحيح ويبدأ من 0 (0 الأول، 1 الثاني، 2 الثالث، 3 الرابع).</li>
-          <li>لإضافة رسم لسؤال ضع داخله الحقل <span className="font-latin">chart</span> وسيرسمه البرنامج من القيم: <span className="font-latin">type</span> = <span className="font-latin">bar</span> أعمدة، <span className="font-latin">hbar</span> أعمدة أفقية، <span className="font-latin">line</span> خطي، <span className="font-latin">pie</span> دائري.</li>
-          <li><span className="font-latin">labels</span> هي التسميات، و <span className="font-latin">series</span> فيها القيم (أرقام بلا علامات اقتباس) بنفس عدد التسميات. للمقارنة أضف حتى 3 سلاسل (ما عدا الدائري: سلسلة واحدة).</li>
-          <li>اجعل جواب السؤال قابلاً للحساب من بيانات الرسم، ثم ضع رقم الخيار الصحيح في <span className="font-latin">correctIndex</span>.</li>
-          <li>بعد الاستيراد تستطيع تعديل الرسم والقيم والإجابة الصحيحة من شاشة المراجعة.</li>
+          <li>كل الأسئلة باختيارات: <span className="font-latin">choices</span> مصفوفة الخيارات، و <span className="font-latin">correctIndex</span> رقم الخيار الصحيح ويبدأ من 0.</li>
+          <li>للأشكال الهندسية البسيطة والمركّبة (مثلثات، زوايا متقابلة، متوازيان وقاطع، دائرة داخل مربع، مجاهيل <span className="font-latin">س / x</span>): يضيف السكريبت الحقل <span className="font-latin">figure</span> تلقائياً ويرسمها البرنامج متجهياً بدقة.</li>
+          <li>للأعمدة والخطوط والقطاعات الدائرية: يضيف الحقل <span className="font-latin">chart</span> بأنواعه (<span className="font-latin">bar / hbar / line / pie</span>).</li>
+          <li>بعد الاستيراد تستطيع تعديل الأشكال الهندسية والزوايا والأطوال والرسوم والشرح من شاشة التعديل.</li>
         </ul>
         <button
           type="button"
@@ -669,9 +673,9 @@ const ImportPanel: React.FC<{
             setRaw(EXAMPLE_JSON);
             setError(null);
           }}
-          className="self-start text-xs font-black text-[#1899D6] cursor-pointer"
+          className="self-start text-xs font-black text-[#7C3AED] hover:underline cursor-pointer"
         >
-          تجربة مثال كامل (أعمدة + دائري + خطي)
+          تجربة مثال كامل (هندسة مركبة + أعمدة + دائري + جذور)
         </button>
       </div>
 

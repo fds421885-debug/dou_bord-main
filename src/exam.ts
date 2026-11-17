@@ -2,6 +2,7 @@ import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase';
 import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion } from './types';
 import { sanitizeChart } from './quizChart';
+import { sanitizeFigure } from './quizFigure';
 
 export const EXAM_MAX_QUESTIONS = 100;
 
@@ -51,6 +52,9 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     correctIndex = order.indexOf(q.correctIndex);
   }
   const chart = q.chart ? sanitizeChart(q.chart) : null;
+  const figure = q.figure ? sanitizeFigure(q.figure) : null;
+  const explanationChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
+  const explanationFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
   return {
     id: `${quiz.id}:${q.id}`.slice(0, 120),
     sourceQuizId: quiz.id,
@@ -60,6 +64,9 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     correctIndex,
     explanation: q.explanation || '',
     ...(chart ? { chart } : {}),
+    ...(figure ? { figure } : {}),
+    ...(explanationChart ? { explanationChart } : {}),
+    ...(explanationFigure ? { explanationFigure } : {}),
   };
 }
 

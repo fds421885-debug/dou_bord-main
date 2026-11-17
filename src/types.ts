@@ -93,6 +93,7 @@ export interface Question {
   imageData: string;
   choices?: string[];
   chart?: QuizChart;
+  figure?: QuizFigure;
   sourceQuizTitle?: string;
   status: QuestionStatus;
   attemptsUsed: number;
@@ -147,6 +148,9 @@ export interface SavedQuestion {
   correctIndex?: number;
   explanation?: string;
   chart?: QuizChart;
+  figure?: QuizFigure;
+  explanationChart?: QuizChart;
+  explanationFigure?: QuizFigure;
   winnerTimeMs?: number;
   status: QuestionStatus;
   winnerName: string;
@@ -184,6 +188,107 @@ export interface QuizChart {
   series: ChartSeries[];
 }
 
+export type FigureColor = 'ink' | 'blue' | 'green' | 'gold' | 'purple' | 'red' | 'gray' | 'white';
+
+export type FigureLabelPos =
+  | 'auto'
+  | 'top'
+  | 'bottom'
+  | 'left'
+  | 'right'
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right';
+
+export interface FigurePoint {
+  id: string;
+  x: number;
+  y: number;
+  label?: string;
+  labelPos?: FigureLabelPos;
+  dot?: boolean;
+}
+
+export type FigureElement =
+  | {
+      type: 'polygon';
+      points: string[];
+      fill?: FigureColor | 'none';
+      fillOpacity?: number;
+      stroke?: FigureColor;
+      dashed?: boolean;
+      sideLabels?: string[];
+      ticks?: number[];
+    }
+  | {
+      type: 'segment';
+      from: string;
+      to: string;
+      extendFrom?: boolean;
+      extendTo?: boolean;
+      stroke?: FigureColor;
+      dashed?: boolean;
+      label?: string;
+      ticks?: number;
+      parallel?: number;
+    }
+  | {
+      type: 'circle';
+      center: string;
+      r: number;
+      fill?: FigureColor | 'none';
+      fillOpacity?: number;
+      stroke?: FigureColor;
+      dashed?: boolean;
+      showCenter?: boolean;
+      radiusAngleDeg?: number;
+      radiusLabel?: string;
+      diameterAngleDeg?: number;
+      diameterLabel?: string;
+    }
+  | {
+      type: 'arc';
+      center: string;
+      r: number;
+      startDeg: number;
+      endDeg: number;
+      sector?: boolean;
+      fill?: FigureColor | 'none';
+      fillOpacity?: number;
+      stroke?: FigureColor;
+      dashed?: boolean;
+      label?: string;
+    }
+  | {
+      type: 'angle';
+      a: string;
+      vertex: string;
+      b: string;
+      label?: string;
+      right?: boolean;
+      arcs?: number;
+      reflex?: boolean;
+      color?: FigureColor;
+      r?: number;
+    }
+  | {
+      type: 'label';
+      x: number;
+      y: number;
+      text: string;
+      color?: FigureColor;
+    };
+
+/** شكل هندسي قابل للرسم متجهياً بدقة داخل الأسئلة والشرح */
+export interface QuizFigure {
+  title?: string;
+  caption?: string;
+  grid?: boolean;
+  points: FigurePoint[];
+  elements: FigureElement[];
+}
+
 /** سؤال داخل "اختباراتي" — النصوص قد تحتوي رياضيات بصيغة $...$ */
 export interface QuizQuestion {
   id: string;
@@ -194,6 +299,9 @@ export interface QuizQuestion {
   answer: string;
   explanation: string;
   chart?: QuizChart;
+  figure?: QuizFigure;
+  explanationChart?: QuizChart;
+  explanationFigure?: QuizFigure;
 }
 
 export interface MyQuiz {
@@ -233,6 +341,9 @@ export interface ExamQuestion {
   correctIndex: number;
   explanation: string;
   chart?: QuizChart;
+  figure?: QuizFigure;
+  explanationChart?: QuizChart;
+  explanationFigure?: QuizFigure;
 }
 
 export interface QuizAttempt {

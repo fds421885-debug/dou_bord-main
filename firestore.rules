@@ -155,7 +155,7 @@ service cloud.firestore {
           'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'sourceQuizTitle',
+          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'figure', 'sourceQuizTitle',
           'status', 'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds',
           'createdAt', 'updatedAt'
         ])
@@ -170,6 +170,7 @@ service cloud.firestore {
           && (data.choices.size() == 0 || (data.choices[0] is string && data.choices[0].size() <= 500))
         ))
         && (!('chart' in data) || data.chart is map)
+        && (!('figure' in data) || data.figure is map)
         && (!('sourceQuizTitle' in data) || (data.sourceQuizTitle is string && data.sourceQuizTitle.size() <= 120))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.attemptsUsed is int && data.attemptsUsed >= 0 && data.attemptsUsed <= 2
@@ -273,7 +274,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'ownerId', 'orderIndex', 'text', 'imageData',
-          'choices', 'correctIndex', 'explanation', 'chart', 'winnerTimeMs',
+          'choices', 'correctIndex', 'explanation', 'chart', 'figure', 'explanationChart', 'explanationFigure', 'winnerTimeMs',
           'status', 'winnerName', 'boards', 'createdAt'
         ])
         && isValidId(data.id)
@@ -286,6 +287,9 @@ service cloud.firestore {
         && (!('correctIndex' in data) || (data.correctIndex is int && data.correctIndex >= -1 && data.correctIndex <= 7))
         && (!('explanation' in data) || (data.explanation is string && data.explanation.size() <= 2000))
         && (!('chart' in data) || data.chart is map)
+        && (!('figure' in data) || data.figure is map)
+        && (!('explanationChart' in data) || data.explanationChart is map)
+        && (!('explanationFigure' in data) || data.explanationFigure is map)
         && (!('winnerTimeMs' in data) || (data.winnerTimeMs is int && data.winnerTimeMs >= 0 && data.winnerTimeMs <= 172800000))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.winnerName is string && data.winnerName.size() <= 120
@@ -774,6 +778,8 @@ service cloud.firestore {
             || ('choices' in existing() && 'choices' in incoming() && incoming().choices == existing().choices))
           && ((!('chart' in existing()) && !('chart' in incoming()))
             || ('chart' in existing() && 'chart' in incoming() && incoming().chart == existing().chart))
+          && ((!('figure' in existing()) && !('figure' in incoming()))
+            || ('figure' in existing() && 'figure' in incoming() && incoming().figure == existing().figure))
           && ((!('sourceQuizTitle' in existing()) && !('sourceQuizTitle' in incoming()))
             || ('sourceQuizTitle' in existing() && 'sourceQuizTitle' in incoming() && incoming().sourceQuizTitle == existing().sourceQuizTitle))
           && ((!('timerSeconds' in existing()) && !('timerSeconds' in incoming()))

@@ -4,12 +4,29 @@ import 'katex/dist/katex.min.css';
 
 /**
  * عرض النصوص الرياضية: كل ما بين $...$ (أو $$...$$ أو \( \) أو \[ \]) يُرسم
- * كجذور وكسور وأسس حقيقية، والباقي يبقى نصاً عادياً.
+ * كجذور وكسور وأسس حقيقية، مع تحويل التعبيرات غير المغلفة مثل \frac{}{} و \sqrt{} تلقائياً.
  */
 
 type Seg = { kind: 'text' | 'math'; value: string; display: boolean };
 
 const ESC = '\uE000';
+
+/** يغلّف تعبيرات LaTeX الواضحة المكتوبة خارج $...$ دون كسر النص العادي أو الأقواس. */
+function normalizeBareMath(src: string): string {
+  if (!src || (!src.includes('\\frac') && !src.includes('\\sqrt'))) return src;
+  const parts = splitMath(src);
+  return parts
+    .map((seg) => {
+      if (seg.kind === 'math') {
+        return seg.display ? `$$${seg.value}$$` : `$${seg.value}$`;
+      }
+      return seg.value.replace(
+        /(\\frac\{[^{}]+\}\{[^{}]+\}|\\sqrt(?:\[[^\]]+\])?\{[^{}]+\})/g,
+        (m) => `$${m}$`
+      );
+    })
+    .join('');
+}
 
 export function splitMath(src: string): Seg[] {
   const safe = (src || '').replace(/\\\$/g, ESC);
@@ -49,19 +66,24 @@ function toHtml(tex: string, display: boolean): string | null {
 interface MathTextProps {
   text: string;
   className?: string;
+  inline?: boolean;
 }
 
-export const MathText: React.FC<MathTextProps> = ({ text, className }) => {
+export const MathText: React.FC<MathTextProps> = ({ text, className, inline }) => {
+  const isInline = inline ?? Boolean(className && /\binline\b/.test(className));
+
   const parts = useMemo(
     () =>
-      splitMath(text).map((s) =>
+      splitMath(normalizeBareMath(text)).map((s) =>
         s.kind === 'math' ? { ...s, html: toHtml(s.value, s.display) } : { ...s, html: null }
       ),
     [text]
   );
 
+  const Tag = isInline ? 'span' : 'div';
+
   return (
-    <div dir="auto" className={className} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+    <Tag dir="auto" className={className} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
       {parts.map((s, i) =>
         s.kind === 'text' ? (
           <span key={i}>{s.value}</span>
@@ -69,7 +91,11 @@ export const MathText: React.FC<MathTextProps> = ({ text, className }) => {
           <span
             key={i}
             dir="ltr"
-            className={s.display ? 'block my-1 text-center overflow-x-auto' : 'inline-block align-middle'}
+            className={
+              s.display && !isInline
+                ? 'block my-1.5 text-center overflow-x-auto'
+                : 'inline-block align-middle mx-0.5'
+            }
             style={{ unicodeBidi: 'isolate' }}
             dangerouslySetInnerHTML={{ __html: s.html }}
           />
@@ -79,6 +105,6 @@ export const MathText: React.FC<MathTextProps> = ({ text, className }) => {
           </span>
         )
       )}
-    </div>
+    </Tag>
   );
 };

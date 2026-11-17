@@ -17,6 +17,7 @@ import type { QuizQuestion } from '../types';
 import { MathText } from '../mathText';
 import { applySnippet, MathToolbar } from './MathToolbar';
 import { QuizChartEditor } from './QuizChartEditor';
+import { QuizFigureEditor } from './QuizFigureEditor';
 import {
   cleanQuestions,
   createMyQuiz,
@@ -184,7 +185,8 @@ export const QuizEditor: React.FC<Props> = ({
   const duplicate = (idx: number) =>
     setQuestions((qs) => {
       if (qs.length >= LIMITS.maxQuestions) return qs;
-      const copy = { ...qs[idx], id: newQuestionId(), choices: qs[idx].choices.slice() };
+      const cloned = JSON.parse(JSON.stringify(qs[idx])) as QuizQuestion;
+      const copy: QuizQuestion = { ...cloned, id: newQuestionId(), choices: cloned.choices.slice() };
       const next = qs.slice();
       next.splice(idx + 1, 0, copy);
       return next;
@@ -326,7 +328,10 @@ export const QuizEditor: React.FC<Props> = ({
               </div>
             )}
 
-            <QuizChartEditor chart={q.chart} onChange={(c) => patch(q.id, { chart: c })} />
+            <div className="flex flex-wrap items-start gap-2">
+              <QuizChartEditor chart={q.chart} onChange={(c) => patch(q.id, { chart: c })} />
+              <QuizFigureEditor figure={q.figure} onChange={(f) => patch(q.id, { figure: f })} />
+            </div>
 
             {/* الخيارات */}
             {hasChoices ? (
@@ -374,7 +379,7 @@ export const QuizEditor: React.FC<Props> = ({
                         <X className="w-4 h-4" />
                       </button>
                     </div>
-                    {showPreview && c.includes('$') && (
+                    {showPreview && /[$\\^_]/.test(c) && (
                       <div className="mr-9 text-sm font-bold text-[#3C3C3C]">
                         <MathText text={c} />
                       </div>
@@ -395,23 +400,40 @@ export const QuizEditor: React.FC<Props> = ({
               </div>
             ) : null}
 
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-black text-[#3C3C3C]">شرح الحل (اختياري)</span>
-              <MathField
-                multiline
-                rows={2}
-                value={q.explanation}
-                onChange={(v) => patch(q.id, { explanation: v })}
-                maxLength={LIMITS.explanation}
-                placeholder="خطوات الحل أو ملاحظة…"
-                onFocusField={onFocusField}
-              />
-              {showPreview && q.explanation.includes('$') && (
-                <div className="rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] px-3 py-2 text-sm font-bold">
+            <div className="flex flex-col gap-2">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-black text-[#3C3C3C]">شرح الحل (اختياري — يدعم الكسور والجذور والأشكال)</span>
+                <MathField
+                  multiline
+                  rows={2}
+                  value={q.explanation}
+                  onChange={(v) => patch(q.id, { explanation: v })}
+                  maxLength={LIMITS.explanation}
+                  placeholder="خطوات الحل أو المعادلات باستخدام شريط الرموز…"
+                  onFocusField={onFocusField}
+                />
+              </label>
+              {showPreview && q.explanation.trim() && (
+                <div className="rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] px-3 py-2 text-sm font-bold text-[#3C3C3C]">
+                  <span className="block text-[11px] font-black text-[#777777] mb-0.5">معاينة الشرح:</span>
                   <MathText text={q.explanation} />
                 </div>
               )}
-            </label>
+              <div className="flex flex-wrap items-start gap-2">
+                <QuizChartEditor
+                  chart={q.explanationChart}
+                  onChange={(c) => patch(q.id, { explanationChart: c })}
+                  buttonLabel="إضافة رسم بياني في الشرح"
+                  headerTitle="الرسم البياني داخل الشرح"
+                />
+                <QuizFigureEditor
+                  figure={q.explanationFigure}
+                  onChange={(f) => patch(q.id, { explanationFigure: f })}
+                  buttonLabel="إضافة شكل هندسي في الشرح"
+                  headerTitle="الشكل الهندسي داخل الشرح"
+                />
+              </div>
+            </div>
             <button
               type="button"
               onClick={() => void copyText(q.id, q.text)}

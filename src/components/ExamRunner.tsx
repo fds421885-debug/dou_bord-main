@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Clock, Flag, LogOut } from 'lucide-react';
 import type { ExamQuestion, ExamSettings } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import { formatDuration } from '../exam';
 import { saveSessionSnapshot } from '../localDraftStore';
 
@@ -191,6 +192,7 @@ export const ExamRunner: React.FC<Props> = ({ ownerId, settings, questions, init
       <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
         <MathText text={q.text} className="text-base font-black text-[#3C3C3C] leading-relaxed" />
         {q.chart && <ChartView chart={q.chart} />}
+        {q.figure && <FigureView figure={q.figure} />}
         <div className="flex flex-col gap-2">
           {q.choices.map((c, ci) => (
             <button

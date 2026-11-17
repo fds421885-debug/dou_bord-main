@@ -37,17 +37,24 @@ const NumInput: React.FC<{ value: number; onCommit: (n: number) => void }> = ({ 
 interface Props {
   chart: QuizChart | undefined;
   onChange: (c: QuizChart | undefined) => void;
+  buttonLabel?: string;
+  headerTitle?: string;
 }
 
-export const QuizChartEditor: React.FC<Props> = ({ chart, onChange }) => {
+export const QuizChartEditor: React.FC<Props> = ({
+  chart,
+  onChange,
+  buttonLabel = 'إضافة رسم بياني / أعمدة',
+  headerTitle = 'الرسم البياني للسؤال',
+}) => {
   if (!chart) {
     return (
       <button
         type="button"
         onClick={() => onChange(newChart('bar'))}
-        className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F0F9FF] border-2 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer"
+        className="self-start flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F0F9FF] hover:bg-[#E0F4FF] border-2 border-b-4 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer active:translate-y-0.5 active:border-b-2 transition-all"
       >
-        <PlusCircle className="w-3.5 h-3.5" /> إضافة رسم بياني / أعمدة
+        <PlusCircle className="w-3.5 h-3.5" /> {buttonLabel}
       </button>
     );
   }
@@ -97,7 +104,7 @@ export const QuizChartEditor: React.FC<Props> = ({ chart, onChange }) => {
   return (
     <div className="rounded-2xl border-2 border-[#1CB0F6]/40 bg-[#F0F9FF] p-3 flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-black text-[#1899D6]">الرسم البياني للسؤال</span>
+        <span className="text-xs font-black text-[#1899D6]">{headerTitle}</span>
         <button
           type="button"
           onClick={() => onChange(undefined)}

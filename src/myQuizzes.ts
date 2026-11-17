@@ -2,6 +2,7 @@ import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from 'firebase/fir
 import { db, handleFirestoreError, OperationType } from './firebase';
 import type { QuizQuestion } from './types';
 import { chartProblem, parseChart, sanitizeChart } from './quizChart';
+import { figureProblem, parseFigure, sanitizeFigure } from './quizFigure';
 
 export const LIMITS = {
   maxQuestions: 100,
@@ -34,87 +35,198 @@ export function emptyQuestion(): QuizQuestion {
 /*  سكريبت الذكاء الاصطناعي الذي ينسخه المستخدم قبل الاستيراد         */
 /* ------------------------------------------------------------------ */
 
-export const IMPORT_PROMPT = String.raw`أنت مساعد متخصص في إعداد الاختبارات. حوّل المادة التي سأعطيك إياها إلى اختبار، وأخرج الناتج على شكل "ملف JSON واحد فقط" داخل كتلة كود واحدة، بدون أي شرح أو كلام قبله أو بعده، وبالشكل التالي بالضبط:
+export const IMPORT_PROMPT = String.raw`أنت مساعد خبير في إعداد الاختبارات الرياضية والعلمية والهندسية. حوّل المادة التي سأعطيك إياها إلى اختبار، وأخرج الناتج على شكل "ملف JSON واحد فقط" داخل كتلة كود واحدة، بدون أي شرح أو كلام قبله أو بعده، وبالشكل التالي بالضبط:
 
 {
   "title": "عنوان مناسب ومختصر للاختبار",
   "questions": [
     {
-      "text": "نص السؤال",
+      "text": "نص السؤال (يدعم الرياضيات بصيغة LaTeX مثل $\\frac{3}{4}$ و $\\sqrt{16}$)",
       "choices": ["الخيار الأول", "الخيار الثاني", "الخيار الثالث", "الخيار الرابع"],
       "correctIndex": 1,
-      "explanation": "شرح مختصر للحل (اختياري)"
+      "explanation": "شرح الحل بالتفصيل خطوة بخطوة مع المعادلات والرموز (اختياري)"
     },
     {
-      "text": "حسب الرسم البياني، في أي شهر كانت المبيعات الأعلى؟",
-      "chart": {
-        "type": "bar",
-        "title": "مبيعات المتجر",
-        "xLabel": "الشهر",
-        "yLabel": "عدد القطع",
-        "labels": ["يناير", "فبراير", "مارس"],
-        "series": [ { "name": "المبيعات", "values": [10, 25, 18] } ]
+      "text": "في الشكل المجاور: مستقيمان متقاطعان في النقطة م، ما قيمة $س$؟",
+      "figure": {
+        "title": "زوايا متقابلة بالرأس",
+        "points": [
+          { "id": "M", "x": 0, "y": 0, "label": "م", "dot": true, "labelPos": "bottom" },
+          { "id": "A", "x": -5, "y": -2.2, "label": "أ" },
+          { "id": "B", "x": 5, "y": 2.2, "label": "ب" },
+          { "id": "C", "x": -3.6, "y": 3.4, "label": "ج" },
+          { "id": "D", "x": 3.6, "y": -3.4, "label": "د" }
+        ],
+        "elements": [
+          { "type": "segment", "from": "A", "to": "B", "extendFrom": true, "extendTo": true, "stroke": "ink" },
+          { "type": "segment", "from": "C", "to": "D", "extendFrom": true, "extendTo": true, "stroke": "ink" },
+          { "type": "angle", "a": "C", "vertex": "M", "b": "B", "label": "115°", "color": "blue", "arcs": 1, "r": 1.4 },
+          { "type": "angle", "a": "A", "vertex": "M", "b": "D", "label": "2س + 15°", "color": "red", "arcs": 1, "r": 1.4 }
+        ]
       },
-      "choices": ["يناير", "فبراير", "مارس", "لا يمكن التحديد"],
+      "choices": ["$40$", "$50$", "$57.5$", "$65$"],
       "correctIndex": 1,
-      "explanation": "أعلى عمود هو فبراير بقيمة 25"
+      "explanation": "الزاويتان متقابلتان بالرأس لذا فهما متساويتان:\n$2س + 15^{\\circ} = 115^{\\circ}$\n$2س = 100^{\\circ} \\Rightarrow س = \\frac{100}{2} = 50$"
     }
   ]
 }
 
-القواعد (التزم بها حرفياً):
+القواعد الصارمة (التزم بها حرفياً ولا تخرج عنها بتاتاً):
 1) الناتج JSON صالح 100%: علامات اقتباس مزدوجة فقط، بدون فواصل زائدة، بدون تعليقات، بدون أي نص خارج الكتلة.
-2) title: عنوان قصير مناسب لمحتوى الاختبار. questions: مصفوفة بحد أقصى 100 سؤال.
-3) كل الأسئلة اختيارية (اختيار من متعدد) بدون استثناء:
+2) title: عنوان قصير مناسب. questions: مصفوفة بحد أقصى 100 سؤال.
+3) كل الأسئلة اختيار من متعدد بدون استثناء:
    - text: نص السؤال (إلزامي).
-   - choices: مصفوفة من 2 إلى 8 خيارات (يفضّل 4).
-   - correctIndex: رقم الخيار الصحيح ويبدأ العد من 0 (0 = الخيار الأول، 1 = الثاني، 2 = الثالث، 3 = الرابع). خيار واحد فقط صحيح، ولا تكتب نص الإجابة بدل الرقم.
-   - explanation: شرح الحل (اختياري، يمكن تركه "").
-4) تحديد الإجابة الصحيحة: احسب الجواب بنفسك أولاً (من النص أو من بيانات الرسم)، ثم اعدّ ترتيب الخيارات، ثم ضع في correctIndex موضع الخيار الصحيح بالضبط. تحقق في النهاية من أن choices[correctIndex] هو الجواب الصحيح فعلاً. وزّع مواضع الإجابات الصحيحة بين 0 و1 و2 و3 ولا تجعلها كلها في الموضع نفسه.
-5) الرسوم البيانية (اختيارية): إن احتاج السؤال إلى رسم أو أعمدة بيانية أضف الحقل chart داخل السؤال، وإن لم يحتج فلا تضع الحقل أبداً. يرسم البرنامج الرسم بنفسه من القيم، فلا تكتب صورة ولا رابطاً. الشكل:
+   - choices: مصفوفة من 2 إلى 8 خيارات (يفضّل 4 خيارات متقاربة الطول).
+   - correctIndex: رقم الخيار الصحيح يبدأ من 0 (0، 1، 2، 3...). وزّع مواضع الإجابة الصحيحة بين 0 و1 و2 و3 ولا تجعلها ثابتة.
+   - explanation: شرح الحل خطوة بخطوة (يُعرض للطالب بعد الإجابة). يُمكن أن يحتوي أسطراً متعددة (\n) ومعادلات وكسوراً وجذوراً بصيغة $...$، ويمكن أيضاً إرفاق "explanationChart" أو "explanationFigure" اختيارياً داخل السؤال إذا احتاج الشرح نفسه رسماً توضيحياً!
+4) تحقق الحساب: احسب الإجابة بدقة بنفسك أولاً، ثم رتب الخيارات، ثم ضع في correctIndex موضع الإجابة الصحيحة وتأكد أن choices[correctIndex] صحيح 100%.
+
+5) الأشكال الهندسية المتجهية (figure — مهم جداً للأسئلة الهندسية البسيطة والمركّبة):
+   متى تستخدمها؟ كلما احتاج السؤال مثلثاً، مربعاً، مستطيلاً، دائرة، قطاعاً، مضلعاً منتظماً، زوايا متقابلة بالرأس، مستقيمات متوازية وقاطعاً، زاوية خارجية، دائرة داخل مربع (مناطق مظللة)، أو أشكالاً هندسية مركبة بأطوال أو زوايا أو مجاهيل مثل س أو ص أو x أو 2س + 10°.
+   يرسم البرنامج الشكل بدقة هندسية من الإحداثيات! فلا تكتب صورة ولا رابطاً.
+   نظام الإحداثيات: ديكارتي رياضي قياسي (Y للأعلى): x يزيد لليمين، و y يزيد للأعلى، والزاوية 0° لليمين و90° للأعلى.
+   البنية الدقيقة للكائن "figure":
+   {
+     "title": "عنوان الشكل (اختياري)",
+     "caption": "ملاحظة قصيرة أسفل الشكل (اختياري)",
+     "grid": false,
+     "points": [
+       { "id": "A", "x": 0, "y": 4, "label": "أ", "labelPos": "top", "dot": true }
+     ],
+     "elements": [ ... ]
+   }
+   - الحقول المسموحة داخل كل نقطة في points:
+     • id: معرّف إنجليزي قصير وفريد ("A","B","C","M","O"...).
+     • x, y: أرقام حقيقية دقيقة هندسياً (تأكد من تطابق النسب والتماس والاستقامة).
+     • label: الاسم الظاهر على الرسم ("أ"، "ب"، "م"، أو "" لإخفائه).
+     • labelPos (اختياري): "auto" | "top" | "bottom" | "left" | "right" | "top-left" | "top-right" | "bottom-left" | "bottom-right".
+     • dot (اختياري): true لإظهار نقطة سوداء صغيرة واضحة.
+   - الألوان المعتمدة في fill / stroke / color هي إحدى الكلمات الإنجليزية فقط:
+     "ink" (أسود داكن) | "blue" (أزرق) | "green" (أخضر) | "gold" (ذهبي) | "purple" (بنفسجي) | "red" (أحمر) | "gray" (رمادي) | "white" (أبيض للتفريغ) | "none" (شفاف لـ fill فقط).
+
+   أنواع العناصر الستة داخل "elements" (التزم بأسماء الحقول بدقة):
+   أ) مضلع ("polygon"): مثلث، مربع، مستطيل، معين، شبه منحرف، سداسي...
+      { "type": "polygon", "points": ["A","B","C"], "fill": "blue", "fillOpacity": 0.16, "stroke": "ink", "dashed": false, "sideLabels": ["3 سم", "4 سم", "س"], "ticks": [1, 1, 0] }
+      • sideLabels (اختياري): مصفوفة بنفس عدد رؤوس المضلع (الترتيب: الضلع بين points[0]-points[1] ثم [1]-[2]... والأخير بين [n-1]-[0]؛ اترك "" للضلع بلا تسمية).
+      • ticks (اختياري): شرطة التطابق (1 أو 2 أو 3 أو 0) على كل ضلع بنفس الترتيب.
+   ب) قطعة / مستقيم / شعاع ("segment"):
+      { "type": "segment", "from": "A", "to": "B", "extendFrom": true, "extendTo": true, "stroke": "ink", "dashed": false, "label": "5 سم", "ticks": 1, "parallel": 1 }
+      • extendFrom: true يمدّ الخط بسهم من جهة from، و extendTo: true يمده بسهم من جهة to (للمستقيم الممتد ضعهما true، وللشعاع ضع extendTo: true).
+      • parallel: 1 أو 2 يرسم أسهم التوازي (› أو ››) على المستقيمات المتوازية!
+   ج) دائرة ("circle"):
+      { "type": "circle", "center": "O", "r": 3, "fill": "none", "fillOpacity": 0.2, "stroke": "ink", "dashed": false, "showCenter": true, "radiusAngleDeg": 0, "radiusLabel": "نق = 5", "diameterAngleDeg": 90, "diameterLabel": "ق = 10" }
+   د) قوس أو قطاع دائري ("arc"):
+      { "type": "arc", "center": "O", "r": 4, "startDeg": 0, "endDeg": 60, "sector": true, "fill": "gold", "fillOpacity": 0.45, "stroke": "gold", "label": "طول القوس" }
+   هـ) زاوية ("angle"):
+      { "type": "angle", "a": "B", "vertex": "A", "b": "C", "label": "س°", "right": false, "arcs": 1, "reflex": false, "color": "red", "r": 1.2 }
+      • يرسم القوس الأصغر (≤180°) تلقائياً عند الرأس vertex بين الضلعين vertex→a و vertex→b (وللزوايا المنعكسة >180° أضف "reflex": true).
+      • للزاوية القائمة 90° ضع "right": true فيرسم مربع التعامد بدقة!
+      • arcs (1 أو 2 أو 3): يرسم قوساً أو قوسين أو ثلاثة للتمييز بين الزوايا المتساوية والمختلفة.
+      • لا تضع قياس الزاوية الحقيقي في الجواب إذا كان مطلوباً إيجاده؛ اكتب مكانه "س°" أو "2س + 10°" أو "x".
+   و) نص حر ("label"):
+      { "type": "label", "x": 3, "y": 5.5, "text": "الجزء المظلل", "color": "blue" }
+
+   نماذج إحداثيات جاهزة للأشكال المعقدة (اتبع نفس المنطق الرياضي):
+   • تقاطع مستقيمين (زوايا متقابلة بالرأس): ضع المركز M=(0,0)، والنقطتين A=(-5,-2) و B=(5,2) على خط واحد (يمران بـ M لأن المجموع 0)، والنقطتين C=(-3,4) و D=(3,-4) على الخط الثاني، مع extendFrom:true و extendTo:true. الزاويتان المتقابلتان هما angle(C,M,B) و angle(A,M,D).
+   • مستقيمان متوازيان وقاطع: ضع المستقيم العلوي y=3 من (-5,3) إلى (6,3) والمستقيم السفلي y=0 من (-5,0) إلى (6,0) كلاهما مع "parallel": 1. القاطع يمر بنقطتين تحققهما نفس معادلة الخط المستقيم (مثلاً من T1=(-1.5,5) إلى P=(0,3) إلى Q=(2.25,0) إلى T2=(3.75,-2) — لاحظ ثبات الميل Δy/Δx = -4/3 على كل النقاط!).
+   • زاوية خارجية لمثلث: اجعل B=(0,0)، C=(5,0)، D=(8.5,0) على استقامة واحدة أفقياً، و A=(2.5,4)، فارسم triangle(A,B,C) و segment(C,D) بـ extendTo:true، والزاوية الخارجية هي angle(A,C,D).
+   • منطقة مظللة (دائرة داخل مربع مثلاً): ضع مربعاً من (0,0) إلى (6,6) بـ fill:"blue", fillOpacity:0.35، ثم ارسم بعده مباشرة في elements دائرة مركزها O=(3,3) ونصف قطرها r=3 بـ "fill": "white", "fillOpacity": 1! الترتيب واللون "white" يفرّغ الدائرة ويُبقي أركان المربع الأربعة مظللة بدقة متناهية!
+
+6) الرسوم البيانية (chart — اختيارية): إن احتاج السؤال إلى أعمدة أو خط بياني أو دائرة نسب، أضف الحقل "chart":
    "chart": {
      "type": "bar",
      "title": "عنوان الرسم (اختياري)",
-     "xLabel": "اسم المحور الأفقي (اختياري)",
-     "yLabel": "اسم المحور الرأسي أو الوحدة (اختياري)",
-     "labels": ["تسمية 1", "تسمية 2", "تسمية 3"],
-     "series": [ { "name": "اسم السلسلة", "values": [10, 25, 18] } ]
+     "xLabel": "المحور الأفقي",
+     "yLabel": "المحور الرأسي",
+     "labels": ["أ", "ب", "ج"],
+     "series": [ { "name": "السلسلة", "values": [10, 25, 18] } ]
    }
    - type أحد أربعة فقط: "bar" أعمدة رأسية، "hbar" أعمدة أفقية، "line" خط بياني، "pie" رسم دائري.
-   - labels: تسميات المحور الأفقي (أو شرائح الدائرة). values: أرقام حقيقية بدون علامات اقتباس، وعددها يساوي عدد labels تماماً.
-   - للمقارنة بين مجموعتين أو ثلاث (أعمدة أو خط) استخدم أكثر من عنصر داخل series (حتى 3 سلاسل)، ولكل واحدة name مختلف. الرسم الدائري يقبل سلسلة واحدة فقط وقيمها موجبة.
-   - الحد الأقصى 20 تسمية لكل رسم. لا تذكر ألوان الأعمدة في نص السؤال أو الخيارات لأن البرنامج هو من يختار الألوان؛ أشر إلى السلسلة باسمها (name).
-   - يجب أن يكون جواب السؤال قابلاً للاستنتاج من بيانات الرسم نفسها (أعلى قيمة، الفرق، المجموع، المتوسط، النسبة...).
-6) الرياضيات: ضع كل رمز أو معادلة رياضية بين علامتي دولار $...$ بصيغة LaTeX، والنص العادي يبقى خارجها. الصيغ المطلوبة:
-   - كسر: $\\frac{3}{4}$   (البسط ثم المقام)
-   - جذر تربيعي: $\\sqrt{x}$   — جذر تكعيبي: $\\sqrt[3]{x}$   — جذر من الدرجة n: $\\sqrt[n]{x}$
-   - أس: $x^{2}$ ، $2^{n+1}$   — دليل سفلي: $x_{1}$
-   - ضرب وقسمة وزائد/ناقص: $\\times$ ، $\\div$ ، $\\pm$
-   - مقارنة: $\\leq$ ، $\\geq$ ، $\\neq$ ، $\\approx$
-   - ثوابت ورموز: $\\pi$ ، $\\infty$ ، $90^{\\circ}$ (درجة)
-   - حروف يونانية: $\\alpha$ ، $\\beta$ ، $\\theta$ ، $\\Delta$ ، $\\Omega$
-   - مجموع: $\\sum_{i=1}^{n} i$   — تكامل: $\\int_{0}^{1} x\\,dx$   — نهاية: $\\lim_{x\\to 0} f(x)$
-   - دوال: $\\sin x$ ، $\\cos x$ ، $\\tan x$ ، $\\log_{2} x$ ، $\\ln x$
-   - قيمة مطلقة: $|x|$ — متجه: $\\vec{v}$ — زاوية: $\\angle A$ — مثلث: $\\triangle ABC$
-   - أسهم ومجموعات: $\\to$ ، $\\Rightarrow$ ، $\\in$ ، $\\cup$ ، $\\cap$ ، $\\subset$
-   - معادلة كاملة مثال: $x = \\frac{-b \\pm \\sqrt{b^{2}-4ac}}{2a}$
-   - إذا احتجت علامة الدولار كعملة اكتبها هكذا: \\$
-7) مهم جداً بخصوص الشرطة المائلة: لأن الملف JSON يجب كتابة كل شرطة مائلة "\" مرتين "\\" كما في الأمثلة أعلاه. الصحيح: "$\\frac{1}{2}$" والخطأ: "$\frac{1}{2}$".
-8) لا تستخدم Markdown أو HTML داخل النصوص. اكتب بلغة المادة (غالباً العربية الفصحى). اجعل الخيارات متقاربة الطول.
+   - عدد القيم values يجب أن يساوي عدد labels تماماً، وتكون أرقاماً صافية بلا اقتباس.
+
+7) الرياضيات والرموز (داخل text و choices و explanation):
+   ضع كل تعبير رياضي بين $...$ بصيغة LaTeX:
+   - كسر: $\\frac{3}{4}$   | جذر تربيعي: $\\sqrt{x}$   | جذر تكعيبي: $\\sqrt[3]{x}$
+   - أس: $x^{2}$ ، $2^{n+1}$ | دليل: $x_{1}$ | درجة: $90^{\\circ}$
+   - رموز: $\\times$ ، $\\div$ ، $\\pm$ ، $\\leq$ ، $\\geq$ ، $\\neq$ ، $\\approx$ ، $\\pi$ ، $\\infty$ ، $\\theta$ ، $\\alpha$ ، $\\beta$ ، $\\Delta$ ، $\\angle$ ، $\\triangle$ ، $\\perp$ ، $\\parallel$ ، $\\Rightarrow$
+   - قاعدة JSON للشرطة المائلة: يجب كتابة كل شرطة مائلة مرتين "\\" داخل النص مثل "$\\frac{1}{2}$" و "$\\sqrt{49}$". للسطر الجديد داخل explanation اكتب "\n".
+   - لا تستخدم Markdown أو HTML مثل ** أو <br>.
 
 المادة المطلوب تحويلها إلى اختبار:
 (الصق هنا المادة أو الأسئلة أو أرفق الملف)`;
 
-/** مثال كامل جاهز للتجربة داخل شاشة الاستيراد */
+/** مثال كامل جاهز للتجربة داخل شاشة الاستيراد (رياضيات + هندسة مركبة + رسوم بيانية + شرح مفصل) */
 export const EXAMPLE_JSON = JSON.stringify(
   {
-    title: 'مثال: الجذور والرسوم البيانية',
+    title: 'مثال: الهندسة والرياضيات والرسوم البيانية',
     questions: [
       {
         text: 'ما قيمة $\\sqrt{49} + \\frac{1}{2}$ ؟',
         choices: ['$7.5$', '$7$', '$8$', '$6.5$'],
         correctIndex: 0,
-        explanation: '$\\sqrt{49}=7$ ثم نضيف $\\frac{1}{2}$ فيكون الناتج $7.5$',
+        explanation: 'أولاً نحسب الجذر: $\\sqrt{49} = 7$\nثم نضيف الكسر: $7 + \\frac{1}{2} = 7.5$',
+      },
+      {
+        text: 'في الشكل المقابل، مستقيمان متقاطعان عند النقطة م. ما قيمة $س$؟',
+        figure: {
+          title: 'زوايا متقابلة بالرأس',
+          points: [
+            { id: 'M', x: 0, y: 0, label: 'م', dot: true, labelPos: 'bottom' },
+            { id: 'A', x: -5, y: -2.2, label: 'أ' },
+            { id: 'B', x: 5, y: 2.2, label: 'ب' },
+            { id: 'C', x: -3.6, y: 3.4, label: 'ج' },
+            { id: 'D', x: 3.6, y: -3.4, label: 'د' },
+          ],
+          elements: [
+            { type: 'segment', from: 'A', to: 'B', extendFrom: true, extendTo: true, stroke: 'ink' },
+            { type: 'segment', from: 'C', to: 'D', extendFrom: true, extendTo: true, stroke: 'ink' },
+            { type: 'angle', a: 'C', vertex: 'M', b: 'B', label: '115°', color: 'blue', arcs: 1, r: 1.45 },
+            { type: 'angle', a: 'A', vertex: 'M', b: 'D', label: '2س + 15°', color: 'red', arcs: 1, r: 1.45 },
+          ],
+        },
+        choices: ['$40$', '$50$', '$57.5$', '$65$'],
+        correctIndex: 1,
+        explanation:
+          'بما أن الزاويتين متقابلتان بالرأس فهما متساويتان:\n$2س + 15^{\\circ} = 115^{\\circ}$\n$2س = 115^{\\circ} - 15^{\\circ} = 100^{\\circ}$\n$س = \\frac{100}{2} = 50$',
+      },
+      {
+        text: 'في الشكل المجاور دائرة مرسومة داخل مربع طول ضلعه $10$ سم وتمس أضلاعه الأربعة. ما مساحة المنطقة المظللة؟ (اعتبر $\\pi \\approx 3.14$)',
+        figure: {
+          title: 'دائرة تمس أضلاع مربع من الداخل',
+          caption: 'المنطقة الزرقاء هي المطلوب حساب مساحتها',
+          points: [
+            { id: 'A', x: 0, y: 6, label: 'أ', labelPos: 'top-left' },
+            { id: 'B', x: 6, y: 6, label: 'ب', labelPos: 'top-right' },
+            { id: 'C', x: 6, y: 0, label: 'ج', labelPos: 'bottom-right' },
+            { id: 'D', x: 0, y: 0, label: 'د', labelPos: 'bottom-left' },
+            { id: 'O', x: 3, y: 3, dot: true },
+          ],
+          elements: [
+            {
+              type: 'polygon',
+              points: ['A', 'B', 'C', 'D'],
+              fill: 'blue',
+              fillOpacity: 0.35,
+              stroke: 'ink',
+              sideLabels: ['', '10 سم', '', ''],
+            },
+            {
+              type: 'circle',
+              center: 'O',
+              r: 3,
+              fill: 'white',
+              fillOpacity: 1,
+              stroke: 'ink',
+              showCenter: true,
+              radiusAngleDeg: 0,
+              radiusLabel: 'نق = 5',
+            },
+          ],
+        },
+        choices: ['$21.5\\text{ سم}^{2}$', '$28.5\\text{ سم}^{2}$', '$78.5\\text{ سم}^{2}$', '$100\\text{ سم}^{2}$'],
+        correctIndex: 0,
+        explanation:
+          'مساحة المربع $= 10 \\times 10 = 100\\text{ سم}^{2}$\nطول نصف قطر الدائرة $\\text{نق} = \\frac{10}{2} = 5\\text{ سم}$\nمساحة الدائرة $= \\pi \\times \\text{نق}^{2} = 3.14 \\times 5^{2} = 78.5\\text{ سم}^{2}$\nمساحة المنطقة المظللة $= 100 - 78.5 = 21.5\\text{ سم}^{2}$',
       },
       {
         text: 'حسب الرسم، في أي شهر كانت المبيعات الأعلى؟',
@@ -128,7 +240,7 @@ export const EXAMPLE_JSON = JSON.stringify(
         },
         choices: ['يناير', 'فبراير', 'مارس', 'لا يمكن التحديد'],
         correctIndex: 1,
-        explanation: 'أعلى عمود هو فبراير بقيمة 25',
+        explanation: 'أعلى عمود هو شهر فبراير بقيمة $25$ قطعة.',
       },
       {
         text: 'ما نسبة من اختار "كرة القدم" إلى المجموع؟',
@@ -140,24 +252,7 @@ export const EXAMPLE_JSON = JSON.stringify(
         },
         choices: ['$20\\%$', '$30\\%$', '$50\\%$', '$60\\%$'],
         correctIndex: 2,
-        explanation: '$\\frac{50}{100}=50\\%$',
-      },
-      {
-        text: 'قارن بين الصفين: أي صف زادت درجاته أكثر في الاختبار الثالث عن الأول؟',
-        chart: {
-          type: 'line',
-          title: 'متوسط الدرجات',
-          xLabel: 'الاختبار',
-          yLabel: 'الدرجة',
-          labels: ['الأول', 'الثاني', 'الثالث'],
-          series: [
-            { name: 'الصف أ', values: [60, 70, 85] },
-            { name: 'الصف ب', values: [65, 68, 72] },
-          ],
-        },
-        choices: ['الصف أ', 'الصف ب', 'تساوى الصفان', 'لا يمكن التحديد'],
-        correctIndex: 0,
-        explanation: 'الصف أ: 85 − 60 = 25، الصف ب: 72 − 65 = 7',
+        explanation: 'المجموع $= 50 + 30 + 20 = 100$، فتكون النسبة $= \\frac{50}{100} = 50\\%$',
       },
     ],
   },
@@ -170,7 +265,7 @@ export const EXAMPLE_JSON = JSON.stringify(
 /* ------------------------------------------------------------------ */
 
 const LATEX_AFTER_ESCAPE =
-  /^(?:frac|forall|times|theta|tan|tau|text|textbf|to|therefore|triangle|beta|bar|binom|bigcup|bigcap|big|bullet|neq|ne|nu|nabla|notin|not|neg|ni|right|rho|rightarrow|underline|upsilon|uparrow|upharpoonleft|rfloor|rceil|rangle|lfloor|lceil|langle|rbrace|lbrace|ldots|cdot|cdots)(?![a-zA-Z])/;
+  /^(?:frac|forall|fbox|flat|times|theta|tan|tau|text|textbf|to|therefore|triangle|beta|bar|binom|bigcup|bigcap|big|bullet|boxed|bot|neq|ne|nu|nabla|notin|not|neg|ni|natural|right|rho|rightarrow|underline|upsilon|uparrow|upharpoonleft|rfloor|rceil|rangle|lfloor|lceil|langle|rbrace|lbrace|ldots|cdot|cdots)(?![a-zA-Z])/;
 
 /** يصلح الشرطات المائلة المفردة داخل JSON (مثل \frac و \sqrt) حتى لا تتلف. */
 export function sanitizeJsonBackslashes(raw: string): string {
@@ -362,9 +457,36 @@ export function parseQuizJson(input: string): ParsedQuiz {
       if (pc.chart) chart = pc.chart;
     }
 
+    let figure: QuizQuestion['figure'];
+    const rawFigure = o.figure ?? o.geometry ?? o.shape ?? o['شكل'];
+    if (rawFigure !== undefined && rawFigure !== null) {
+      const pf = parseFigure(rawFigure);
+      pf.warnings.forEach((w) => warnings.push(`السؤال ${n}: ${w}`));
+      if (pf.figure) figure = pf.figure;
+    }
+
+    let explanationChart: QuizQuestion['explanationChart'];
+    const rawExpChart = o.explanationChart;
+    if (rawExpChart !== undefined && rawExpChart !== null) {
+      const pc = parseChart(rawExpChart);
+      pc.warnings.forEach((w) => warnings.push(`السؤال ${n} (رسم الشرح): ${w}`));
+      if (pc.chart) explanationChart = pc.chart;
+    }
+
+    let explanationFigure: QuizQuestion['explanationFigure'];
+    const rawExpFigure = o.explanationFigure;
+    if (rawExpFigure !== undefined && rawExpFigure !== null) {
+      const pf = parseFigure(rawExpFigure);
+      pf.warnings.forEach((w) => warnings.push(`السؤال ${n} (شكل الشرح): ${w}`));
+      if (pf.figure) explanationFigure = pf.figure;
+    }
+
     questions.push({
       id: newQuestionId(),
       ...(chart ? { chart } : {}),
+      ...(figure ? { figure } : {}),
+      ...(explanationChart ? { explanationChart } : {}),
+      ...(explanationFigure ? { explanationFigure } : {}),
       text: cut(qText, LIMITS.text, 'نص السؤال'),
       choices: choices.map((c) => cut(c, LIMITS.choice, 'أحد الخيارات')),
       correctIndex,
@@ -388,6 +510,9 @@ export function quizToExportJson(title: string, questions: QuizQuestion[]): stri
         answer: q.answer,
         explanation: q.explanation,
         ...(q.chart ? { chart: q.chart } : {}),
+        ...(q.figure ? { figure: q.figure } : {}),
+        ...(q.explanationChart ? { explanationChart: q.explanationChart } : {}),
+        ...(q.explanationFigure ? { explanationFigure: q.explanationFigure } : {}),
       })),
     },
     null,
@@ -410,9 +535,15 @@ export function cleanQuestions(questions: QuizQuestion[]): QuizQuestion[] {
     if (choices.length < 2 || correctIndex < 0 || correctIndex >= choices.length) correctIndex = -1;
     const finalChoices = choices.length >= 2 ? choices : [];
     const chart = q.chart ? sanitizeChart(q.chart) : null;
+    const figure = q.figure ? sanitizeFigure(q.figure) : null;
+    const explanationChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
+    const explanationFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
     out.push({
       id: q.id,
       ...(chart ? { chart } : {}),
+      ...(figure ? { figure } : {}),
+      ...(explanationChart ? { explanationChart } : {}),
+      ...(explanationFigure ? { explanationFigure } : {}),
       text: text.slice(0, LIMITS.text),
       choices: finalChoices,
       correctIndex: finalChoices.length ? correctIndex : -1,
@@ -441,6 +572,18 @@ export function validateForSave(title: string, questions: QuizQuestion[]): strin
     if (q.chart) {
       const prob = chartProblem(q.chart);
       if (prob) return `السؤال ${num} (الرسم البياني): ${prob}`;
+    }
+    if (q.figure) {
+      const prob = figureProblem(q.figure);
+      if (prob) return `السؤال ${num} (الشكل الهندسي): ${prob}`;
+    }
+    if (q.explanationChart) {
+      const prob = chartProblem(q.explanationChart);
+      if (prob) return `السؤال ${num} (رسم الشرح): ${prob}`;
+    }
+    if (q.explanationFigure) {
+      const prob = figureProblem(q.explanationFigure);
+      if (prob) return `السؤال ${num} (شكل الشرح): ${prob}`;
     }
   }
   if (cleaned.length > LIMITS.maxQuestions) return `الحد الأقصى ${LIMITS.maxQuestions} سؤال.`;

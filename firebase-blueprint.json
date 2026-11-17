@@ -214,6 +214,9 @@
         "chart": {
           "type": "object"
         },
+        "figure": {
+          "type": "object"
+        },
         "sourceQuizTitle": {
           "type": "string",
           "maxLength": 120
@@ -422,6 +425,15 @@
           "maxLength": 2000
         },
         "chart": {
+          "type": "object"
+        },
+        "figure": {
+          "type": "object"
+        },
+        "explanationChart": {
+          "type": "object"
+        },
+        "explanationFigure": {
           "type": "object"
         },
         "winnerTimeMs": {

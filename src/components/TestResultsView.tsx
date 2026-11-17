@@ -34,6 +34,7 @@ import type {
   UserProfile,
 } from '../types';
 import { ChartView } from './ChartView';
+import { FigureView } from './FigureView';
 import { formatTimeSeconds } from './CompetitionArena';
 import {
   DUO_IMAGES,
@@ -185,6 +186,9 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 correctIndex: cq.question.correctIndex,
                 explanation: (cq.question.explanation || '').slice(0, 2000),
                 ...(cq.question.chart ? { chart: cq.question.chart } : {}),
+                ...(cq.question.figure ? { figure: cq.question.figure } : {}),
+                ...(cq.question.explanationChart ? { explanationChart: cq.question.explanationChart } : {}),
+                ...(cq.question.explanationFigure ? { explanationFigure: cq.question.explanationFigure } : {}),
                 winnerTimeMs: cq.winnerTimeMs || 0,
                 status: cq.status === 'solving' ? 'unanswered' : cq.status,
                 winnerName: (cq.winnerName || '').slice(0, 120),
@@ -317,6 +321,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               imageData: q.imageData,
               ...(q.choices ? { choices: q.choices } : {}),
               ...(q.chart ? { chart: q.chart } : {}),
+              ...(q.figure ? { figure: q.figure } : {}),
               status: q.status,
               winnerName: q.winnerName,
               boards: boardsList,
@@ -402,6 +407,9 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
               ...(sq.explanation ? { explanation: sq.explanation } : {}),
               ...(sq.chart ? { chart: sq.chart } : {}),
+              ...(sq.figure ? { figure: sq.figure } : {}),
+              ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
+              ...(sq.explanationFigure ? { explanationFigure: sq.explanationFigure } : {}),
               ...(typeof sq.winnerTimeMs === 'number' ? { winnerTimeMs: sq.winnerTimeMs } : {}),
               status: sq.status,
               winnerName: sq.winnerName,
@@ -433,6 +441,9 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
                 ...(sq.explanation ? { explanation: sq.explanation } : {}),
                 ...(sq.chart ? { chart: sq.chart } : {}),
+                ...(sq.figure ? { figure: sq.figure } : {}),
+                ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
+                ...(sq.explanationFigure ? { explanationFigure: sq.explanationFigure } : {}),
                 ...(typeof sq.winnerTimeMs === 'number' ? { winnerTimeMs: sq.winnerTimeMs } : {}),
                 status: sq.status,
                 winnerName: sq.winnerName,
@@ -645,6 +656,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                   </div>
 
                   {q.chart && <ChartView chart={q.chart} className="max-w-lg" />}
+                  {q.figure && <FigureView figure={q.figure} className="max-w-lg" />}
 
                   {q.imageData && (
                     <div>
@@ -692,10 +704,12 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                     </div>
                   )}
 
-                  {q.explanation && (
-                    <div className="p-3 rounded-xl bg-[#FFFDF2] border-2 border-[#FFC800] text-xs sm:text-sm font-bold text-[#3C3C3C]">
-                      <span className="font-black text-[#9A6B00] ml-1.5">التفسير:</span>
-                      <MathText text={q.explanation} className="inline" />
+                  {(q.explanation || q.explanationChart || q.explanationFigure) && (
+                    <div className="p-3.5 rounded-xl bg-[#FFFDF2] border-2 border-[#FFC800] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
+                      <span className="font-black text-[#9A6B00] text-[11px]">شرح الإجابة:</span>
+                      {q.explanation && <MathText text={q.explanation} />}
+                      {q.explanationChart && <ChartView chart={q.explanationChart} className="max-w-lg" />}
+                      {q.explanationFigure && <FigureView figure={q.explanationFigure} className="max-w-lg" />}
                     </div>
                   )}
 

@@ -218,9 +218,9 @@ export default function App() {
     });
   }, []);
 
-  // Watch platform/migration pointer safely (never crash on permission-denied on older source rules)
+  // Watch platform/migration pointer safely BOTH pre-login and post-login so all old/new users switch automatically
   useEffect(() => {
-    if (justConsolidatedFrom || !firebaseUser || !firebaseUser.emailVerified) return;
+    if (justConsolidatedFrom) return;
     const unsub = onSnapshot(
       doc(db, 'platform', 'migration'),
       (snap) => {
@@ -241,24 +241,29 @@ export default function App() {
         }
 
         setAutoSwitchNotice(ptrCfg.projectId);
-        window.setTimeout(() => {
+        window.setTimeout(async () => {
+          try {
+            await signOut(auth);
+          } catch {
+            // Ignore signOut errors on detached DB
+          }
           activateCustomFirebaseConfig(
             ptrCfg,
             ptr.migratedRoomId || activeRoomId || null,
             Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : []
           );
+          const url = new URL(window.location.href);
+          url.searchParams.delete('fb');
           if (ptr.migratedRoomId) {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('fb');
             url.searchParams.set('room', ptr.migratedRoomId);
-            window.location.href = url.toString();
           } else {
-            window.location.reload();
+            url.searchParams.delete('room');
           }
+          window.location.replace(url.toString());
         }, 700);
       },
       () => {
-        // Silent fallback when older project rules don't expose /platform/migration
+        // Silent fallback when unauthenticated on older rules or quota-limited DB
       }
     );
     return () => unsub();

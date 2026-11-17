@@ -391,9 +391,9 @@ service cloud.firestore {
           'id', 'projectId', 'apiKey', 'authDomain', 'appId', 'migratedBy', 'migratedByName', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'projectId', 'apiKey', 'authDomain', 'storageBucket', 'messagingSenderId',
+          'id', 'projectId', 'apiKey', 'authDomain', 'appId', 'storageBucket', 'messagingSenderId',
           'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
-          'migratedRoomId', 'previousConfigs', 'updatedAt'
+          'migratedRoomId', 'migrationEpoch', 'previousConfigs', 'updatedAt'
         ])
         && isValidId(data.id)
         && data.projectId is string && data.projectId.size() >= 4 && data.projectId.size() <= 64
@@ -409,6 +409,7 @@ service cloud.firestore {
         && data.migratedBy == request.auth.uid
         && data.migratedByName is string && data.migratedByName.size() >= 1 && data.migratedByName.size() <= 120
         && (!('migratedRoomId' in data) || (data.migratedRoomId is string && data.migratedRoomId.size() <= 16))
+        && (!('migrationEpoch' in data) || (data.migrationEpoch is string && data.migrationEpoch.size() <= 64))
         && (!('previousConfigs' in data) || (
           data.previousConfigs is list
           && data.previousConfigs.size() <= 10
@@ -418,7 +419,7 @@ service cloud.firestore {
     }
 
     match /platform/{docId} {
-      allow get: if isValidId(docId) && isVerified();
+      allow get: if isValidId(docId) && (docId == 'migration' || isVerified());
       allow list: if false;
       allow create: if isValidId(docId) && isVerified()
         && isValidPlatformPointer(incoming())
@@ -431,9 +432,9 @@ service cloud.firestore {
         && incoming().migratedBy == request.auth.uid
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'projectId', 'apiKey', 'authDomain', 'storageBucket', 'messagingSenderId',
+          'projectId', 'apiKey', 'authDomain', 'appId', 'storageBucket', 'messagingSenderId',
           'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
-          'migratedRoomId', 'previousConfigs', 'updatedAt'
+          'migratedRoomId', 'migrationEpoch', 'previousConfigs', 'updatedAt'
         ]);
       allow delete: if false;
     }
@@ -562,6 +563,8 @@ service cloud.firestore {
           || (incoming().status == 'finished'
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
         );
+      allow delete: if isValidId(roomId) && isVerified()
+        && existing().supervisorId == request.auth.uid;
 
       match /slides/{slideId} {
         allow get: if isValidId(roomId) && isValidId(slideId) && isVerified()
@@ -591,8 +594,7 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
           && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
         allow delete: if isValidId(roomId) && isValidId(slideId) && isVerified()
-          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
-          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid;
 
         match /layers/{layerId} {
           allow get: if isValidId(roomId) && isValidId(slideId) && isValidId(layerId) && isVerified()
@@ -722,6 +724,8 @@ service cloud.firestore {
             )
           )
           && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'updatedBy', 'updatedByName', 'updatedAt']);
+        allow delete: if isValidId(roomId) && isValidId(boardId) && isVerified()
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid;
       }
 
       match /explainLayers/{layerId} {
@@ -809,6 +813,11 @@ service cloud.firestore {
           && incoming().joinedAt == existing().joinedAt
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly(['score', 'correctCount', 'updatedAt']);
+        allow delete: if isValidId(roomId) && isValidId(participantId) && isVerified()
+          && (
+            participantId == request.auth.uid
+            || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          );
       }
 
       match /questions/{questionId} {
@@ -862,6 +871,8 @@ service cloud.firestore {
             || (incoming().status == 'unanswered'
               && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'attemptsUsed', 'wrongStudentIds', 'updatedAt']))
           );
+        allow delete: if isValidId(roomId) && isValidId(questionId) && isVerified()
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid;
 
         match /boards/{studentId} {
           allow get: if isValidId(roomId) && isValidId(questionId) && isValidId(studentId) && isVerified()
@@ -899,6 +910,11 @@ service cloud.firestore {
                 && incoming().strokes == existing().strokes
                 && incoming().submitted == existing().submitted
                 && incoming().diff(existing()).affectedKeys().hasOnly(['verdict', 'updatedAt']))
+            );
+          allow delete: if isValidId(roomId) && isValidId(questionId) && isValidId(studentId) && isVerified()
+            && (
+              studentId == request.auth.uid
+              || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
             );
         }
       }
@@ -1007,6 +1023,8 @@ service cloud.firestore {
               )
             )
           );
+        allow delete: if isValidId(roomId) && isValidId(compId) && isVerified()
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid;
 
         match /questions/{qDocId} {
           allow get: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
@@ -1066,6 +1084,8 @@ service cloud.firestore {
                 )
               )
             );
+          allow delete: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
+            && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid;
 
           match /boards/{studentId} {
             allow get: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isValidId(studentId) && isVerified()
@@ -1099,6 +1119,11 @@ service cloud.firestore {
               && incoming().updatedAt == request.time
               && get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.status == 'active'
               && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'submitted', 'updatedAt']);
+            allow delete: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isValidId(studentId) && isVerified()
+              && (
+                studentId == request.auth.uid
+                || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              );
           }
         }
       }

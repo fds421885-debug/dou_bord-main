@@ -912,6 +912,10 @@
           "type": "string",
           "maxLength": 16
         },
+        "migrationEpoch": {
+          "type": "string",
+          "maxLength": 64
+        },
         "previousConfigs": {
           "type": "array",
           "description": "Bounded chain of prior Firebase configs so re-migration and personal account sync work seamlessly"

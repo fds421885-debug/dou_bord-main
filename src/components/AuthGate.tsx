@@ -3,10 +3,12 @@ import { signInWithPopup, signOut, type User } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { LogIn, UserCheck, AlertCircle, LogOut, Database } from 'lucide-react';
 import {
+  activeProjectId,
   auth,
   db,
   googleProvider,
   handleFirestoreError,
+  isCustomFirebaseConfig,
   isQuadNameValid,
   OperationType,
   UPGRADE_FIRESTORE_URL,
@@ -226,6 +228,20 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   </div>
                 )}
 
+                <div
+                  className={`flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl border-2 text-xs font-black ${
+                    isCustomFirebaseConfig
+                      ? 'bg-[#F0F9FF] border-[#1CB0F6] text-[#1899D6]'
+                      : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777]'
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Database className="w-4 h-4 shrink-0" />
+                    <span>قاعدة تسجيل الدخول المعتمدة:</span>
+                  </span>
+                  <span className="font-latin font-black">{activeProjectId}</span>
+                </div>
+
                 <button
                   type="button"
                   disabled={loading}
@@ -243,7 +259,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                     className="duo-btn w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#1899D6] hover:border-[#1CB0F6] cursor-pointer"
                   >
                     <Database className="w-4 h-4" />
-                    <span>نقل إلى قاعدة بيانات أخرى</span>
+                    <span>نقل وربط قاعدة بيانات جديدة</span>
                   </button>
                 )}
               </div>

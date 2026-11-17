@@ -53,6 +53,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
   const [configInput, setConfigInput] = useState('');
   const [showAdvancedDb, setShowAdvancedDb] = useState(false);
   const [customDatabaseId, setCustomDatabaseId] = useState('');
+  const [cleanupOldDatabase, setCleanupOldDatabase] = useState(true);
   const [migrating, setMigrating] = useState(false);
   const [progress, setProgress] = useState<MigrationProgress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -111,6 +112,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
         currentProfile,
         currentRoom,
         isSupervisorInCurrentRoom,
+        cleanupOldDatabase,
         onProgress: (p) => setProgress(p),
       });
       setResult(res);
@@ -171,10 +173,10 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
       const url = new URL(window.location.href);
       url.searchParams.delete('fb');
       url.searchParams.set('room', result.migratedRoomId);
-      window.location.href = url.toString();
+      window.location.replace(url.toString());
       return;
     }
-    window.location.reload();
+    window.location.replace(buildCleanPrimaryUrl());
   };
 
   const handleResetToDefault = () => {
@@ -341,10 +343,25 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                     )}
                   </li>
                 )}
+                <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40 sm:col-span-2">
+                  🔐 تسجيل الدخول والمصادقة مرتبطان الآن حصرياً بالقاعدة الجديدة (
+                  <span className="font-latin font-black text-[#1899D6]">
+                    {result.targetConfig.projectId}
+                  </span>
+                  ) · قواعد مدمجة: <span className="font-latin font-black">{result.mergedSourceDbsCount}</span>
+                  {result.deletedOldDocsCount > 0 && (
+                    <>
+                      {' '}· سجلات قديمة محذوفة:{' '}
+                      <span className="font-latin font-black text-[#EA2B2B]">
+                        {result.deletedOldDocsCount}
+                      </span>
+                    </>
+                  )}
+                </li>
                 <li className="px-3 py-2 rounded-xl bg-[#D7FFB8]/80 border border-[#58CC02] text-[#46A302] sm:col-span-2">
                   🌐{' '}
                   {result.platformPointerUpdated
-                    ? 'تم اعتماد القاعدة الجديدة رسمياً لجميع مستخدمي المنصة (سينتقل الطلاب والمشرفون تلقائياً عند التحديث، ويمكن للجميع النقل مجدداً لأي قاعدة مستقبلية).'
+                    ? 'تم اعتماد القاعدة الجديدة رسمياً لجميع مستخدمي المنصة من كل القواعد (سينتقل الطلاب والمشرفون تلقائياً سواء قبل أو بعد تسجيل الدخول).'
                     : 'أصبحت هذه القاعدة معتمدة لديك بالكامل، وشارك الرابط أدناه مع بقية الطلاب والمشرفين لتحويلهم فوراً.'}
                 </li>
               </ul>
@@ -485,6 +502,19 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                 </div>
               )}
             </div>
+
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={cleanupOldDatabase}
+                disabled={migrating}
+                onChange={(e) => setCleanupOldDatabase(e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-[#58CC02] cursor-pointer shrink-0"
+              />
+              <span className="text-xs font-bold text-[#3C3C3C] leading-relaxed">
+                حذف البيانات المنقولة من القاعدة القديمة وفك ارتباط تسجيل الدخول بها تلقائياً بعد التحقق من اكتمال النقل بنسبة 100% (مع إبقاء مؤشر التحويل التلقائي لبقية المستخدمين).
+              </span>
+            </label>
 
             {/* Live Migration Progress with Duolingo Percentage Bar */}
             {migrating && progress && (

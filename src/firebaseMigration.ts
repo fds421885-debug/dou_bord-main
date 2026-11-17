@@ -1,7 +1,8 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, type User } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, type Auth, type User } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -23,6 +24,7 @@ import {
   CURRENT_DB_EPOCH,
   db as sourceDb,
   decodeCompactFirebaseConfig,
+  defaultFirebaseConfig,
   encodeCompactFirebaseConfig,
   firebaseTargetKey,
   getPreviousFirebaseConfigs,
@@ -38,6 +40,8 @@ import {
   loadSessionSnapshot,
   saveQuizDraft,
   saveSessionSnapshot,
+  type StoredExamSession,
+  type StoredMyQuizDraft,
   type StoredMyQuizzesSnapshot,
   type StoredQuizAttemptsSnapshot,
   type StoredRoomSnapshot,
@@ -73,6 +77,7 @@ export interface MigrationProgress {
     | 'migrating_saved'
     | 'migrating_quizzes'
     | 'migrating_attempts'
+    | 'cleaning_old'
     | 'finalizing'
     | 'done';
   message: string;
@@ -98,6 +103,9 @@ export interface MigrationResult {
   migratedSavedTestsCount: number;
   migratedMyQuizzesCount: number;
   migratedAttemptsCount: number;
+  mergedSourceDbsCount: number;
+  deletedOldDocsCount: number;
+  oldAuthSignedOut: boolean;
   platformPointerUpdated: boolean;
 }
 
@@ -933,13 +941,28 @@ async function writePersonalCollectionsToDb(params: {
   for (const test of savedTests) {
     const testRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id);
     const existingSaved = await getDoc(testRef);
+    const savedQuestions = savedQuestionsByTestId[test.id] ?? [];
+
     if (existingSaved.exists()) {
+      const existingData = existingSaved.data() as SavedTest;
+      if (savedQuestions.length > (existingData.totalQuestions || 0)) {
+        for (const sq of savedQuestions) {
+          const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
+          const sqSnap = await getDoc(sqRef);
+          if (!sqSnap.exists()) {
+            await setDoc(sqRef, cleanSavedQuestionForFirestore(sq, targetUid));
+          }
+        }
+        await updateDoc(testRef, {
+          totalQuestions: Math.min(200, Math.max(0, savedQuestions.length)),
+          updatedAt: serverTimestamp(),
+        });
+      }
       migratedSavedTestsCount++;
       onItemDone?.('saved', test.title);
       continue;
     }
 
-    const savedQuestions = savedQuestionsByTestId[test.id] ?? [];
     const CHUNK = 5;
     const firstChunk = savedQuestions.slice(0, CHUNK);
     const firstBatch = writeBatch(targetDb);
@@ -986,12 +1009,21 @@ async function writePersonalCollectionsToDb(params: {
     if (!quiz?.id || !Array.isArray(quiz.questions) || quiz.questions.length === 0) continue;
     const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
     const existingQuiz = await getDoc(quizRef);
+    const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
     if (existingQuiz.exists()) {
+      const existingData = existingQuiz.data() as MyQuiz;
+      if (questions.length > (existingData.questionCount || existingData.questions?.length || 0)) {
+        await updateDoc(quizRef, {
+          title: (quiz.title || 'اختبار').slice(0, 120),
+          questions,
+          questionCount: questions.length,
+          updatedAt: serverTimestamp(),
+        });
+      }
       migratedMyQuizzesCount++;
       onItemDone?.('quiz', quiz.title);
       continue;
     }
-    const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
     await setDoc(quizRef, {
       id: quiz.id,
       ownerId: targetUid,
@@ -1063,11 +1095,165 @@ async function writePersonalCollectionsToDb(params: {
   };
 }
 
+interface SourceDatabaseCleanupHandle {
+  config: FirebaseAppConfig;
+  db: Firestore;
+  auth: Auth;
+  uid: string;
+  collected: CollectedSourceData;
+}
+
+async function safeDeleteDoc(ref: ReturnType<typeof doc>): Promise<boolean> {
+  try {
+    await withTimeout(deleteDoc(ref), 3500);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupMigratedPersonalDocsOnDb(params: {
+  srcDb: Firestore;
+  oldUid: string;
+  savedTests: SavedTest[];
+  savedQuestionsByTestId: Record<string, SavedQuestion[]>;
+  myQuizzes: MyQuiz[];
+  quizAttempts: QuizAttempt[];
+  deleteProfile?: boolean;
+}): Promise<number> {
+  const {
+    srcDb,
+    oldUid,
+    savedTests,
+    savedQuestionsByTestId,
+    myQuizzes,
+    quizAttempts,
+    deleteProfile = true,
+  } = params;
+  let deleted = 0;
+
+  for (const quiz of myQuizzes) {
+    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'myQuizzes', quiz.id))) deleted++;
+  }
+
+  for (const test of savedTests) {
+    const qs = savedQuestionsByTestId[test.id] ?? [];
+    for (const sq of qs) {
+      if (
+        await safeDeleteDoc(
+          doc(srcDb, 'users', oldUid, 'savedTests', test.id, 'questions', sq.id)
+        )
+      ) {
+        deleted++;
+      }
+    }
+    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'savedTests', test.id))) deleted++;
+  }
+
+  for (const at of quizAttempts) {
+    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'quizAttempts', at.id))) deleted++;
+  }
+
+  if (deleteProfile) {
+    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'private', 'profile'))) deleted++;
+  }
+
+  return deleted;
+}
+
+async function cleanupMigratedRoomsOnDb(params: {
+  srcDb: Firestore;
+  oldUid: string;
+  rooms: CollectedRoomData[];
+}): Promise<number> {
+  const { srcDb, oldUid, rooms } = params;
+  let deleted = 0;
+
+  for (const bundle of rooms) {
+    const roomId = bundle.room.id;
+    if (bundle.myRole === 'supervisor' || bundle.room.supervisorId === oldUid) {
+      for (const slide of bundle.slides) {
+        for (const l of bundle.slideLayers.filter((x) => x.slideId === slide.id)) {
+          if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'slides', slide.id, 'layers', l.id))) {
+            deleted++;
+          }
+        }
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'slides', slide.id))) deleted++;
+      }
+
+      for (const q of bundle.questions) {
+        for (const b of bundle.boardsByQuestionId[q.id] ?? []) {
+          if (
+            await safeDeleteDoc(
+              doc(srcDb, 'rooms', roomId, 'questions', q.id, 'boards', b.studentId)
+            )
+          ) {
+            deleted++;
+          }
+        }
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'questions', q.id))) deleted++;
+      }
+
+      for (const el of bundle.explainLayers) {
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'explainLayers', el.id))) deleted++;
+      }
+      if (bundle.sharedBoard) {
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'sharedBoard', 'live'))) deleted++;
+      }
+      for (const sq of bundle.sharedQuizzes) {
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'sharedQuizzes', sq.id))) deleted++;
+      }
+      for (const comp of bundle.competitions) {
+        const compQs = bundle.competitionQuestionsByCompId[comp.id] ?? [];
+        for (const cq of compQs) {
+          for (const cb of bundle.competitionBoardsByKey[`${comp.id}::${cq.id}`] ?? []) {
+            if (
+              await safeDeleteDoc(
+                doc(
+                  srcDb,
+                  'rooms',
+                  roomId,
+                  'competitions',
+                  comp.id,
+                  'questions',
+                  cq.id,
+                  'boards',
+                  cb.studentId
+                )
+              )
+            ) {
+              deleted++;
+            }
+          }
+          if (
+            await safeDeleteDoc(
+              doc(srcDb, 'rooms', roomId, 'competitions', comp.id, 'questions', cq.id)
+            )
+          ) {
+            deleted++;
+          }
+        }
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'competitions', comp.id))) deleted++;
+      }
+      for (const p of bundle.participants) {
+        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'participants', p.uid))) deleted++;
+      }
+      if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId))) deleted++;
+    } else {
+      // Student cleanly leaves old room participation
+      await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'participants', oldUid));
+    }
+  }
+
+  return deleted;
+}
+
 export async function runFirebaseMigration(params: {
   targetConfig: FirebaseAppConfig;
   currentProfile: UserProfile | null;
   currentRoom: Room | null;
   isSupervisorInCurrentRoom: boolean;
+  cleanupOldDatabase?: boolean;
   onProgress: (p: MigrationProgress) => void;
 }): Promise<MigrationResult> {
   const {
@@ -1075,6 +1261,7 @@ export async function runFirebaseMigration(params: {
     currentProfile,
     currentRoom,
     isSupervisorInCurrentRoom,
+    cleanupOldDatabase = true,
     onProgress,
   } = params;
 
@@ -1087,7 +1274,7 @@ export async function runFirebaseMigration(params: {
   onProgress({
     step: 'signing_in',
     percent: 8,
-    message: 'جاري تسجيل الدخول على قاعدة البيانات الجديدة...',
+    message: 'جاري تسجيل الدخول وربط قاعدة البيانات الجديدة...',
   });
 
   let targetDb: Firestore;
@@ -1102,21 +1289,136 @@ export async function runFirebaseMigration(params: {
 
   onProgress({
     step: 'collecting',
-    percent: 14,
-    message: 'جاري تجميع كافة بيانات المنصة (الغرف، الاختبارات، الملفات، الصبورات)...',
+    percent: 13,
+    message: 'جاري فحص وتجميع بيانات جميع القواعد (القديمة والحالية) والمحفوظات المحلية...',
   });
 
   const cachedProfile = await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile');
   const oldUid =
     currentProfile?.uid ?? sourceAuth.currentUser?.uid ?? cachedProfile?.uid ?? null;
 
-  const source = await collectSourceData(
+  const primaryCollected = await collectSourceData(
     sourceDb,
     oldUid,
     currentProfile,
     currentRoom,
     isSupervisorInCurrentRoom,
     onProgress
+  );
+
+  // Also collect from every previously linked database that still has an active session so OLD + NEW merge completely!
+  const sourceHandles: SourceDatabaseCleanupHandle[] = [];
+  if (oldUid) {
+    sourceHandles.push({
+      config: activeFirebaseConfig,
+      db: sourceDb,
+      auth: sourceAuth,
+      uid: oldUid,
+      collected: primaryCollected,
+    });
+  }
+
+  const candidateExtraConfigs = [defaultFirebaseConfig, ...getPreviousFirebaseConfigs()].filter(
+    (cfg, idx, arr) =>
+      !isSameFirebaseTarget(cfg, activeFirebaseConfig) &&
+      !isSameFirebaseTarget(cfg, targetConfig) &&
+      arr.findIndex((x) => isSameFirebaseTarget(x, cfg)) === idx
+  );
+
+  const extraCollections: CollectedSourceData[] = [];
+  for (const extraCfg of candidateExtraConfigs) {
+    try {
+      const extraApp = getOrInitFirebaseApp(extraCfg);
+      const extraAuth = getAuth(extraApp);
+      const extraUser = extraAuth.currentUser;
+      if (!extraUser) continue;
+      const extraDb = createFirestoreInstance(extraApp, extraCfg);
+      onProgress({
+        step: 'collecting',
+        percent: 20,
+        message: 'جاري دمج البيانات من القواعد السابقة لضمان نقل الجديد والقديم...',
+        detail: extraCfg.projectId,
+      });
+      const extraData = await collectSourceData(
+        extraDb,
+        extraUser.uid,
+        null,
+        null,
+        false,
+        () => undefined
+      );
+      extraCollections.push(extraData);
+      sourceHandles.push({
+        config: extraCfg,
+        db: extraDb,
+        auth: extraAuth,
+        uid: extraUser.uid,
+        collected: extraData,
+      });
+    } catch {
+      // Non-fatal if a prior DB is offline or quota-limited
+    }
+  }
+
+  // Merge primary + extra database collections (deduplicated, keeping most complete items)
+  const mergedRoomsMap = new Map<string, CollectedRoomData>();
+  const mergedSavedTestsMap = new Map<string, SavedTest>();
+  const mergedSavedQuestionsMap: Record<string, SavedQuestion[]> = {
+    ...primaryCollected.savedQuestionsByTestId,
+  };
+  const mergedMyQuizzesMap = new Map<string, MyQuiz>();
+  const mergedAttemptsMap = new Map<string, QuizAttempt>();
+
+  for (const bundle of [primaryCollected, ...extraCollections]) {
+    for (const r of bundle.rooms) {
+      const existing = mergedRoomsMap.get(r.room.id);
+      if (
+        !existing ||
+        r.questions.length + r.slides.length > existing.questions.length + existing.slides.length
+      ) {
+        mergedRoomsMap.set(r.room.id, r);
+      }
+    }
+    for (const st of bundle.savedTests) {
+      const existing = mergedSavedTestsMap.get(st.id);
+      const qs = bundle.savedQuestionsByTestId[st.id] ?? [];
+      const prevQs = mergedSavedQuestionsMap[st.id] ?? [];
+      if (qs.length > prevQs.length) {
+        mergedSavedQuestionsMap[st.id] = qs;
+      }
+      if (!existing || (st.totalQuestions || 0) >= (existing.totalQuestions || 0)) {
+        mergedSavedTestsMap.set(st.id, st);
+      }
+    }
+    for (const mq of bundle.myQuizzes) {
+      const existing = mergedMyQuizzesMap.get(mq.id);
+      if (!existing || (mq.questions?.length ?? 0) >= (existing.questions?.length ?? 0)) {
+        mergedMyQuizzesMap.set(mq.id, mq);
+      }
+    }
+    for (const at of bundle.quizAttempts) {
+      if (!mergedAttemptsMap.has(at.id)) {
+        mergedAttemptsMap.set(at.id, at);
+      }
+    }
+  }
+
+  const source: CollectedSourceData = {
+    oldUid: primaryCollected.oldUid,
+    profile:
+      primaryCollected.profile ??
+      extraCollections.find((c) => c.profile)?.profile ??
+      null,
+    primaryRoomId: primaryCollected.primaryRoomId,
+    rooms: Array.from(mergedRoomsMap.values()),
+    savedTests: Array.from(mergedSavedTestsMap.values()),
+    savedQuestionsByTestId: mergedSavedQuestionsMap,
+    myQuizzes: Array.from(mergedMyQuizzesMap.values()),
+    quizAttempts: Array.from(mergedAttemptsMap.values()),
+  };
+  const mergedSourceDbsCount = Math.max(1, sourceHandles.length);
+  const allOldUids = Array.from(
+    new Set([oldUid, ...sourceHandles.map((h) => h.uid)].filter((x): x is string => Boolean(x)))
   );
 
   const targetUid = targetUser.uid;
@@ -1141,14 +1443,14 @@ export async function runFirebaseMigration(params: {
       source.quizAttempts.length
   );
   let completedUnits = 0;
-  const calcPercent = () => Math.min(94, 25 + Math.round((completedUnits / totalUnits) * 69));
+  const calcPercent = () => Math.min(93, 25 + Math.round((completedUnits / totalUnits) * 68));
 
   try {
     // 1. Migrate User Profile
     onProgress({
       step: 'migrating_profile',
       percent: 25,
-      message: 'جاري نقل بيانات الحساب الشخصي...',
+      message: 'جاري نقل بيانات الحساب الشخصي وتثبيت تسجيل الدخول...',
     });
 
     const resolvedQuadName = await migrateUserProfileToDb({
@@ -1158,19 +1460,55 @@ export async function runFirebaseMigration(params: {
     });
     completedUnits++;
 
-    // Re-key local quiz drafts (uploaded PDFs, selected pages, AI cache, draft strokes)
-    if (source.oldUid && source.oldUid !== targetUid) {
-      const allDrafts = await loadAllQuizDrafts();
-      for (const d of allDrafts) {
-        if (d.key.endsWith(`_${source.oldUid}`)) {
-          const newKey = d.key.slice(0, d.key.length - source.oldUid.length) + targetUid;
-          await saveQuizDraft({
-            ...d,
-            key: newKey,
-            updatedAt: Date.now(),
-          });
-        }
+    // Re-key ALL local drafts & session snapshots to targetUid (PDFs, selected pages, exams, unsaved quizzes)
+    const allDrafts = await loadAllQuizDrafts();
+    for (const d of allDrafts) {
+      const matchedOld = allOldUids.find((u) => u !== targetUid && d.key.endsWith(`_${u}`));
+      if (matchedOld) {
+        const newKey = d.key.slice(0, d.key.length - matchedOld.length) + targetUid;
+        await saveQuizDraft({
+          ...d,
+          key: newKey,
+          updatedAt: Date.now(),
+        });
       }
+    }
+    try {
+      const myQuizDraft = await loadSessionSnapshot<StoredMyQuizDraft>('my_quiz_draft');
+      if (myQuizDraft && myQuizDraft.ownerId !== targetUid) {
+        await saveSessionSnapshot({ ...myQuizDraft, ownerId: targetUid, updatedAt: Date.now() });
+      }
+      const examSession = await loadSessionSnapshot<StoredExamSession>('exam_session');
+      if (examSession && examSession.ownerId !== targetUid) {
+        await saveSessionSnapshot({ ...examSession, ownerId: targetUid, updatedAt: Date.now() });
+      }
+      if (source.savedTests.length > 0) {
+        await saveSessionSnapshot({
+          key: 'saved_tests',
+          ownerId: targetUid,
+          tests: source.savedTests.slice(0, 200),
+          questionsByTestId: source.savedQuestionsByTestId,
+          updatedAt: Date.now(),
+        });
+      }
+      if (source.myQuizzes.length > 0) {
+        await saveSessionSnapshot({
+          key: 'my_quizzes',
+          ownerId: targetUid,
+          quizzes: source.myQuizzes,
+          updatedAt: Date.now(),
+        });
+      }
+      if (source.quizAttempts.length > 0) {
+        await saveSessionSnapshot({
+          key: 'quiz_attempts',
+          ownerId: targetUid,
+          attempts: source.quizAttempts,
+          updatedAt: Date.now(),
+        });
+      }
+    } catch {
+      // Non-fatal IndexedDB re-key
     }
 
     // 2. Migrate ALL Collected Rooms (Questions, ALL Boards, ALL Slides, ALL Layers, SharedQuizzes, Competitions)
@@ -1295,7 +1633,7 @@ export async function runFirebaseMigration(params: {
             const mySlideLayer = roomBundle.slideLayers.find(
               (l) =>
                 l.slideId === slide.id &&
-                (l.authorId === source.oldUid || l.authorId === targetUid)
+                (allOldUids.includes(l.authorId) || l.authorId === targetUid)
             );
             if (mySlideLayer && (mySlideLayer.strokes?.length ?? 0) > 0) {
               const layerRef = doc(
@@ -1341,7 +1679,7 @@ export async function runFirebaseMigration(params: {
 
           // Migrate blank-board explain layer & sharedBoard
           const myExplainLayer = roomBundle.explainLayers.find(
-            (l) => l.authorId === source.oldUid || l.authorId === targetUid
+            (l) => allOldUids.includes(l.authorId) || l.authorId === targetUid
           );
           if (myExplainLayer && (myExplainLayer.strokes?.length ?? 0) > 0) {
             await setDoc(doc(targetDb, 'rooms', srcRoom.id, 'explainLayers', targetUid), {
@@ -1531,6 +1869,65 @@ export async function runFirebaseMigration(params: {
                   attempts: [],
                   updatedAt: serverTimestamp(),
                 });
+
+                if (
+                  cq.status === 'correct' ||
+                  cq.status === 'unanswered' ||
+                  (cq.wrongPlayerIds?.length ?? 0) > 0 ||
+                  (cq.attempts?.length ?? 0) > 0
+                ) {
+                  try {
+                    await updateDoc(cqRef, {
+                      status: cq.status || 'solving',
+                      winnerId: (cq.winnerId || '').slice(0, 128),
+                      winnerName: (cq.winnerName || '').slice(0, 120),
+                      winnerChoiceIndex: Number.isInteger(cq.winnerChoiceIndex)
+                        ? Math.max(-1, Math.min(7, cq.winnerChoiceIndex))
+                        : -1,
+                      winnerTimeMs: Math.max(0, Math.min(172800000, Math.round(cq.winnerTimeMs || 0))),
+                      wrongPlayerIds: (cq.wrongPlayerIds || []).slice(0, 100),
+                      attempts: (cq.attempts || []).slice(0, 100),
+                      updatedAt: serverTimestamp(),
+                    });
+                  } catch {
+                    // Fallback gracefully if competitor check rejects historical owner mismatch
+                  }
+                }
+
+                const cbList = roomBundle.competitionBoardsByKey[`${comp.id}::${cq.id}`] ?? [];
+                const myCompBoard = cbList.find(
+                  (b) => allOldUids.includes(b.studentId) || b.studentId === targetUid
+                );
+                if (myCompBoard && (myCompBoard.strokes?.length ?? 0) > 0) {
+                  try {
+                    await setDoc(
+                      doc(
+                        targetDb,
+                        'rooms',
+                        srcRoom.id,
+                        'competitions',
+                        comp.id,
+                        'questions',
+                        cq.id,
+                        'boards',
+                        targetUid
+                      ),
+                      {
+                        studentId: targetUid,
+                        studentName: supervisorDisplayName.slice(0, 120),
+                        roomId: srcRoom.id,
+                        questionId: cq.id,
+                        strokes: myCompBoard.strokes.slice(-400),
+                        submitted: Boolean(myCompBoard.submitted),
+                        verdict: 'pending',
+                        updatedAt: serverTimestamp(),
+                      }
+                    );
+                    migratedBoardsCount++;
+                  } catch {
+                    // Ignore competition board lock
+                  }
+                }
               }
 
               if (comp.status === 'finished') {
@@ -1543,6 +1940,13 @@ export async function runFirebaseMigration(params: {
               migratedCompetitionsCount++;
             }
             completedUnits++;
+          }
+
+          if (Array.isArray(srcRoom.explainBlockedIds) && srcRoom.explainBlockedIds.length > 0) {
+            await updateDoc(targetRoomRef, {
+              explainBlockedIds: srcRoom.explainBlockedIds.slice(0, 100),
+              updatedAt: serverTimestamp(),
+            });
           }
 
           if (srcRoom.sessionType === 'interactive' && srcRoom.interactiveEditor === 'all') {
@@ -1590,7 +1994,7 @@ export async function runFirebaseMigration(params: {
               if (q.status !== 'solving') continue;
               const qBoards = roomBundle.boardsByQuestionId[q.id] ?? [];
               const myOldBoard = qBoards.find(
-                (b) => b.studentId === source.oldUid || b.studentId === targetUid
+                (b) => allOldUids.includes(b.studentId) || b.studentId === targetUid
               );
               if (!myOldBoard || (myOldBoard.strokes?.length ?? 0) === 0) continue;
 
@@ -1700,15 +2104,19 @@ export async function runFirebaseMigration(params: {
         },
       });
 
-    // 4. Write Global Platform Pointer so ALL users on the source DB switch automatically to targetConfig!
+    // 4. Write Global Platform Pointer across ALL connected source DBs so EVERY user on EVERY old DB jumps to targetConfig!
     onProgress({
       step: 'finalizing',
-      percent: 96,
-      message: 'جاري اعتماد القاعدة الجديدة كقاعدة رسمية للمنصة ومزامنة التحويل...',
+      percent: 94,
+      message: 'جاري اعتماد القاعدة الجديدة لجميع المستخدمين على كل القواعد وتوحيد تسجيل الدخول...',
     });
 
-    const priorChain = [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]
-      .filter((c) => !isSameFirebaseTarget(c, targetConfig))
+    const priorChain = [activeFirebaseConfig, defaultFirebaseConfig, ...getPreviousFirebaseConfigs()]
+      .filter(
+        (c, idx, arr) =>
+          !isSameFirebaseTarget(c, targetConfig) &&
+          arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
+      )
       .slice(0, 6)
       .map((c) => ({
         apiKey: c.apiKey,
@@ -1735,10 +2143,7 @@ export async function runFirebaseMigration(params: {
         ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
         : {}),
       migratedBy: uidValue,
-      migratedByName: (resolvedQuadName || source.profile?.fullNameQuad || 'مشرف المنصة').slice(
-        0,
-        120
-      ),
+      migratedByName: 'مشرف المنصة',
       ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
       migrationEpoch: CURRENT_DB_EPOCH,
       previousConfigs: priorChain,
@@ -1751,23 +2156,78 @@ export async function runFirebaseMigration(params: {
     } catch {
       // Non-fatal if target project uses older rules
     }
-    try {
-      const srcUid = sourceAuth.currentUser?.uid;
-      if (srcUid) {
+
+    for (const handle of sourceHandles) {
+      if (isSameFirebaseTarget(handle.config, targetConfig)) continue;
+      try {
         await withTimeout(
-          setDoc(doc(sourceDb, 'platform', 'migration'), buildPointerPayload(srcUid)),
+          setDoc(doc(handle.db, 'platform', 'migration'), buildPointerPayload(handle.uid)),
           3500
         );
         platformPointerUpdated = true;
+      } catch {
+        // Older project rules or quota limit on one DB — continue smoothly
       }
-    } catch {
-      // Source DB may have exceeded quota or have older rules — link & localStorage still work 100%
     }
 
-    // Activate target database locally and mark previous DBs as already synced for this user
-    const priorTargetKey = firebaseTargetKey(activeFirebaseConfig);
+    // 5. Verified Old Database Cleanup & Unbind Old Login Auth (ONLY after 100% target writes succeed!)
+    let deletedOldDocsCount = 0;
+    let oldAuthSignedOut = false;
+
+    if (cleanupOldDatabase) {
+      onProgress({
+        step: 'cleaning_old',
+        percent: 97,
+        message: 'جاري حذف البيانات المنقولة من القواعد القديمة وفك ربط تسجيل الدخول بها...',
+      });
+
+      for (const handle of sourceHandles) {
+        if (isSameFirebaseTarget(handle.config, targetConfig)) continue;
+        deletedOldDocsCount += await cleanupMigratedRoomsOnDb({
+          srcDb: handle.db,
+          oldUid: handle.uid,
+          rooms: handle.collected.rooms,
+        });
+        deletedOldDocsCount += await cleanupMigratedPersonalDocsOnDb({
+          srcDb: handle.db,
+          oldUid: handle.uid,
+          savedTests: handle.collected.savedTests,
+          savedQuestionsByTestId: handle.collected.savedQuestionsByTestId,
+          myQuizzes: handle.collected.myQuizzes,
+          quizAttempts: handle.collected.quizAttempts,
+          deleteProfile: true,
+        });
+        try {
+          await signOut(handle.auth);
+          oldAuthSignedOut = true;
+        } catch {
+          // Ignore signOut errors on detached DB
+        }
+      }
+    } else {
+      for (const handle of sourceHandles) {
+        if (isSameFirebaseTarget(handle.config, targetConfig)) continue;
+        try {
+          await signOut(handle.auth);
+          oldAuthSignedOut = true;
+        } catch {
+          // Ignore
+        }
+      }
+    }
+
+    // Activate target database locally and mark all merged source DBs as synced for targetUid
     activateCustomFirebaseConfig(targetConfig, migratedRoomId, priorChain as FirebaseAppConfig[]);
-    markSourceKeySynced(targetUid, priorTargetKey);
+    for (const handle of sourceHandles) {
+      markSourceKeySynced(targetUid, firebaseTargetKey(handle.config));
+      try {
+        if (handle.uid !== targetUid) {
+          localStorage.removeItem(`duoboard_active_room_${handle.uid}`);
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
 
     if (migratedRoomId) {
       try {
@@ -1782,7 +2242,7 @@ export async function runFirebaseMigration(params: {
     onProgress({
       step: 'done',
       percent: 100,
-      message: 'اكتمل نقل المنصة بالكامل وتفعيل قاعدة البيانات الجديدة بنسبة 100%!',
+      message: 'اكتمل النقل 100% وتم ربط القاعدة الجديدة بتسجيل الدخول وكافة البيانات!',
     });
 
     return {
@@ -1803,6 +2263,9 @@ export async function runFirebaseMigration(params: {
       migratedSavedTestsCount,
       migratedMyQuizzesCount,
       migratedAttemptsCount,
+      mergedSourceDbsCount,
+      deletedOldDocsCount,
+      oldAuthSignedOut,
       platformPointerUpdated,
     };
   } catch (err) {
@@ -1896,6 +2359,24 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         counts.migratedSavedTestsCount +
         counts.migratedMyQuizzesCount +
         counts.migratedAttemptsCount;
+
+      // Also clean up migrated personal docs from the old DB and disconnect old Auth
+      if (counts.migratedSavedTestsCount > 0 || counts.migratedMyQuizzesCount > 0 || counts.migratedAttemptsCount > 0 || srcData.profile) {
+        await cleanupMigratedPersonalDocsOnDb({
+          srcDb,
+          oldUid: srcUser.uid,
+          savedTests: srcData.savedTests,
+          savedQuestionsByTestId: srcData.savedQuestionsByTestId,
+          myQuizzes: srcData.myQuizzes,
+          quizAttempts: srcData.quizAttempts,
+          deleteProfile: true,
+        });
+      }
+      try {
+        await signOut(srcAuth);
+      } catch {
+        // Ignore signOut errors on detached old DB
+      }
 
       markSourceKeySynced(targetUid, srcKey);
     } catch {

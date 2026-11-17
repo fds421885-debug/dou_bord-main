@@ -27,6 +27,7 @@ import {
   FileText,
   Flag,
   ImagePlus,
+  ListChecks,
   Loader2,
   Lock,
   Maximize2,
@@ -36,6 +37,7 @@ import {
   Plus,
   Presentation,
   RotateCcw,
+  Search,
   Send,
   SkipForward,
   Sparkles,
@@ -61,6 +63,8 @@ import type {
   InteractiveSlide,
   Participant,
   Question,
+  QuizChart,
+  QuizQuestion,
   Room,
   SharedExplainBoard,
   SlideLayer,
@@ -81,6 +85,7 @@ import {
   loadSessionSnapshot,
   mergeActiveRoomSnapshot,
   saveQuizDraft,
+  type StoredQuizAnswerMeta,
   type StoredRoomSnapshot,
 } from '../localDraftStore';
 import {
@@ -90,6 +95,15 @@ import {
   WhiteboardPreview,
   ZoomablePreviewStage,
 } from './WhiteboardCanvas';
+import { MathText } from '../mathText';
+import { ChartView } from './ChartView';
+import {
+  buildRoomQuizPool,
+  type RoomQuizEntry,
+  useMyQuizzes,
+  useRoomSharedQuizzes,
+} from '../roomQuizzes';
+import { RoomQuizSyncBanner } from './RoomQuizBank';
 
 interface QuizArenaProps {
   room: Room;
@@ -143,7 +157,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [boards, setBoards] = useState<StudentBoard[]>([]);
 
   // Supervisor private draft (never synced to Firestore until "أدرج السؤال" is clicked)
-  const [composerTab, setComposerTab] = useState<'text' | 'board' | 'pdf'>('text');
+  const [composerTab, setComposerTab] = useState<'text' | 'board' | 'pdf' | 'quizzes'>('text');
   const [draftText, setDraftText] = useState('');
   const [draftImage, setDraftImage] = useState('');
   const [draftBoardStrokes, setDraftBoardStrokes] = useState<Stroke[]>([]);
@@ -154,6 +168,30 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [draftTimerSeconds, setDraftTimerSeconds] = useState<number>(60);
   const [insertingQuestion, setInsertingQuestion] = useState(false);
+
+  // Room Quizzes bank (supervisor's myQuizzes + students' sharedQuizzes)
+  const { myQuizzes } = useMyQuizzes(profile.uid);
+  const { sharedQuizzes } = useRoomSharedQuizzes(room.id);
+  const roomQuizPool = useMemo(
+    () =>
+      buildRoomQuizPool({
+        myQuizzes,
+        sharedQuizzes,
+        myUid: profile.uid,
+        myName: profile.fullNameQuad,
+        isSupervisor,
+      }),
+    [myQuizzes, sharedQuizzes, profile.uid, profile.fullNameQuad, isSupervisor]
+  );
+  const [selectedPoolQuizIds, setSelectedPoolQuizIds] = useState<string[]>([]);
+  const [quizQuestionSearch, setQuizQuestionSearch] = useState('');
+  const [includeQuizChoices, setIncludeQuizChoices] = useState(true);
+  const [draftQuizAttachment, setDraftQuizAttachment] = useState<{
+    choices?: string[];
+    chart?: QuizChart;
+    answerMeta?: StoredQuizAnswerMeta;
+  } | null>(null);
+  const [quizAnswerCache, setQuizAnswerCache] = useState<Record<string, StoredQuizAnswerMeta>>({});
 
   // Supervisor-only AI Solution & Explanation state
   const [draftAiSolution, setDraftAiSolution] = useState<AiSolution | null>(null);
@@ -237,6 +275,9 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         if (saved.activeAiCache && typeof saved.activeAiCache === 'object') {
           setActiveAiCache((prev) => ({ ...saved.activeAiCache, ...prev }));
         }
+        if (saved.quizAnswerCache && typeof saved.quizAnswerCache === 'object') {
+          setQuizAnswerCache((prev) => ({ ...saved.quizAnswerCache, ...prev }));
+        }
       }
       hydratedDraftKeyRef.current = draftStorageKey;
     });
@@ -261,6 +302,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         draftTimerSeconds,
         draftAiSolution,
         activeAiCache,
+        quizAnswerCache,
         updatedAt: Date.now(),
       });
     }, 60);
@@ -277,6 +319,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     draftTimerSeconds,
     draftAiSolution,
     activeAiCache,
+    quizAnswerCache,
   ]);
 
   // Subscribe to published questions in the room
@@ -835,21 +878,15 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     }
   };
 
-  // Supervisor: publish question to everyone (supports text, uploaded image, chosen PDF page, or supervisor's private whiteboard)
-  const handleInsertQuestion = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const publishQuestionToRoom = async (params: {
+    text: string;
+    imageData: string;
+    choices?: string[];
+    chart?: QuizChart;
+    sourceQuizTitle?: string;
+    answerMeta?: StoredQuizAnswerMeta;
+  }) => {
     if (!isSupervisor || insertingQuestion) return;
-
-    const { text: cleanText, imageData: finalImageData } = getDraftPayload();
-
-    if (!cleanText && !finalImageData) {
-      setDraftError(
-        composerTab === 'pdf'
-          ? 'ارفع ملف PDF وحدد الصفحة المطلوب إظهارها للطلاب أولاً'
-          : 'اكتب نص السؤال، أو ارفع صورة أو صفحة PDF، أو ارسمه على سبورتك الخاصة قبل الإدراج'
-      );
-      return;
-    }
     setDraftError(null);
     setInsertingQuestion(true);
 
@@ -860,12 +897,12 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     try {
       const batch = writeBatch(db);
       const qDocRef = doc(db, 'rooms', room.id, 'questions', newQId);
-      batch.set(qDocRef, {
+      const payload: Record<string, unknown> = {
         id: newQId,
         roomId: room.id,
         orderIndex,
-        text: cleanText,
-        imageData: finalImageData,
+        text: params.text.trim().slice(0, 2000),
+        imageData: params.imageData,
         status: 'solving',
         attemptsUsed: 0,
         wrongStudentIds: [],
@@ -874,7 +911,17 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         timerSeconds: safeTimerSeconds,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (params.choices && params.choices.length > 0) {
+        payload.choices = params.choices.slice(0, 8);
+      }
+      if (params.chart) {
+        payload.chart = params.chart;
+      }
+      if (params.sourceQuizTitle) {
+        payload.sourceQuizTitle = params.sourceQuizTitle.slice(0, 120);
+      }
+      batch.set(qDocRef, payload);
       batch.update(doc(db, 'rooms', room.id), {
         currentQuestionId: newQId,
         questionCount: orderIndex,
@@ -882,6 +929,9 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       });
       await batch.commit();
 
+      if (params.answerMeta) {
+        setQuizAnswerCache((prev) => ({ ...prev, [newQId]: params.answerMeta! }));
+      }
       if (draftAiSolution) {
         setActiveAiCache((prev) => ({ ...prev, [newQId]: draftAiSolution }));
         setActiveAiOpen(true);
@@ -891,6 +941,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       setDraftText('');
       setDraftImage('');
       setDraftBoardStrokes([]);
+      setDraftQuizAttachment(null);
       setDraftAiSolution(null);
       setDraftAiError(null);
       playDuoSound('pop');
@@ -899,6 +950,81 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     } finally {
       setInsertingQuestion(false);
     }
+  };
+
+  // Supervisor: publish question to everyone (supports text, uploaded image, chosen PDF page, supervisor's private whiteboard, or imported quiz question)
+  const handleInsertQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isSupervisor || insertingQuestion) return;
+
+    const { text: cleanText, imageData: finalImageData } = getDraftPayload();
+
+    if (!cleanText && !finalImageData && !draftQuizAttachment?.chart) {
+      setDraftError(
+        composerTab === 'pdf'
+          ? 'ارفع ملف PDF وحدد الصفحة المطلوب إظهارها للطلاب أولاً'
+          : composerTab === 'quizzes'
+          ? 'اختر سؤالاً من الاختبارات بالأسفل واضغط «إدراج للجميع الآن» أو «تحميل للتعديل»'
+          : 'اكتب نص السؤال، أو ارفع صورة أو صفحة PDF، أو ارسمه على سبورتك الخاصة قبل الإدراج'
+      );
+      return;
+    }
+
+    await publishQuestionToRoom({
+      text: cleanText,
+      imageData: finalImageData,
+      choices:
+        includeQuizChoices && draftQuizAttachment?.choices?.length
+          ? draftQuizAttachment.choices
+          : undefined,
+      chart: draftQuizAttachment?.chart,
+      sourceQuizTitle: draftQuizAttachment?.answerMeta?.sourceQuizTitle,
+      answerMeta: draftQuizAttachment?.answerMeta,
+    });
+  };
+
+  const handleInsertQuizQuestionDirect = async (qq: QuizQuestion, entry: RoomQuizEntry) => {
+    const answerText =
+      qq.correctIndex >= 0 && qq.choices[qq.correctIndex]
+        ? qq.choices[qq.correctIndex]
+        : qq.answer || '';
+    await publishQuestionToRoom({
+      text: qq.text.slice(0, 2000),
+      imageData: '',
+      choices: includeQuizChoices && qq.choices?.length ? qq.choices : undefined,
+      chart: qq.chart,
+      sourceQuizTitle: entry.quiz.title,
+      answerMeta: {
+        choices: qq.choices || [],
+        correctIndex: qq.correctIndex,
+        answer: answerText,
+        explanation: qq.explanation || '',
+        sourceQuizTitle: entry.quiz.title,
+      },
+    });
+  };
+
+  const handleLoadQuizQuestionToDraft = (qq: QuizQuestion, entry: RoomQuizEntry) => {
+    const answerText =
+      qq.correctIndex >= 0 && qq.choices[qq.correctIndex]
+        ? qq.choices[qq.correctIndex]
+        : qq.answer || '';
+    setDraftText(qq.text.slice(0, 2000));
+    setDraftImage('');
+    setDraftQuizAttachment({
+      choices: qq.choices,
+      chart: qq.chart,
+      answerMeta: {
+        choices: qq.choices || [],
+        correctIndex: qq.correctIndex,
+        answer: answerText,
+        explanation: qq.explanation || '',
+        sourceQuizTitle: entry.quiz.title,
+      },
+    });
+    setComposerTab('text');
+    setDraftError(null);
+    playDuoSound('pop');
   };
 
   // Supervisor: toggle between Quiz Mode and Explain Mode (defaults to 'all' so students can write alongside the supervisor)
@@ -2253,46 +2379,117 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
             </div>
           )}
 
-          <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-start md:items-center justify-between">
-            {currentQuestion.text && (
-              <p className="text-base sm:text-xl font-black text-[#3C3C3C] leading-relaxed flex-1 whitespace-pre-wrap">
-                {currentQuestion.text}
-              </p>
-            )}
-            {currentQuestion.imageData && (
-              isSupervisor ? (
-                <button
-                  type="button"
-                  onClick={() => setZoomedImage(currentQuestion.imageData)}
-                  className="group relative rounded-2xl overflow-hidden border-2 border-[#E5E5E5] bg-[#F7F7F7] w-full sm:w-auto sm:max-w-sm cursor-pointer shrink-0 flex justify-center"
-                >
-                  <img
-                    src={currentQuestion.imageData}
-                    alt="صورة السؤال"
-                    className="max-h-44 sm:max-h-52 w-auto object-contain"
-                  />
-                  <span className="absolute bottom-2 left-2 bg-black/70 text-white text-xs font-bold px-2.5 py-1 rounded-lg flex items-center gap-1">
-                    <ZoomIn className="w-3.5 h-3.5" />
-                    <span>تكبير الصفحة / الصورة</span>
+          <div className="flex flex-col gap-3 sm:gap-4">
+            <div className="flex flex-col md:flex-row gap-3 sm:gap-4 items-start md:items-center justify-between">
+              <div className="flex-1 min-w-0 flex flex-col gap-2">
+                {currentQuestion.sourceQuizTitle && (
+                  <span className="self-start px-2.5 py-0.5 rounded-lg bg-[#F3E8FF] border border-[#CE82FF] text-[11px] font-black text-[#6D23B6]">
+                    من اختبار: {currentQuestion.sourceQuizTitle}
                   </span>
-                </button>
-              ) : (
-                <div className="flex flex-wrap items-center justify-between gap-2 w-full md:w-auto">
-                  {!currentQuestion.text && (
-                    <span className="text-sm font-black text-[#1899D6]">
-                      تم عرض الصفحة داخل سبورتك بالأسفل — اكتب وحل عليها مباشرة!
-                    </span>
-                  )}
+                )}
+                {currentQuestion.text && (
+                  <MathText
+                    text={currentQuestion.text}
+                    className="text-base sm:text-xl font-black text-[#3C3C3C] leading-relaxed"
+                  />
+                )}
+              </div>
+
+              {currentQuestion.imageData && (
+                isSupervisor ? (
                   <button
                     type="button"
                     onClick={() => setZoomedImage(currentQuestion.imageData)}
-                    className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#DDF4FF] border-2 border-b-3 border-[#1CB0F6] text-[#1899D6] text-xs font-black cursor-pointer whitespace-nowrap"
+                    className="group relative rounded-2xl overflow-hidden border-2 border-[#E5E5E5] bg-[#F7F7F7] w-full sm:w-auto sm:max-w-sm cursor-pointer shrink-0 flex justify-center"
                   >
-                    <ZoomIn className="w-4 h-4" />
-                    <span>تكبير الورقة الأصلية</span>
+                    <img
+                      src={currentQuestion.imageData}
+                      alt="صورة السؤال"
+                      className="max-h-44 sm:max-h-52 w-auto object-contain"
+                    />
+                    <span className="absolute bottom-2 left-2 bg-black/70 text-white text-xs font-bold px-2.5 py-1 rounded-lg flex items-center gap-1">
+                      <ZoomIn className="w-3.5 h-3.5" />
+                      <span>تكبير الصفحة / الصورة</span>
+                    </span>
                   </button>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2 w-full md:w-auto">
+                    {!currentQuestion.text && (
+                      <span className="text-sm font-black text-[#1899D6]">
+                        تم عرض الصفحة داخل سبورتك بالأسفل — اكتب وحل عليها مباشرة!
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setZoomedImage(currentQuestion.imageData)}
+                      className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#DDF4FF] border-2 border-b-3 border-[#1CB0F6] text-[#1899D6] text-xs font-black cursor-pointer whitespace-nowrap"
+                    >
+                      <ZoomIn className="w-4 h-4" />
+                      <span>تكبير الورقة الأصلية</span>
+                    </button>
+                  </div>
+                )
+              )}
+            </div>
+
+            {currentQuestion.chart && (
+              <ChartView chart={currentQuestion.chart} className="max-w-xl w-full" />
+            )}
+
+            {currentQuestion.choices && currentQuestion.choices.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {currentQuestion.choices.map((ch, idx) => {
+                  const labels = ['أ', 'ب', 'ج', 'د', 'هـ', 'و', 'ز', 'ح'];
+                  const privateMeta = isSupervisor ? quizAnswerCache[currentQuestion.id] : undefined;
+                  const isCorrectForSupervisor = privateMeta && privateMeta.correctIndex === idx;
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-2xl border-2 text-sm font-black ${
+                        isCorrectForSupervisor
+                          ? 'bg-[#D7FFB8] border-[#58CC02] text-[#264E00]'
+                          : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
+                      }`}
+                    >
+                      <span
+                        className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black shrink-0 ${
+                          isCorrectForSupervisor
+                            ? 'bg-[#58CC02] text-white'
+                            : 'bg-white border border-[#E5E5E5] text-[#777777]'
+                        }`}
+                      >
+                        {labels[idx] || idx + 1}
+                      </span>
+                      <MathText text={ch} className="flex-1 min-w-0 font-black" />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {isSupervisor && quizAnswerCache[currentQuestion.id] && (
+              <div className="rounded-2xl bg-[#D7FFB8]/65 border-2 border-[#58CC02] p-3.5 flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-black text-[#46A302]">
+                    الإجابة الصحيحة (سري للمشرف فقط):
+                  </span>
+                  <span className="text-[11px] font-bold text-[#46A302]">
+                    لا تظهر للطلاب
+                  </span>
                 </div>
-              )
+                {quizAnswerCache[currentQuestion.id].answer && (
+                  <MathText
+                    text={quizAnswerCache[currentQuestion.id].answer}
+                    className="text-sm sm:text-base font-black text-[#264E00]"
+                  />
+                )}
+                {quizAnswerCache[currentQuestion.id].explanation && (
+                  <div className="text-xs sm:text-sm font-bold text-[#3C3C3C] pt-1 border-t border-[#58CC02]/30">
+                    <span className="font-black text-[#46A302]">الشرح: </span>
+                    <MathText text={quizAnswerCache[currentQuestion.id].explanation} className="inline" />
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
@@ -2481,7 +2678,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                   </h3>
                 </div>
 
-                {/* Mode Tabs: Text/Image, PDF Page Picker, OR Supervisor's Private Whiteboard */}
+                {/* Mode Tabs: Text/Image, Imported Quizzes, PDF Page Picker, OR Supervisor's Private Whiteboard */}
                 <div className="flex items-center gap-1 p-1 bg-[#F7F7F7] border-2 border-[#E5E5E5] rounded-xl w-full sm:w-auto overflow-x-auto">
                   <button
                     type="button"
@@ -2494,6 +2691,20 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                   >
                     <Type className="w-3.5 h-3.5" />
                     <span>كتابة نص / صورة</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setComposerTab('quizzes')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black transition-colors cursor-pointer whitespace-nowrap ${
+                      composerTab === 'quizzes'
+                        ? 'bg-white text-[#8938D6] shadow-sm'
+                        : 'text-[#777777] hover:text-[#3C3C3C]'
+                    }`}
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                    <span>
+                      من الاختبارات ({roomQuizPool.length})
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -2526,7 +2737,269 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                 </div>
               </div>
 
-              {composerTab === 'text' ? (
+              {composerTab === 'quizzes' ? (
+                <div className="flex flex-col gap-4">
+                  <RoomQuizSyncBanner
+                    roomId={room.id}
+                    profile={profile}
+                    isSupervisor={isSupervisor}
+                    compact
+                    onImportedQuizPoolId={(poolId) => {
+                      setSelectedPoolQuizIds((prev) =>
+                        prev.includes(poolId) ? prev : [...prev, poolId]
+                      );
+                    }}
+                  />
+
+                  {roomQuizPool.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5] text-center flex flex-col items-center gap-2">
+                      <ListChecks className="w-8 h-8 text-[#AFAFAF]" />
+                      <p className="text-sm font-black text-[#3C3C3C]">
+                        لا توجد اختبارات مضافة في الغرفة بعد
+                      </p>
+                      <p className="text-xs font-bold text-[#777777]">
+                        اضغط على «استيراد اختبار JSON للغرفة» بالأعلى، أو أضف اختبارات من تبويب «اختباراتي»، وستظهر اختباراتك واختبارات الطلاب هنا مباشرة.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Multi-quiz selection grid */}
+                      <div className="flex flex-col gap-2.5 bg-[#F7F7F7] border-2 border-[#E5E5E5] rounded-2xl p-3.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-black text-[#3C3C3C]">
+                            اختر اختباراً أو مجموعة اختبارات لعرض أسئلتها واختيار ما تريده:
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedPoolQuizIds(roomQuizPool.map((e) => e.poolId))
+                              }
+                              className="text-xs font-black text-[#1899D6] hover:underline cursor-pointer"
+                            >
+                              تحديد الكل
+                            </button>
+                            {selectedPoolQuizIds.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedPoolQuizIds([])}
+                                className="text-xs font-black text-[#EA2B2B] hover:underline cursor-pointer"
+                              >
+                                إلغاء التحديد
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                          {roomQuizPool.map((entry) => {
+                            const selected = selectedPoolQuizIds.includes(entry.poolId);
+                            return (
+                              <button
+                                key={entry.poolId}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedPoolQuizIds((prev) =>
+                                    prev.includes(entry.poolId)
+                                      ? prev.filter((id) => id !== entry.poolId)
+                                      : [...prev, entry.poolId]
+                                  );
+                                  playDuoSound('pop');
+                                }}
+                                className={`text-right p-3 rounded-xl border-2 transition-all flex items-start gap-2.5 cursor-pointer ${
+                                  selected
+                                    ? 'bg-[#F3E8FF] border-[#A560E8]'
+                                    : 'bg-white border-[#E5E5E5] hover:border-[#CE82FF]'
+                                }`}
+                              >
+                                <div
+                                  className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 mt-0.5 ${
+                                    selected
+                                      ? 'bg-[#A560E8] border-[#8938D6] text-white'
+                                      : 'bg-white border-[#CFCFCF]'
+                                  }`}
+                                >
+                                  {selected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs sm:text-sm font-black text-[#3C3C3C] truncate">
+                                    {entry.quiz.title}
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                    <span
+                                      className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
+                                        entry.authorRole === 'supervisor'
+                                          ? 'bg-[#D7FFB8] text-[#46A302]'
+                                          : 'bg-[#DDF4FF] text-[#1899D6]'
+                                      }`}
+                                    >
+                                      {entry.isMine
+                                        ? 'من اختباراتك'
+                                        : `طالب: ${entry.authorName}`}
+                                    </span>
+                                    <span className="font-latin text-[11px] font-bold text-[#777777]">
+                                      {entry.quiz.questions.length} سؤال
+                                    </span>
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Filter & Include choices option */}
+                      <div className="flex flex-wrap items-center justify-between gap-2.5">
+                        <div className="relative flex-1 min-w-[200px]">
+                          <Search className="w-4 h-4 text-[#AFAFAF] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={quizQuestionSearch}
+                            onChange={(e) => setQuizQuestionSearch(e.target.value)}
+                            placeholder="ابحث داخل أسئلة الاختبارات المحددة..."
+                            className="w-full pr-9 pl-3 py-2 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#A560E8] focus:bg-white outline-none text-xs sm:text-sm font-bold text-[#3C3C3C]"
+                          />
+                        </div>
+
+                        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={includeQuizChoices}
+                            onChange={(e) => setIncludeQuizChoices(e.target.checked)}
+                            className="w-4 h-4 accent-[#A560E8]"
+                          />
+                          <span>إظهار الخيارات للطلاب مع السؤال</span>
+                        </label>
+                      </div>
+
+                      {/* Questions list from selected quizzes */}
+                      {(() => {
+                        const chosenEntries =
+                          selectedPoolQuizIds.length > 0
+                            ? roomQuizPool.filter((e) => selectedPoolQuizIds.includes(e.poolId))
+                            : roomQuizPool;
+                        const term = quizQuestionSearch.trim().toLowerCase();
+                        const items: { qq: QuizQuestion; entry: RoomQuizEntry; idxInQuiz: number }[] = [];
+                        for (const entry of chosenEntries) {
+                          entry.quiz.questions.forEach((qq, i) => {
+                            if (
+                              !term ||
+                              qq.text.toLowerCase().includes(term) ||
+                              entry.quiz.title.toLowerCase().includes(term) ||
+                              entry.authorName.toLowerCase().includes(term)
+                            ) {
+                              items.push({ qq, entry, idxInQuiz: i + 1 });
+                            }
+                          });
+                        }
+
+                        if (items.length === 0) {
+                          return (
+                            <p className="text-xs font-bold text-[#777777] py-4 text-center">
+                              لا توجد أسئلة مطابقة للبحث في النماذج المحددة.
+                            </p>
+                          );
+                        }
+
+                        return (
+                          <div className="flex flex-col gap-3 max-h-[430px] overflow-y-auto pr-1">
+                            {items.map(({ qq, entry, idxInQuiz }) => (
+                              <div
+                                key={`${entry.poolId}_${qq.id}_${idxInQuiz}`}
+                                className="rounded-2xl border-2 border-[#E5E5E5] bg-white p-3.5 sm:p-4 flex flex-col gap-2.5"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-latin px-2 py-0.5 rounded-lg bg-[#A560E8] text-white text-[11px] font-black">
+                                      س{idxInQuiz}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#6D23B6] text-[11px] font-black">
+                                      {entry.quiz.title}
+                                    </span>
+                                    <span className="text-[11px] font-bold text-[#777777]">
+                                      ({entry.isMine ? 'لك' : entry.authorName})
+                                    </span>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleLoadQuizQuestionToDraft(qq, entry)}
+                                      className="duo-btn px-3 py-1.5 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] hover:border-[#1CB0F6] text-[#1899D6] text-xs font-black cursor-pointer"
+                                    >
+                                      تحميل للتعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={insertingQuestion}
+                                      onClick={() => void handleInsertQuizQuestionDirect(qq, entry)}
+                                      className="duo-btn flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-3 border-[#46A302] text-white text-xs font-black cursor-pointer disabled:opacity-60"
+                                    >
+                                      <Send className="w-3.5 h-3.5" />
+                                      <span>إدراج للجميع الآن</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <MathText
+                                  text={qq.text}
+                                  className="text-sm sm:text-base font-black text-[#3C3C3C]"
+                                />
+
+                                {qq.chart && <ChartView chart={qq.chart} className="max-w-md w-full" />}
+
+                                {qq.choices && qq.choices.length > 0 && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                    {qq.choices.map((c, cIdx) => (
+                                      <div
+                                        key={cIdx}
+                                        className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 ${
+                                          cIdx === qq.correctIndex
+                                            ? 'bg-[#D7FFB8] border-[#58CC02] text-[#264E00] font-black'
+                                            : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
+                                        }`}
+                                      >
+                                        {cIdx === qq.correctIndex && (
+                                          <Check className="w-3.5 h-3.5 text-[#46A302] shrink-0" />
+                                        )}
+                                        <MathText text={c} className="flex-1 min-w-0" />
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {qq.explanation && (
+                                  <div className="text-xs font-bold text-[#6D23B6] bg-[#F8EDFF] rounded-xl px-3 py-1.5">
+                                    <span className="font-black">الشرح السري: </span>
+                                    <MathText text={qq.explanation} className="inline" />
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
+              ) : composerTab === 'text' ? (
+                <div className="flex flex-col gap-3">
+                  {draftQuizAttachment && (
+                    <div className="p-3 rounded-2xl bg-[#F3E8FF] border-2 border-[#CE82FF] flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-black text-[#6D23B6]">
+                        مرفق سؤال من الاختبار ({draftQuizAttachment.answerMeta?.sourceQuizTitle || 'اختبار'})
+                        {draftQuizAttachment.chart ? ' · يحتوي رسم بياني' : ''}
+                        {draftQuizAttachment.choices?.length ? ` · ${draftQuizAttachment.choices.length} خيارات` : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setDraftQuizAttachment(null)}
+                        className="text-xs font-black text-[#EA2B2B] hover:underline cursor-pointer"
+                      >
+                        إزالة المرفق
+                      </button>
+                    </div>
+                  )}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                   <div className="lg:col-span-2 flex flex-col gap-2">
                     <label
@@ -2538,10 +3011,10 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     <textarea
                       id="question-draft-text"
                       rows={3}
-                      maxLength={1000}
+                      maxLength={2000}
                       value={draftText}
                       onChange={(e) => setDraftText(e.target.value)}
-                      placeholder="اكتب سؤالك هنا... (أو اختر صفحة من ملف PDF أو ارسمه على سبورة المشرف)"
+                      placeholder="اكتب سؤالك هنا... (أو استورد سؤالاً من تبويب «من الاختبارات» أو PDF أو ارسمه على سبورة المشرف)"
                       className="w-full px-4 py-3 rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#1CB0F6] focus:bg-white outline-none text-base font-bold text-[#3C3C3C] resize-none"
                     />
                   </div>
@@ -2584,6 +3057,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                       </button>
                     )}
                   </div>
+                </div>
                 </div>
               ) : composerTab === 'pdf' ? (
                 <div className="flex flex-col gap-4">
@@ -3117,6 +3591,14 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               : 'flex flex-col gap-3 sm:gap-4'
           }
         >
+          {!studentFullscreen && (
+            <RoomQuizSyncBanner
+              roomId={room.id}
+              profile={profile}
+              isSupervisor={false}
+              compact
+            />
+          )}
           {/* Student Compact Controls Bar (Question preview + Fullscreen toggle for easy zooming) */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5]">
             <div className="flex items-center gap-2 min-w-0 flex-1">

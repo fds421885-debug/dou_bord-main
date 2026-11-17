@@ -64,7 +64,7 @@ service cloud.firestore {
         && data.supervisorName is string && data.supervisorName.size() >= 5 && data.supervisorName.size() <= 120
         && data.status in ['waiting', 'active', 'finished']
         && data.sessionType in ['quiz', 'interactive']
-        && data.mode in ['quiz', 'explain']
+        && data.mode in ['quiz', 'explain', 'competition']
         && data.explainPresenterId is string && data.explainPresenterId.size() <= 128
         && data.explainPresenterName is string && data.explainPresenterName.size() <= 120
         && (!('explainBlockedIds' in data) || (
@@ -155,14 +155,22 @@ service cloud.firestore {
           'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'status',
-          'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds', 'createdAt', 'updatedAt'
+          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'sourceQuizTitle',
+          'status', 'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds',
+          'createdAt', 'updatedAt'
         ])
         && isValidId(data.id)
         && isValidId(data.roomId)
         && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 200
-        && data.text is string && data.text.size() <= 1000
+        && data.text is string && data.text.size() <= 2000
         && data.imageData is string && data.imageData.size() <= 480000
+        && (!('choices' in data) || (
+          data.choices is list
+          && data.choices.size() <= 8
+          && (data.choices.size() == 0 || (data.choices[0] is string && data.choices[0].size() <= 500))
+        ))
+        && (!('chart' in data) || data.chart is map)
+        && (!('sourceQuizTitle' in data) || (data.sourceQuizTitle is string && data.sourceQuizTitle.size() <= 120))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.attemptsUsed is int && data.attemptsUsed >= 0 && data.attemptsUsed <= 2
         && data.wrongStudentIds is list && data.wrongStudentIds.size() <= 2
@@ -264,20 +272,111 @@ service cloud.firestore {
           'winnerName', 'boards', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerId', 'orderIndex', 'text', 'imageData', 'status',
-          'winnerName', 'boards', 'createdAt'
+          'id', 'ownerId', 'orderIndex', 'text', 'imageData',
+          'choices', 'correctIndex', 'explanation', 'chart', 'winnerTimeMs',
+          'status', 'winnerName', 'boards', 'createdAt'
         ])
         && isValidId(data.id)
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
         && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 200
-        && data.text is string && data.text.size() <= 1000
+        && data.text is string && data.text.size() <= 2000
         && data.imageData is string && data.imageData.size() <= 480000
+        && (!('choices' in data) || (data.choices is list && data.choices.size() <= 8))
+        && (!('correctIndex' in data) || (data.correctIndex is int && data.correctIndex >= -1 && data.correctIndex <= 7))
+        && (!('explanation' in data) || (data.explanation is string && data.explanation.size() <= 2000))
+        && (!('chart' in data) || data.chart is map)
+        && (!('winnerTimeMs' in data) || (data.winnerTimeMs is int && data.winnerTimeMs >= 0 && data.winnerTimeMs <= 172800000))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.winnerName is string && data.winnerName.size() <= 120
         && data.boards is list && data.boards.size() <= 100
         && (data.boards.size() == 0 || data.boards[0] is map)
         && data.createdAt is timestamp;
+    }
+
+    function isValidSharedQuiz(data) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'authorId', 'authorName', 'authorRole',
+          'title', 'questions', 'questionCount', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'roomId', 'authorId', 'authorName', 'authorRole',
+          'title', 'questions', 'questionCount', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && isValidId(data.authorId)
+        && data.authorId == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
+        && data.authorRole in ['supervisor', 'student']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
+        && (data.questions[0] is map)
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 100
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCompetition(data) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'createdBy', 'createdByName', 'title', 'settings',
+          'includeSupervisor', 'competitorIds', 'competitors',
+          'status', 'phase', 'currentIndex', 'totalQuestions', 'countdownSec',
+          'phaseStartedAt', 'totalElapsedMs', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'roomId', 'createdBy', 'createdByName', 'title', 'settings',
+          'includeSupervisor', 'competitorIds', 'competitors',
+          'status', 'phase', 'currentIndex', 'totalQuestions', 'countdownSec',
+          'phaseStartedAt', 'totalElapsedMs', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && isValidId(data.createdBy)
+        && data.createdByName is string && data.createdByName.size() >= 1 && data.createdByName.size() <= 120
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.settings is map
+        && data.includeSupervisor is bool
+        && data.competitorIds is list && data.competitorIds.size() >= 1 && data.competitorIds.size() <= 100
+        && isValidId(data.competitorIds[0])
+        && data.competitors is list && data.competitors.size() >= 1 && data.competitors.size() <= 100
+        && data.competitors[0] is map
+        && data.status in ['active', 'finished']
+        && data.phase in ['countdown', 'question']
+        && data.currentIndex is int && data.currentIndex >= 0 && data.currentIndex <= 200
+        && data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 100
+        && data.countdownSec is int && data.countdownSec >= 1 && data.countdownSec <= 10
+        && data.phaseStartedAt is timestamp
+        && data.totalElapsedMs is int && data.totalElapsedMs >= 0 && data.totalElapsedMs <= 172800000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCompetitionQuestion(data) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'competitionId', 'orderIndex', 'question', 'status',
+          'winnerId', 'winnerName', 'winnerChoiceIndex', 'winnerTimeMs',
+          'wrongPlayerIds', 'attempts', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'roomId', 'competitionId', 'orderIndex', 'question', 'status',
+          'winnerId', 'winnerName', 'winnerChoiceIndex', 'winnerTimeMs',
+          'wrongPlayerIds', 'attempts', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.roomId)
+        && isValidId(data.competitionId)
+        && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 100
+        && data.question is map
+        && data.status in ['solving', 'correct', 'unanswered']
+        && data.winnerId is string && data.winnerId.size() <= 128
+        && data.winnerName is string && data.winnerName.size() <= 120
+        && data.winnerChoiceIndex is int && data.winnerChoiceIndex >= -1 && data.winnerChoiceIndex <= 7
+        && data.winnerTimeMs is int && data.winnerTimeMs >= 0 && data.winnerTimeMs <= 172800000
+        && data.wrongPlayerIds is list && data.wrongPlayerIds.size() <= 100
+        && (data.wrongPlayerIds.size() == 0 || isValidId(data.wrongPlayerIds[0]))
+        && data.attempts is list && data.attempts.size() <= 100
+        && (data.attempts.size() == 0 || data.attempts[0] is map)
+        && data.updatedAt is timestamp;
     }
 
     match /users/{userId}/private/{docId} {
@@ -364,7 +463,7 @@ service cloud.firestore {
         && incoming().id == roomId
         && incoming().supervisorId == request.auth.uid
         && incoming().status == 'waiting'
-        && incoming().mode == 'quiz'
+        && incoming().mode in ['quiz', 'competition']
         && incoming().currentSlideIndex == 0
         && incoming().slideCount == 0
         && incoming().currentQuestionId == ''
@@ -387,6 +486,8 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
           || (existing().status == 'active'
             && incoming().diff(existing()).affectedKeys().hasOnly(['currentQuestionId', 'questionCount', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'updatedAt']))
           || (existing().status == 'active'
             && incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'explainPresenterId', 'explainPresenterName', 'updatedAt']))
           || (existing().status == 'active'
@@ -669,6 +770,12 @@ service cloud.firestore {
           && incoming().orderIndex == existing().orderIndex
           && incoming().text == existing().text
           && incoming().imageData == existing().imageData
+          && ((!('choices' in existing()) && !('choices' in incoming()))
+            || ('choices' in existing() && 'choices' in incoming() && incoming().choices == existing().choices))
+          && ((!('chart' in existing()) && !('chart' in incoming()))
+            || ('chart' in existing() && 'chart' in incoming() && incoming().chart == existing().chart))
+          && ((!('sourceQuizTitle' in existing()) && !('sourceQuizTitle' in incoming()))
+            || ('sourceQuizTitle' in existing() && 'sourceQuizTitle' in incoming() && incoming().sourceQuizTitle == existing().sourceQuizTitle))
           && ((!('timerSeconds' in existing()) && !('timerSeconds' in incoming()))
             || ('timerSeconds' in existing() && 'timerSeconds' in incoming() && incoming().timerSeconds == existing().timerSeconds))
           && incoming().createdAt == existing().createdAt
@@ -719,6 +826,206 @@ service cloud.firestore {
                 && incoming().submitted == existing().submitted
                 && incoming().diff(existing()).affectedKeys().hasOnly(['verdict', 'updatedAt']))
             );
+        }
+      }
+
+      match /sharedQuizzes/{sharedQuizId} {
+        allow get: if isValidId(roomId) && isValidId(sharedQuizId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(sharedQuizId) && isVerified()
+          && isValidSharedQuiz(incoming())
+          && incoming().id == sharedQuizId
+          && incoming().roomId == roomId
+          && incoming().authorId == request.auth.uid
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status != 'finished'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow update: if isValidId(roomId) && isValidId(sharedQuizId) && isVerified()
+          && isValidSharedQuiz(incoming())
+          && existing().authorId == request.auth.uid
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().authorId == existing().authorId
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status != 'finished'
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'authorName', 'authorRole', 'title', 'questions', 'questionCount', 'updatedAt'
+          ]);
+        allow delete: if isValidId(roomId) && isValidId(sharedQuizId) && isVerified()
+          && (
+            existing().authorId == request.auth.uid
+            || get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          );
+      }
+
+      match /competitions/{compId} {
+        allow get: if isValidId(roomId) && isValidId(compId) && isVerified()
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow list: if isValidId(roomId) && isVerified() && resource.data.roomId == roomId;
+        allow create: if isValidId(roomId) && isValidId(compId) && isVerified()
+          && isValidCompetition(incoming())
+          && incoming().id == compId
+          && incoming().roomId == roomId
+          && incoming().createdBy == request.auth.uid
+          && incoming().status == 'active'
+          && incoming().phase == 'countdown'
+          && incoming().currentIndex == 0
+          && incoming().totalElapsedMs == 0
+          && incoming().phaseStartedAt == request.time
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+            || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+          );
+        allow update: if isValidId(roomId) && isValidId(compId) && isVerified()
+          && isValidCompetition(incoming())
+          && existing().status == 'active'
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active'
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdByName == existing().createdByName
+          && incoming().title == existing().title
+          && incoming().settings == existing().settings
+          && incoming().includeSupervisor == existing().includeSupervisor
+          && incoming().competitorIds == existing().competitorIds
+          && incoming().competitors == existing().competitors
+          && incoming().totalQuestions == existing().totalQuestions
+          && incoming().countdownSec == existing().countdownSec
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (
+              (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                || existing().createdBy == request.auth.uid
+                || request.auth.uid in existing().competitorIds
+              )
+              && (
+                (existing().phase == 'countdown' && incoming().phase == 'question'
+                  && incoming().status == 'active'
+                  && incoming().phaseStartedAt == request.time
+                  && incoming().currentIndex <= existing().currentIndex + 1
+                  && incoming().diff(existing()).affectedKeys().hasOnly(['phase', 'currentIndex', 'phaseStartedAt', 'updatedAt']))
+                || (existing().phase == 'question' && incoming().phase == 'countdown'
+                  && incoming().status == 'active'
+                  && incoming().phaseStartedAt == request.time
+                  && incoming().diff(existing()).affectedKeys().hasOnly(['phase', 'phaseStartedAt', 'totalElapsedMs', 'updatedAt']))
+                || (incoming().status == 'finished'
+                  && (
+                    get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                    || existing().createdBy == request.auth.uid
+                    || request.auth.uid in existing().competitorIds
+                  )
+                  && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'totalElapsedMs', 'updatedAt']))
+              )
+            )
+          );
+
+        match /questions/{qDocId} {
+          allow get: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+            );
+          allow list: if isValidId(roomId) && isValidId(compId) && isVerified()
+            && resource.data.roomId == roomId && resource.data.competitionId == compId;
+          allow create: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
+            && isValidCompetitionQuestion(incoming())
+            && incoming().id == qDocId
+            && incoming().roomId == roomId
+            && incoming().competitionId == compId
+            && incoming().status == 'solving'
+            && incoming().winnerId == ''
+            && incoming().winnerName == ''
+            && incoming().winnerChoiceIndex == -1
+            && incoming().winnerTimeMs == 0
+            && incoming().wrongPlayerIds.size() == 0
+            && incoming().attempts.size() == 0
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId))
+            && (
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+              || get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.createdBy == request.auth.uid
+            );
+          allow update: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
+            && isValidCompetitionQuestion(incoming())
+            && existing().status == 'solving'
+            && get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.status == 'active'
+            && incoming().id == existing().id
+            && incoming().roomId == existing().roomId
+            && incoming().competitionId == existing().competitionId
+            && incoming().orderIndex == existing().orderIndex
+            && incoming().question == existing().question
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'winnerId', 'winnerName', 'winnerChoiceIndex', 'winnerTimeMs',
+              'wrongPlayerIds', 'attempts', 'updatedAt'
+            ])
+            && (
+              (
+                request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.competitorIds
+                && !(request.auth.uid in existing().wrongPlayerIds)
+                && (
+                  (incoming().status == 'correct' && incoming().winnerId == request.auth.uid)
+                  || incoming().status == 'solving'
+                  || incoming().status == 'unanswered'
+                )
+              )
+              || (
+                incoming().status == 'unanswered'
+                && (
+                  get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                  || get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.createdBy == request.auth.uid
+                )
+              )
+            );
+
+          match /boards/{studentId} {
+            allow get: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isValidId(studentId) && isVerified()
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+              );
+            allow list: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isVerified()
+              && resource.data.roomId == roomId && resource.data.questionId == qDocId;
+            allow create: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isValidId(studentId) && isVerified()
+              && studentId == request.auth.uid
+              && isValidBoard(incoming())
+              && incoming().studentId == request.auth.uid
+              && incoming().roomId == roomId
+              && incoming().questionId == qDocId
+              && incoming().verdict == 'pending'
+              && incoming().updatedAt == request.time
+              && get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.status == 'active'
+              && (
+                get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+                || exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(request.auth.uid))
+              );
+            allow update: if isValidId(roomId) && isValidId(compId) && isValidId(qDocId) && isValidId(studentId) && isVerified()
+              && studentId == request.auth.uid
+              && isValidBoard(incoming())
+              && incoming().studentId == existing().studentId
+              && incoming().studentName == existing().studentName
+              && incoming().roomId == existing().roomId
+              && incoming().questionId == existing().questionId
+              && incoming().verdict == existing().verdict
+              && incoming().updatedAt == request.time
+              && get(/databases/$(database)/documents/rooms/$(roomId)/competitions/$(compId)).data.status == 'active'
+              && incoming().diff(existing()).affectedKeys().hasOnly(['strokes', 'submitted', 'updatedAt']);
+          }
         }
       }
     }

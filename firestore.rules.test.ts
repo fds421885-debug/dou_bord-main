@@ -83,4 +83,20 @@ export const DIRTY_DOZEN_PAYLOADS = [
     payload: { joinedAt: '2020-01-01T00:00:00Z' },
     expected: 'PERMISSION_DENIED',
   },
+  {
+    name: '13_shared_quiz_author_spoofing',
+    path: '/rooms/ROOM01/sharedQuizzes/sq1',
+    auth: { uid: 'attacker', token: { email_verified: true } },
+    payload: { id: 'sq1', roomId: 'ROOM01', authorId: 'victim_uid' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '14_competition_post_wrong_winner_hijack',
+    path: '/rooms/ROOM01/competitions/comp1/questions/q_0',
+    auth: { uid: 'student1', token: { email_verified: true } },
+    existingWrongPlayerIds: ['student1'],
+    payload: { status: 'correct', winnerId: 'student1' },
+    expected: 'PERMISSION_DENIED',
+  },
 ];
+

@@ -69,7 +69,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": ["quiz", "explain"]
+          "enum": ["quiz", "explain", "competition"]
         },
         "explainPresenterId": {
           "type": "string",
@@ -202,11 +202,21 @@
         },
         "text": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 2000
         },
         "imageData": {
           "type": "string",
-          "maxLength": 280000
+          "maxLength": 480000
+        },
+        "choices": {
+          "type": "array"
+        },
+        "chart": {
+          "type": "object"
+        },
+        "sourceQuizTitle": {
+          "type": "string",
+          "maxLength": 120
         },
         "status": {
           "type": "string",
@@ -395,11 +405,27 @@
         },
         "text": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 2000
         },
         "imageData": {
           "type": "string",
-          "maxLength": 280000
+          "maxLength": 480000
+        },
+        "choices": {
+          "type": "array"
+        },
+        "correctIndex": {
+          "type": "integer"
+        },
+        "explanation": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "chart": {
+          "type": "object"
+        },
+        "winnerTimeMs": {
+          "type": "integer"
         },
         "status": {
           "type": "string",
@@ -573,6 +599,229 @@
         }
       },
       "required": ["id", "roomId", "slideId", "authorId", "authorName", "strokes", "updatedAt"]
+    },
+    "SharedQuiz": {
+      "title": "SharedQuiz",
+      "description": "Quiz published by supervisor or student into a live room for Quiz or Competition modes",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "authorRole": {
+          "type": "string",
+          "enum": ["supervisor", "student"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "questions": {
+          "type": "array"
+        },
+        "questionCount": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "roomId", "authorId", "authorName", "authorRole", "title", "questions", "questionCount", "updatedAt"]
+    },
+    "Competition": {
+      "title": "Competition",
+      "description": "Synchronized competitive quiz session inside a room with countdown and live race locking",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdByName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "settings": {
+          "type": "object"
+        },
+        "includeSupervisor": {
+          "type": "boolean"
+        },
+        "competitorIds": {
+          "type": "array"
+        },
+        "competitors": {
+          "type": "array"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "finished"]
+        },
+        "phase": {
+          "type": "string",
+          "enum": ["countdown", "question"]
+        },
+        "currentIndex": {
+          "type": "integer"
+        },
+        "totalQuestions": {
+          "type": "integer"
+        },
+        "countdownSec": {
+          "type": "integer"
+        },
+        "phaseStartedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "totalElapsedMs": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "createdBy",
+        "createdByName",
+        "title",
+        "settings",
+        "includeSupervisor",
+        "competitorIds",
+        "competitors",
+        "status",
+        "phase",
+        "currentIndex",
+        "totalQuestions",
+        "countdownSec",
+        "phaseStartedAt",
+        "totalElapsedMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CompetitionQuestion": {
+      "title": "CompetitionQuestion",
+      "description": "Individual question inside a synchronized competition with atomic first-correct lock and attempt timings",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "competitionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderIndex": {
+          "type": "integer"
+        },
+        "question": {
+          "type": "object"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["solving", "correct", "unanswered"]
+        },
+        "winnerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "winnerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "winnerChoiceIndex": {
+          "type": "integer"
+        },
+        "winnerTimeMs": {
+          "type": "integer"
+        },
+        "wrongPlayerIds": {
+          "type": "array"
+        },
+        "attempts": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "competitionId",
+        "orderIndex",
+        "question",
+        "status",
+        "winnerId",
+        "winnerName",
+        "winnerChoiceIndex",
+        "winnerTimeMs",
+        "wrongPlayerIds",
+        "attempts",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -619,6 +868,22 @@
     "/rooms/{roomId}/slides/{slideId}/layers/{layerId}": {
       "schema": { "$ref": "#/entities/SlideLayer" },
       "description": "Real-time annotation layers per user on an interactive slide"
+    },
+    "/rooms/{roomId}/sharedQuizzes/{sharedQuizId}": {
+      "schema": { "$ref": "#/entities/SharedQuiz" },
+      "description": "Quizzes shared into the room by the supervisor and students"
+    },
+    "/rooms/{roomId}/competitions/{compId}": {
+      "schema": { "$ref": "#/entities/Competition" },
+      "description": "Synchronized competitive quiz sessions inside the room"
+    },
+    "/rooms/{roomId}/competitions/{compId}/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/CompetitionQuestion" },
+      "description": "Questions, winners, attempts, and timings inside a competition"
+    },
+    "/rooms/{roomId}/competitions/{compId}/questions/{questionId}/boards/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentBoard" },
+      "description": "Personal whiteboard strokes per competitor and question inside a competition"
     }
   }
 }

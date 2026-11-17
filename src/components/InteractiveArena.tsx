@@ -24,6 +24,7 @@ import {
   PenTool,
   Radio,
   Sparkles,
+  Trophy,
   Upload,
   Users,
 } from 'lucide-react';
@@ -33,6 +34,7 @@ import type {
   InteractiveSlide,
   Participant,
   Room,
+  RoomMode,
   SlideLayer,
   Stroke,
   UserProfile,
@@ -40,6 +42,7 @@ import type {
 import { playDuoSound } from './DuoIcons';
 import { mergeActiveRoomSnapshot } from '../localDraftStore';
 import { WhiteboardCanvas } from './WhiteboardCanvas';
+import { CompetitionArena } from './CompetitionArena';
 
 interface InteractiveArenaProps {
   room: Room;
@@ -75,11 +78,14 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [clearingPage, setClearingPage] = useState(false);
   const [updatingEditor, setUpdatingEditor] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [finishingRoom, setFinishingRoom] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const appendModeRef = useRef<boolean>(false);
+
+  const isCompetitionMode = room.mode === 'competition';
 
   // Subscribe to room slides sorted by pageIndex
   useEffect(() => {
@@ -479,6 +485,22 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     }
   };
 
+  const handleSwitchMode = async (nextMode: RoomMode) => {
+    if (!isSupervisor || switchingMode || room.mode === nextMode) return;
+    setSwitchingMode(true);
+    try {
+      await updateDoc(doc(db, 'rooms', room.id), {
+        mode: nextMode,
+        updatedAt: serverTimestamp(),
+      });
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `rooms/${room.id}`);
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
+
   const editorStatusLabel =
     room.interactiveEditor === 'supervisor'
       ? 'المشرف فقط يكتب الآن'
@@ -514,9 +536,19 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* Room & Sync Badge */}
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-[#1899D6] text-xs font-black">
-              <FileText className="w-4 h-4" />
-              <span>الوضع التفاعلي</span>
+            <div
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border-2 text-xs font-black ${
+                isCompetitionMode
+                  ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                  : 'bg-[#DDF4FF] border-[#1CB0F6] text-[#1899D6]'
+              }`}
+            >
+              {isCompetitionMode ? (
+                <Trophy className="w-4 h-4" />
+              ) : (
+                <FileText className="w-4 h-4" />
+              )}
+              <span>{isCompetitionMode ? 'وضع المنافسة' : 'الوضع التفاعلي'}</span>
             </div>
 
             <div className="flex items-center gap-2 text-xs font-extrabold text-[#777777]">
@@ -531,23 +563,56 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               <span>{participants.length} طالب</span>
             </div>
 
-            <div
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black border ${
-                room.interactiveEditor === 'all'
-                  ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
-                  : room.interactiveEditor === 'supervisor'
-                  ? 'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777]'
-                  : 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
-              }`}
-            >
-              <Radio className="w-3.5 h-3.5" />
-              <span>{editorStatusLabel}</span>
-            </div>
+            {!isCompetitionMode && (
+              <div
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black border ${
+                  room.interactiveEditor === 'all'
+                    ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                    : room.interactiveEditor === 'supervisor'
+                    ? 'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777]'
+                    : 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                }`}
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>{editorStatusLabel}</span>
+              </div>
+            )}
           </div>
 
           {/* Right Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
             {isSupervisor && (
+              <div className="flex items-center gap-1 bg-[#F7F7F7] border-2 border-[#E5E5E5] rounded-xl p-1">
+                <button
+                  type="button"
+                  disabled={switchingMode}
+                  onClick={() => void handleSwitchMode('quiz')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-black cursor-pointer transition-all ${
+                    !isCompetitionMode
+                      ? 'bg-[#1CB0F6] text-white shadow-sm'
+                      : 'text-[#777777] hover:text-[#3C3C3C]'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>PDF / صور</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={switchingMode}
+                  onClick={() => void handleSwitchMode('competition')}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-black cursor-pointer transition-all ${
+                    isCompetitionMode
+                      ? 'bg-[#FFC800] text-[#3C3C3C] shadow-sm'
+                      : 'text-[#777777] hover:text-[#3C3C3C]'
+                  }`}
+                >
+                  <Trophy className="w-3.5 h-3.5" />
+                  <span>المنافسة</span>
+                </button>
+              </div>
+            )}
+
+            {isSupervisor && !isCompetitionMode && (
               <>
                 <button
                   type="button"
@@ -591,23 +656,25 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               </>
             )}
 
-            <button
-              type="button"
-              onClick={() => setIsFullscreen((prev) => !prev)}
-              className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F7F7F7] border-2 border-b-4 border-[#E5E5E5] hover:bg-white text-[#3C3C3C] text-xs font-black cursor-pointer whitespace-nowrap"
-            >
-              {isFullscreen ? (
-                <>
-                  <Minimize2 className="w-4 h-4" />
-                  <span>تصغير العرض</span>
-                </>
-              ) : (
-                <>
-                  <Maximize2 className="w-4 h-4" />
-                  <span>ملء الشاشة</span>
-                </>
-              )}
-            </button>
+            {!isCompetitionMode && (
+              <button
+                type="button"
+                onClick={() => setIsFullscreen((prev) => !prev)}
+                className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F7F7F7] border-2 border-b-4 border-[#E5E5E5] hover:bg-white text-[#3C3C3C] text-xs font-black cursor-pointer whitespace-nowrap"
+              >
+                {isFullscreen ? (
+                  <>
+                    <Minimize2 className="w-4 h-4" />
+                    <span>تصغير العرض</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-4 h-4" />
+                    <span>ملء الشاشة</span>
+                  </>
+                )}
+              </button>
+            )}
 
             {isSupervisor && (
               <button
@@ -623,7 +690,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         </div>
 
         {/* Supervisor Collaborative Permission Selector */}
-        {isSupervisor && slides.length > 0 && (
+        {isSupervisor && !isCompetitionMode && slides.length > 0 && (
           <div className="pt-2.5 border-t-2 border-[#F0F0F0] flex flex-nowrap sm:flex-wrap items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
             <span className="text-xs font-black text-[#3C3C3C] ml-1 shrink-0">
               من يكتب الآن:
@@ -692,8 +759,16 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         )}
       </div>
 
-      {/* Main Slide + Collaborative Whiteboard Area */}
-      {slides.length === 0 ? (
+      {/* Competition Mode OR Main Slide + Collaborative Whiteboard Area */}
+      {isCompetitionMode ? (
+        <CompetitionArena
+          room={room}
+          profile={profile}
+          participants={participants}
+          isSupervisor={isSupervisor}
+          onSwitchToSlides={() => void handleSwitchMode('quiz')}
+        />
+      ) : slides.length === 0 ? (
         <div className="duo-card p-10 sm:p-16 flex flex-col items-center justify-center text-center gap-5 min-h-[460px]">
           {isSupervisor ? (
             <>
@@ -705,21 +780,32 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
                   ارفع ملف PDF أو صورة ليملأ الشاشة للجميع
                 </h2>
                 <p className="text-sm font-bold text-[#777777]">
-                  بعد الرفع ستظهر الصفحات فوراً بالتزامن عند جميع الطلاب، ويمكنك الشرح والحل عليها أو السماح للطلاب بالحل معك وتقليب الصفحات.
+                  بعد الرفع ستظهر الصفحات فوراً بالتزامن عند جميع الطلاب، أو يمكنك التبديل مباشرة إلى «وضع المنافسة» لعمل تحدٍ من اختباراتك واختبارات الطلاب!
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={uploading}
-                onClick={() => {
-                  appendModeRef.current = false;
-                  fileInputRef.current?.click();
-                }}
-                className="duo-btn flex items-center gap-2.5 px-8 py-4 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-[5px] border-[#46A302] text-white text-lg font-black cursor-pointer disabled:opacity-60"
-              >
-                <Upload className="w-5 h-5" />
-                <span>{uploading ? 'جاري الرفع...' : 'اختيار ملف PDF أو صورة'}</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  disabled={uploading}
+                  onClick={() => {
+                    appendModeRef.current = false;
+                    fileInputRef.current?.click();
+                  }}
+                  className="duo-btn flex items-center gap-2.5 px-8 py-4 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-[5px] border-[#46A302] text-white text-lg font-black cursor-pointer disabled:opacity-60"
+                >
+                  <Upload className="w-5 h-5" />
+                  <span>{uploading ? 'جاري الرفع...' : 'اختيار ملف PDF أو صورة'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={switchingMode}
+                  onClick={() => void handleSwitchMode('competition')}
+                  className="duo-btn flex items-center gap-2 px-7 py-4 rounded-2xl bg-[#FFC800] hover:bg-[#FFD633] border-2 border-b-[5px] border-[#E5A400] text-[#3C3C3C] text-lg font-black cursor-pointer disabled:opacity-60"
+                >
+                  <Trophy className="w-5 h-5" />
+                  <span>بدء وضع المنافسة</span>
+                </button>
+              </div>
             </>
           ) : (
             <>

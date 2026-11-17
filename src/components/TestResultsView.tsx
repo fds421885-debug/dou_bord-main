@@ -10,13 +10,17 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { ArrowRight, CheckCircle2, X, ZoomIn } from 'lucide-react';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { db, getTimestampMillis, handleFirestoreError, OperationType } from '../firebase';
 import {
   loadSessionSnapshot,
   saveSavedTestsListSnapshot,
   type StoredSavedTestsSnapshot,
 } from '../localDraftStore';
+import { MathText } from '../mathText';
 import type {
+  Competition,
+  CompetitionAttempt,
+  CompetitionQuestion,
   InteractiveSlide,
   Participant,
   ParticipantSummary,
@@ -29,6 +33,8 @@ import type {
   StudentBoard,
   UserProfile,
 } from '../types';
+import { ChartView } from './ChartView';
+import { formatTimeSeconds } from './CompetitionArena';
 import {
   DUO_IMAGES,
   DuoArtwork,
@@ -86,8 +92,136 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
       setLoading(true);
       try {
         const assembledQuestions: SavedQuestion[] = [];
+        let compParticipantSummary: ParticipantSummary[] | null = null;
 
-        if (liveRoom.sessionType === 'interactive') {
+        if (liveRoom.sessionType === 'interactive' && liveRoom.mode === 'competition') {
+          const cSnap = await getDocs(
+            query(
+              collection(db, 'rooms', liveRoom.id, 'competitions'),
+              where('roomId', '==', liveRoom.id)
+            )
+          );
+          const comps: Competition[] = [];
+          cSnap.forEach((d) => comps.push(d.data() as Competition));
+          comps.sort(
+            (a, b) => getTimestampMillis(b.createdAt) - getTimestampMillis(a.createdAt)
+          );
+          const latestComp = comps[0];
+
+          if (latestComp) {
+            const cqSnap = await getDocs(
+              query(
+                collection(
+                  db,
+                  'rooms',
+                  liveRoom.id,
+                  'competitions',
+                  latestComp.id,
+                  'questions'
+                ),
+                where('roomId', '==', liveRoom.id),
+                where('competitionId', '==', latestComp.id)
+              )
+            );
+            const rawCQs: CompetitionQuestion[] = [];
+            cqSnap.forEach((d) => rawCQs.push(d.data() as CompetitionQuestion));
+            rawCQs.sort((a, b) => a.orderIndex - b.orderIndex);
+
+            for (const cq of rawCQs) {
+              const bSnap = await getDocs(
+                query(
+                  collection(
+                    db,
+                    'rooms',
+                    liveRoom.id,
+                    'competitions',
+                    latestComp.id,
+                    'questions',
+                    cq.id,
+                    'boards'
+                  ),
+                  where('roomId', '==', liveRoom.id),
+                  where('questionId', '==', cq.id)
+                )
+              );
+              const boardMap = new Map<string, StudentBoard>();
+              bSnap.forEach((d) => {
+                const b = d.data() as StudentBoard;
+                boardMap.set(b.studentId, b);
+              });
+
+              const attemptsByUid = new Map<string, CompetitionAttempt>();
+              for (const att of cq.attempts || []) {
+                attemptsByUid.set(att.uid, att);
+              }
+
+              const boardsList: SavedBoardSnapshot[] = latestComp.competitors.map((c) => {
+                const sb = boardMap.get(c.uid);
+                const att = attemptsByUid.get(c.uid);
+                const choiceIdx = att?.choiceIndex ?? -1;
+                const choiceTxt =
+                  choiceIdx >= 0 && choiceIdx < cq.question.choices.length
+                    ? cq.question.choices[choiceIdx]
+                    : '';
+                return {
+                  studentId: c.uid,
+                  studentName: c.name,
+                  strokes: sb?.strokes ?? [],
+                  submitted: Boolean(att) || (sb?.strokes?.length ?? 0) > 0,
+                  verdict: att ? (att.isCorrect ? 'correct' : 'wrong') : 'pending',
+                  chosenIndex: choiceIdx,
+                  chosenText: choiceTxt,
+                  timeMs: att?.timeMs ?? 0,
+                };
+              });
+
+              assembledQuestions.push({
+                id: cq.id,
+                ownerId: profile.uid,
+                orderIndex: cq.orderIndex,
+                text: cq.question.text.slice(0, 2000),
+                imageData: '',
+                choices: cq.question.choices,
+                correctIndex: cq.question.correctIndex,
+                explanation: (cq.question.explanation || '').slice(0, 2000),
+                ...(cq.question.chart ? { chart: cq.question.chart } : {}),
+                winnerTimeMs: cq.winnerTimeMs || 0,
+                status: cq.status === 'solving' ? 'unanswered' : cq.status,
+                winnerName: (cq.winnerName || '').slice(0, 120),
+                boards: boardsList,
+                createdAt: cq.updatedAt,
+              });
+            }
+
+            compParticipantSummary = latestComp.competitors
+              .map((c) => {
+                let correctCount = 0;
+                let wrongCount = 0;
+                let totalTimeMs = 0;
+                for (const cq of rawCQs) {
+                  if (cq.status === 'correct' && cq.winnerId === c.uid) correctCount++;
+                  for (const att of cq.attempts || []) {
+                    if (att.uid === c.uid) {
+                      if (!att.isCorrect) wrongCount++;
+                      totalTimeMs += att.timeMs || 0;
+                    }
+                  }
+                }
+                return {
+                  uid: c.uid,
+                  fullNameQuad: c.name,
+                  score: correctCount,
+                  correctCount,
+                  wrongCount,
+                  totalTimeMs,
+                };
+              })
+              .sort(
+                (a, b) =>
+                  b.score - a.score || (a.totalTimeMs ?? 0) - (b.totalTimeMs ?? 0)
+              );
+          }
+        } else if (liveRoom.sessionType === 'interactive') {
           const sSnap = await getDocs(
             query(collection(db, 'rooms', liveRoom.id, 'slides'), where('roomId', '==', liveRoom.id))
           );
@@ -181,6 +315,8 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               orderIndex: q.orderIndex,
               text: q.text,
               imageData: q.imageData,
+              ...(q.choices ? { choices: q.choices } : {}),
+              ...(q.chart ? { chart: q.chart } : {}),
               status: q.status,
               winnerName: q.winnerName,
               boards: boardsList,
@@ -189,14 +325,16 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
           }
         }
 
-        const pSummary: ParticipantSummary[] = [...liveParticipants]
-          .sort((a, b) => b.score - a.score || b.correctCount - a.correctCount)
-          .map((p) => ({
-            uid: p.uid,
-            fullNameQuad: p.fullNameQuad,
-            score: p.score,
-            correctCount: p.correctCount,
-          }));
+        const pSummary: ParticipantSummary[] =
+          compParticipantSummary ??
+          [...liveParticipants]
+            .sort((a, b) => b.score - a.score || b.correctCount - a.correctCount)
+            .map((p) => ({
+              uid: p.uid,
+              fullNameQuad: p.fullNameQuad,
+              score: p.score,
+              correctCount: p.correctCount,
+            }));
 
         if (cancelled) return;
         setQuestionsData(assembledQuestions);
@@ -260,6 +398,11 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               orderIndex: sq.orderIndex,
               text: sq.text,
               imageData: sq.imageData,
+              ...(sq.choices ? { choices: sq.choices } : {}),
+              ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
+              ...(sq.explanation ? { explanation: sq.explanation } : {}),
+              ...(sq.chart ? { chart: sq.chart } : {}),
+              ...(typeof sq.winnerTimeMs === 'number' ? { winnerTimeMs: sq.winnerTimeMs } : {}),
               status: sq.status,
               winnerName: sq.winnerName,
               boards: sq.boards,
@@ -286,6 +429,11 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 orderIndex: sq.orderIndex,
                 text: sq.text,
                 imageData: sq.imageData,
+                ...(sq.choices ? { choices: sq.choices } : {}),
+                ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
+                ...(sq.explanation ? { explanation: sq.explanation } : {}),
+                ...(sq.chart ? { chart: sq.chart } : {}),
+                ...(typeof sq.winnerTimeMs === 'number' ? { winnerTimeMs: sq.winnerTimeMs } : {}),
                 status: sq.status,
                 winnerName: sq.winnerName,
                 boards: sq.boards,
@@ -312,11 +460,14 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
   }, [liveRoom?.id, profile.uid, isSupervisor]);
 
   const sortedParticipants = [...participantsData].sort(
-    (a, b) => b.score - a.score || b.correctCount - a.correctCount
+    (a, b) =>
+      b.score - a.score ||
+      b.correctCount - a.correctCount ||
+      (a.totalTimeMs ?? 0) - (b.totalTimeMs ?? 0)
   );
 
   const isInteractiveArchive =
-    liveRoom?.sessionType === 'interactive' ||
+    (liveRoom?.sessionType === 'interactive' && liveRoom?.mode !== 'competition') ||
     (questionsData.length > 0 && questionsData.every((q) => q.status === 'solving'));
 
   return (
@@ -404,11 +555,29 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                         <p className="text-sm font-black text-[#3C3C3C] truncate">
                           {p.fullNameQuad}
                         </p>
-                        <p className="text-xs font-bold text-[#777777]">
-                          الإجابات الصحيحة:{' '}
-                          <span className="font-latin font-black text-[#46A302]">
-                            {p.correctCount}
+                        <p className="text-xs font-bold text-[#777777] flex flex-wrap gap-2">
+                          <span>
+                            الإجابات الصحيحة:{' '}
+                            <span className="font-latin font-black text-[#46A302]">
+                              {p.correctCount}
+                            </span>
                           </span>
+                          {typeof p.wrongCount === 'number' && (
+                            <span>
+                              خطأ:{' '}
+                              <span className="font-latin font-black text-[#EA2B2B]">
+                                {p.wrongCount}
+                              </span>
+                            </span>
+                          )}
+                          {typeof p.totalTimeMs === 'number' && p.totalTimeMs > 0 && (
+                            <span>
+                              الوقت:{' '}
+                              <span className="font-latin font-black text-[#1899D6]">
+                                {formatTimeSeconds(p.totalTimeMs)}
+                              </span>
+                            </span>
+                          )}
                         </p>
                       </div>
                     </div>
@@ -443,31 +612,39 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 <div key={q.id} className="duo-card p-5 sm:p-6 flex flex-col gap-5">
                   {/* Question / Slide Header */}
                   <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b-2 border-[#F0F0F0]">
-                    <div className="flex items-center gap-2.5">
-                      <span className="font-latin px-3 py-1 rounded-xl bg-[#1CB0F6] text-white text-sm font-black">
+                    <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                      <span className="font-latin px-3 py-1 rounded-xl bg-[#1CB0F6] text-white text-sm font-black shrink-0">
                         {q.status === 'solving' ? `ص${q.orderIndex}` : `س${q.orderIndex}`}
                       </span>
-                      <h3 className="text-lg font-black text-[#3C3C3C]">
-                        {q.text || 'سؤال بصورة مرفقة'}
-                      </h3>
+                      <MathText
+                        text={q.text || 'سؤال بصورة مرفقة'}
+                        className="text-lg font-black text-[#3C3C3C] flex-1"
+                      />
                     </div>
 
                     {q.status === 'correct' && q.winnerName ? (
-                      <div className="flex items-center gap-2 text-[#46A302] font-black text-sm">
+                      <div className="flex items-center gap-2 text-[#46A302] font-black text-sm shrink-0">
                         <DuoCheckBadge className="w-5 h-5" />
-                        <span>أجابه: {q.winnerName}</span>
+                        <span>
+                          أجابه: {q.winnerName}
+                          {(q.winnerTimeMs ?? 0) > 0
+                            ? ` (${formatTimeSeconds(q.winnerTimeMs ?? 0)})`
+                            : ''}
+                        </span>
                       </div>
                     ) : q.status === 'solving' ? (
-                      <div className="flex items-center gap-2 text-[#1899D6] font-black text-sm">
+                      <div className="flex items-center gap-2 text-[#1899D6] font-black text-sm shrink-0">
                         <span>صفحة تفاعلية محفوظة</span>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2 text-[#EA2B2B] font-black text-sm">
+                      <div className="flex items-center gap-2 text-[#EA2B2B] font-black text-sm shrink-0">
                         <DuoCrossBadge className="w-5 h-5" />
                         <span>لم تُحسب الإجابة لأحد</span>
                       </div>
                     )}
                   </div>
+
+                  {q.chart && <ChartView chart={q.chart} className="max-w-lg" />}
 
                   {q.imageData && (
                     <div>
@@ -482,6 +659,43 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                           className="max-h-44 w-auto object-contain"
                         />
                       </button>
+                    </div>
+                  )}
+
+                  {q.choices && q.choices.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {q.choices.map((ch, idx) => {
+                        const isCorrect = typeof q.correctIndex === 'number' && idx === q.correctIndex;
+                        return (
+                          <div
+                            key={idx}
+                            className={`flex items-center gap-2 p-2.5 rounded-xl border-2 text-xs sm:text-sm font-bold ${
+                              isCorrect
+                                ? 'bg-[#D7FFB8]/60 border-[#58CC02] text-[#46A302]'
+                                : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
+                            }`}
+                          >
+                            <span
+                              className={`font-latin w-6 h-6 rounded-lg flex items-center justify-center text-xs font-black shrink-0 ${
+                                isCorrect
+                                  ? 'bg-[#58CC02] text-white'
+                                  : 'bg-white border border-[#E5E5E5] text-[#777777]'
+                              }`}
+                            >
+                              {idx + 1}
+                            </span>
+                            <MathText text={ch} className="flex-1" />
+                            {isCorrect && <CheckCircle2 className="w-4 h-4 shrink-0" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {q.explanation && (
+                    <div className="p-3 rounded-xl bg-[#FFFDF2] border-2 border-[#FFC800] text-xs sm:text-sm font-bold text-[#3C3C3C]">
+                      <span className="font-black text-[#9A6B00] ml-1.5">التفسير:</span>
+                      <MathText text={q.explanation} className="inline" />
                     </div>
                   )}
 
@@ -505,22 +719,35 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                               : 'border-[#E5E5E5] bg-[#F7F7F7]'
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="min-w-0">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
                               <p className="text-sm font-black text-[#3C3C3C] truncate">
                                 {b.studentName}
                               </p>
-                              <p className="text-xs font-bold text-[#777777]">
-                                {b.verdict === 'correct'
-                                  ? 'إجابة صحيحة'
-                                  : b.verdict === 'wrong'
-                                  ? 'إجابة خاطئة'
-                                  : q.status === 'solving'
-                                  ? 'حل تفاعلي على الصفحة'
-                                  : b.submitted
-                                  ? 'تم التسليم'
-                                  : 'لم يُسلّم'}
+                              <p className="text-xs font-bold text-[#777777] flex flex-wrap items-center gap-1.5">
+                                <span>
+                                  {b.verdict === 'correct'
+                                    ? 'إجابة صحيحة'
+                                    : b.verdict === 'wrong'
+                                    ? 'إجابة خاطئة'
+                                    : q.status === 'solving'
+                                    ? 'حل تفاعلي على الصفحة'
+                                    : b.submitted
+                                    ? 'تم التسليم'
+                                    : 'لم يُسلّم'}
+                                </span>
+                                {(b.timeMs ?? 0) > 0 && (
+                                  <span className="font-latin text-[#1899D6]">
+                                    ({formatTimeSeconds(b.timeMs ?? 0)})
+                                  </span>
+                                )}
                               </p>
+                              {b.chosenText && (
+                                <div className="mt-1 text-xs font-extrabold text-[#3C3C3C] bg-white/80 rounded-lg px-2 py-1 border border-[#E5E5E5]">
+                                  <span className="text-[#777777] ml-1">اختار:</span>
+                                  <MathText text={b.chosenText} className="inline" />
+                                </div>
+                              )}
                             </div>
                             <button
                               type="button"
@@ -530,7 +757,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                                   backgroundImage: q.imageData || undefined,
                                 })
                               }
-                              className="p-2 rounded-xl bg-white border border-[#E5E5E5] text-[#3C3C3C] hover:text-[#1899D6] cursor-pointer"
+                              className="p-2 rounded-xl bg-white border border-[#E5E5E5] text-[#3C3C3C] hover:text-[#1899D6] cursor-pointer shrink-0"
                               title="تكبير السبورة"
                             >
                               <ZoomIn className="w-4 h-4" />

@@ -673,6 +673,7 @@ export default function App() {
             ) : room.status === 'waiting' ? (
               <WaitingRoom
                 room={room}
+                profile={profile}
                 participants={participants}
                 isSupervisor={isSupervisor}
                 onLeaveRoom={() => handleLeaveRoom('home')}

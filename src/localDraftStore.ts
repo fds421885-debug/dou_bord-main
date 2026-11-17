@@ -25,9 +25,17 @@ export interface StoredPdfDoc {
   selectedPage: number;
 }
 
+export interface StoredQuizAnswerMeta {
+  choices: string[];
+  correctIndex: number;
+  answer: string;
+  explanation: string;
+  sourceQuizTitle?: string;
+}
+
 export interface StoredQuizDraft {
   key: string;
-  composerTab: 'text' | 'board' | 'pdf';
+  composerTab: 'text' | 'board' | 'pdf' | 'quizzes';
   draftText: string;
   draftImage: string;
   draftBoardStrokes: Stroke[];
@@ -36,6 +44,7 @@ export interface StoredQuizDraft {
   draftTimerSeconds?: number;
   draftAiSolution?: AiSolution | null;
   activeAiCache?: Record<string, AiSolution>;
+  quizAnswerCache?: Record<string, StoredQuizAnswerMeta>;
   updatedAt: number;
 }
 

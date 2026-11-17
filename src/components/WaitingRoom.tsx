@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { Copy, Check, Users, Play, Clock } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import type { Participant, Room } from '../types';
+import type { Participant, Room, UserProfile } from '../types';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
+import { RoomQuizSyncBanner } from './RoomQuizBank';
 
 interface WaitingRoomProps {
   room: Room;
+  profile: UserProfile;
   participants: Participant[];
   isSupervisor: boolean;
   onLeaveRoom: () => void;
@@ -14,6 +16,7 @@ interface WaitingRoomProps {
 
 export const WaitingRoom: React.FC<WaitingRoomProps> = ({
   room,
+  profile,
   participants,
   isSupervisor,
   onLeaveRoom,
@@ -49,6 +52,13 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
     }
   };
 
+  const sessionLabel =
+    room.sessionType === 'interactive'
+      ? room.mode === 'competition'
+        ? 'وضع تفاعلي — منافسة مباشرة 🏆'
+        : 'وضع تفاعلي — PDF وصور ومنافسة'
+      : 'وضع اختبار';
+
   return (
     <div className="max-w-5xl mx-auto px-3 sm:px-6 py-5 sm:py-8 flex flex-col gap-5 sm:gap-6">
       {/* Header Card with Room Code */}
@@ -67,13 +77,13 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
               <span
                 className={`px-2.5 py-0.5 rounded-lg text-[11px] font-black border ${
                   room.sessionType === 'interactive'
-                    ? 'bg-[#DDF4FF] border-[#1CB0F6] text-[#1899D6]'
+                    ? room.mode === 'competition'
+                      ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                      : 'bg-[#DDF4FF] border-[#1CB0F6] text-[#1899D6]'
                     : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
                 }`}
               >
-                {room.sessionType === 'interactive'
-                  ? 'وضع تفاعلي — PDF وصور'
-                  : 'وضع اختبار'}
+                {sessionLabel}
               </span>
             </div>
             <h1 className="text-xl sm:text-3xl font-black text-[#3C3C3C]">
@@ -109,6 +119,14 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
           )}
         </div>
       </div>
+
+      {/* Auto-sync & In-Room Quiz Bank */}
+      <RoomQuizSyncBanner
+        roomId={room.id}
+        profile={profile}
+        isSupervisor={isSupervisor}
+        compact
+      />
 
       {/* Joined Students List */}
       <div className="duo-card p-6 sm:p-8 flex flex-col gap-5">
@@ -173,14 +191,16 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
               <Play className="w-5 h-5 fill-current" />
               <span>
                 {starting
-                  ? 'جاري فتح السبورة للجميع...'
+                  ? 'جاري فتح الغرفة للجميع...'
+                  : room.mode === 'competition'
+                  ? 'تم — الانتقال لإعداد المنافسة'
                   : 'تم — فتح السبورة بالتزامن للجميع'}
               </span>
             </button>
           ) : (
             <div className="flex items-center gap-2.5 px-5 py-3 rounded-2xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-[#1899D6] text-sm font-black">
               <Clock className="w-5 h-5 shrink-0" />
-              <span>بانتظار ضغط المشرف على «تم» لبدء السبورة للجميع</span>
+              <span>بانتظار ضغط المشرف على «تم» لبدء الجلسة للجميع</span>
             </div>
           )}
         </div>
@@ -188,3 +208,4 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
     </div>
   );
 };
+

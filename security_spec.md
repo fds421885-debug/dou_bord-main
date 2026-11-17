@@ -7,6 +7,8 @@
 4. **Student Self-Identity & Board Isolation**: A student can only create a participant record under their own `uid`, and can only draw/submit on their own board (`studentId == request.auth.uid`) while `verdict == 'pending'` and `question.status == 'solving'`.
 5. **Terminal State Locking**: Once a room reaches `status == 'finished'` or a question reaches `status == 'correct'` or `status == 'unanswered'`, no further mutations are permitted.
 6. **Temporal Integrity**: All `createdAt` and `updatedAt` timestamps must equal `request.time`.
+7. **Shared Quiz Integrity**: Quizzes shared inside a room (`/rooms/{roomId}/sharedQuizzes/{sharedQuizId}`) can only be created or updated by verified room members (`supervisor` or `participant`) with `authorId == request.auth.uid`, preserving private `/users/{uid}/myQuizzes` isolation.
+8. **Competition Fairness & Terminal Locking**: Only verified room members listed in `competitorIds` (and not already in `wrongPlayerIds`) may submit an atomic answer transition on an active competition question while `status == 'solving'`. Claims of `status == 'correct'` must set `winnerId == request.auth.uid`, and finished competitions/questions cannot be mutated.
 
 ## 2. The "Dirty Dozen" Malicious Payloads
 1. **Unverified Email Write**: Attempt to create `/rooms/ABC123` with `email_verified: false`. -> `PERMISSION_DENIED`
@@ -21,3 +23,6 @@
 10. **Post-Winner Drawing**: Student attempts to draw after `question.status == 'correct'`. -> `PERMISSION_DENIED`
 11. **ID Poisoning**: Attempt to write `/rooms/bad$id!with*1500chars...` exceeding 128 chars or failing regex. -> `PERMISSION_DENIED`
 12. **Client Timestamp Forgery**: Create participant with backdated `joinedAt` instead of server `request.time`. -> `PERMISSION_DENIED`
+13. **SharedQuiz Spoofing**: Non-member or user with spoofed `authorId` writes to `/rooms/ROOM01/sharedQuizzes/q1`. -> `PERMISSION_DENIED`
+14. **Competition Winner Hijack**: Student in `wrongPlayerIds` or non-competitor claims `winnerId` after question resolved or updates `question` payload. -> `PERMISSION_DENIED`
+

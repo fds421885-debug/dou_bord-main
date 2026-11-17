@@ -22,6 +22,7 @@ import {
   PlusCircle,
   Power,
   Radio,
+  Trophy,
   X,
 } from 'lucide-react';
 import {
@@ -48,6 +49,7 @@ export const RoleHub: React.FC<RoleHubProps> = ({
 }) => {
   const [sessionTitle, setSessionTitle] = useState('جلسة السبورة التفاعلية');
   const [sessionType, setSessionType] = useState<SessionType>('quiz');
+  const [interactiveSubMode, setInteractiveSubMode] = useState<'slides' | 'competition'>('slides');
   const [roomCodeInput, setRoomCodeInput] = useState('');
   const [studentNameConfirm, setStudentNameConfirm] = useState(profile.fullNameQuad);
   const [busyRole, setBusyRole] = useState<'supervisor' | 'student' | null>(null);
@@ -172,7 +174,7 @@ export const RoleHub: React.FC<RoleHubProps> = ({
           supervisorName: profile.fullNameQuad,
           status: 'waiting',
           sessionType,
-          mode: 'quiz',
+          mode: sessionType === 'interactive' && interactiveSubMode === 'competition' ? 'competition' : 'quiz',
           explainPresenterId: profile.uid,
           explainPresenterName: profile.fullNameQuad,
           interactiveEditor: 'supervisor',
@@ -536,18 +538,62 @@ export const RoleHub: React.FC<RoleHubProps> = ({
                   />
                   <span className="text-sm font-black">تفاعلي</span>
                   <span className="text-[11px] font-bold leading-snug">
-                    رفع PDF أو صور والحل عليها بالتزامن
+                    PDF وصور بالتزامن أو وضع المنافسة 🏆
                   </span>
                 </button>
               </div>
             </div>
+
+            {sessionType === 'interactive' && (
+              <div className="flex flex-col gap-1.5 rounded-2xl bg-[#F0F9FF] border-2 border-[#BAE6FD] p-3">
+                <span className="text-xs font-extrabold text-[#1899D6]">
+                  الوضع الافتراضي داخل التفاعلي (يمكنك التبديل بينهما بالداخل):
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInteractiveSubMode('slides');
+                      playDuoSound('pop');
+                    }}
+                    className={`duo-btn flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border-2 text-xs font-black cursor-pointer ${
+                      interactiveSubMode === 'slides'
+                        ? 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                        : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                    }`}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>PDF / صور</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInteractiveSubMode('competition');
+                      playDuoSound('pop');
+                    }}
+                    className={`duo-btn flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border-2 text-xs font-black cursor-pointer ${
+                      interactiveSubMode === 'competition'
+                        ? 'bg-[#FFC800] border-[#E5A400] text-[#3C3C3C]'
+                        : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                    }`}
+                  >
+                    <Trophy className="w-3.5 h-3.5" />
+                    <span>وضع المنافسة 🏆</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-col gap-1.5">
               <label
                 htmlFor="session-title-input"
                 className="text-xs font-extrabold text-[#3C3C3C]"
               >
-                {sessionType === 'interactive' ? 'عنوان الجلسة التفاعلية' : 'عنوان الجلسة أو الاختبار'}
+                {sessionType === 'interactive'
+                  ? interactiveSubMode === 'competition'
+                    ? 'عنوان غرفة المنافسة التفاعلية'
+                    : 'عنوان الجلسة التفاعلية'
+                  : 'عنوان الجلسة أو الاختبار'}
               </label>
               <input
                 id="session-title-input"
@@ -557,7 +603,9 @@ export const RoleHub: React.FC<RoleHubProps> = ({
                 onChange={(e) => setSessionTitle(e.target.value)}
                 placeholder={
                   sessionType === 'interactive'
-                    ? 'مثال: شرح وحل ملزمة الرياضيات PDF'
+                    ? interactiveSubMode === 'competition'
+                      ? 'مثال: منافسة الرياضيات السريعة'
+                      : 'مثال: شرح وحل ملزمة الرياضيات PDF'
                     : 'مثال: اختبار الرياضيات — المعادلات'
                 }
                 className="w-full px-4 py-3 rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#58CC02] focus:bg-white outline-none text-sm font-bold text-[#3C3C3C]"

@@ -15,7 +15,7 @@ export interface UserProfile {
 
 export type RoomStatus = 'waiting' | 'active' | 'finished';
 export type SessionType = 'quiz' | 'interactive';
-export type RoomMode = 'quiz' | 'explain';
+export type RoomMode = 'quiz' | 'explain' | 'competition';
 
 export interface Room {
   id: string;
@@ -91,6 +91,9 @@ export interface Question {
   orderIndex: number;
   text: string;
   imageData: string;
+  choices?: string[];
+  chart?: QuizChart;
+  sourceQuizTitle?: string;
   status: QuestionStatus;
   attemptsUsed: number;
   wrongStudentIds: string[];
@@ -119,6 +122,8 @@ export interface ParticipantSummary {
   fullNameQuad: string;
   score: number;
   correctCount: number;
+  wrongCount?: number;
+  totalTimeMs?: number;
 }
 
 export interface SavedBoardSnapshot {
@@ -127,6 +132,9 @@ export interface SavedBoardSnapshot {
   strokes: Stroke[];
   submitted: boolean;
   verdict: BoardVerdict;
+  chosenIndex?: number;
+  chosenText?: string;
+  timeMs?: number;
 }
 
 export interface SavedQuestion {
@@ -135,6 +143,11 @@ export interface SavedQuestion {
   orderIndex: number;
   text: string;
   imageData: string;
+  choices?: string[];
+  correctIndex?: number;
+  explanation?: string;
+  chart?: QuizChart;
+  winnerTimeMs?: number;
   status: QuestionStatus;
   winnerName: string;
   boards: SavedBoardSnapshot[];
@@ -237,3 +250,72 @@ export interface QuizAttempt {
   finishedAt: number;
   createdAt?: unknown;
 }
+
+/* ===================== المشاركة داخل الغرفة والمنافسة ===================== */
+
+export interface SharedQuiz {
+  id: string;
+  roomId: string;
+  authorId: string;
+  authorName: string;
+  authorRole: 'supervisor' | 'student';
+  title: string;
+  questions: QuizQuestion[];
+  questionCount: number;
+  updatedAt?: unknown;
+}
+
+export type CompetitionStatus = 'active' | 'finished';
+export type CompetitionPhase = 'countdown' | 'question';
+
+export interface CompetitionCompetitor {
+  uid: string;
+  name: string;
+  role: 'supervisor' | 'student';
+}
+
+export interface CompetitionAttempt {
+  uid: string;
+  name: string;
+  choiceIndex: number;
+  isCorrect: boolean;
+  timeMs: number;
+}
+
+export interface Competition {
+  id: string;
+  roomId: string;
+  createdBy: string;
+  createdByName: string;
+  title: string;
+  settings: ExamSettings;
+  includeSupervisor: boolean;
+  competitorIds: string[];
+  competitors: CompetitionCompetitor[];
+  status: CompetitionStatus;
+  phase: CompetitionPhase;
+  currentIndex: number;
+  totalQuestions: number;
+  countdownSec: number;
+  phaseStartedAt?: unknown;
+  totalElapsedMs: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface CompetitionQuestion {
+  id: string;
+  roomId: string;
+  competitionId: string;
+  orderIndex: number;
+  question: ExamQuestion;
+  status: QuestionStatus;
+  winnerId: string;
+  winnerName: string;
+  winnerChoiceIndex: number;
+  winnerTimeMs: number;
+  wrongPlayerIds: string[];
+  attempts: CompetitionAttempt[];
+  updatedAt?: unknown;
+}
+

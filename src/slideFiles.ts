@@ -9,7 +9,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { compressSlideImageToDataUrl, renderPdfToSlideImages } from './pdfUtils';
+import { compressSlideImageToDataUrl, renderPdfToSlideImagesWithMeta } from './pdfUtils';
 import { BOARD_HEIGHT, BOARD_WIDTH, renderStrokesToCanvas } from './components/WhiteboardCanvas';
 import {
   loadSessionSnapshot,
@@ -130,7 +130,7 @@ export async function parseUploadedFilesToBatches(
         `ملف (${i + 1}/${rawFiles.length}): جاري قراءة «${cleanName}»...`
       );
       const pdfLimit = Math.min(MAX_PAGES_PER_PDF, remaining);
-      images = await renderPdfToSlideImages(
+      const { pages: renderedPages, totalPdfPages } = await renderPdfToSlideImagesWithMeta(
         file,
         (done, total) => {
           onProgress?.(
@@ -139,6 +139,18 @@ export async function parseUploadedFilesToBatches(
         },
         pdfLimit
       );
+      images = renderedPages;
+      if (totalPdfPages > pdfLimit) {
+        if (remaining < MAX_ROOM_SLIDES) {
+          warnings.push(
+            `تم رفع ${renderedPages.length} صفحة فقط من «${cleanName}» (أصل الملف ${totalPdfPages} صفحة) لوجود صفحات سابقة بالجلسة (الحد الإجمالي ${MAX_ROOM_SLIDES} صفحة — استخدم «استبدال الكل» لرفع الملف كاملاً).`
+          );
+        } else {
+          warnings.push(
+            `ملف «${cleanName}» يحتوي على ${totalPdfPages} صفحة؛ تم رفع أول ${MAX_PAGES_PER_PDF} صفحة فقط وفق حد الجلسة.`
+          );
+        }
+      }
     } else {
       onProgress?.(
         `ملف (${i + 1}/${rawFiles.length}): جاري تجهيز الصورة «${cleanName}»...`
@@ -214,11 +226,25 @@ export async function uploadSlideBatchesToRoom(params: {
     });
   });
 
-  const CHUNK_SIZE = 5;
-  for (let i = 0; i < flatToWrite.length; i += CHUNK_SIZE) {
-    const chunk = flatToWrite.slice(i, i + CHUNK_SIZE);
+  const MAX_DOCS_PER_BATCH = 4;
+  const MAX_BYTES_PER_BATCH = 900_000;
+  let idx = 0;
+  while (idx < flatToWrite.length) {
+    const chunk: typeof flatToWrite = [];
+    let chunkBytes = 0;
+    while (idx < flatToWrite.length && chunk.length < MAX_DOCS_PER_BATCH) {
+      const next = flatToWrite[idx];
+      const nextBytes = next.imageData.length + 1024;
+      if (chunk.length > 0 && chunkBytes + nextBytes > MAX_BYTES_PER_BATCH) {
+        break;
+      }
+      chunk.push(next);
+      chunkBytes += nextBytes;
+      idx++;
+    }
+
     onProgress?.(
-      `جاري رفع الصفحات (${Math.min(i + chunk.length, flatToWrite.length)} / ${flatToWrite.length})...`
+      `جاري رفع الصفحات (${idx} / ${flatToWrite.length})...`
     );
     const batch = writeBatch(db);
     chunk.forEach((item) => {

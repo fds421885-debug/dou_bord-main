@@ -259,7 +259,10 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               id: slide.id,
               ownerId: profile.uid,
               orderIndex: slide.pageIndex,
-              text: `صفحة ${slide.pageIndex}`,
+              text: (slide.fileName
+                ? `${slide.fileName} — صفحة ${slide.filePageIndex ?? slide.pageIndex}`
+                : `صفحة ${slide.pageIndex}`
+              ).slice(0, 2000),
               imageData: slide.imageData,
               status: 'solving',
               winnerName: '',

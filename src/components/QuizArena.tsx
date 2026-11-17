@@ -15,17 +15,22 @@ import {
 import {
   ArrowRight,
   Ban,
+  BookmarkCheck,
+  BookmarkPlus,
   Bot,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Download,
   Eraser,
   Eye,
   EyeOff,
   FilePlus2,
   FileText,
   Flag,
+  FolderOpen,
+  ImageDown,
   ImagePlus,
   ListChecks,
   Loader2,
@@ -36,6 +41,7 @@ import {
   PenTool,
   Plus,
   Presentation,
+  RefreshCw,
   RotateCcw,
   Search,
   Send,
@@ -57,7 +63,19 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../firebase';
-import { compressSlideImageToDataUrl, renderPdfToSlideImages } from '../pdfUtils';
+import { renderPdfToSlideImages } from '../pdfUtils';
+import {
+  MAX_ROOM_SLIDES,
+  fetchSlideStrokeLayers,
+  groupSlidesIntoFiles,
+  parseUploadedFilesToBatches,
+  removeSlidesAndReindex,
+  renderAnnotatedSlideToDataUrl,
+  saveSessionFilesToArchive,
+  triggerDataUrlDownload,
+  uploadSlideBatchesToRoom,
+  type SlideFileGroup,
+} from '../slideFiles';
 import type {
   ExplainLayer,
   InteractiveSlide,
@@ -219,6 +237,15 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [explainUploading, setExplainUploading] = useState(false);
   const [explainUploadStatus, setExplainUploadStatus] = useState('');
   const [explainUploadError, setExplainUploadError] = useState<string | null>(null);
+  const [explainPendingDeleteGroup, setExplainPendingDeleteGroup] =
+    useState<SlideFileGroup | null>(null);
+  const [explainConfirmClearAll, setExplainConfirmClearAll] = useState(false);
+  const [explainSaveMenuOpen, setExplainSaveMenuOpen] = useState(false);
+  const [explainSavingSession, setExplainSavingSession] = useState(false);
+  const [explainSaveFeedback, setExplainSaveFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   // Student local strokes & sync state
   const [localStrokes, setLocalStrokes] = useState<Stroke[]>([]);
@@ -236,7 +263,8 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const explainFileInputRef = useRef<HTMLInputElement | null>(null);
-  const explainAppendModeRef = useRef<boolean>(false);
+  const explainUploadIntentRef = useRef<'append' | 'replaceAll' | 'replaceFile'>('replaceAll');
+  const explainReplaceTargetGroupRef = useRef<SlideFileGroup | null>(null);
   const lastExplainEditAtRef = useRef<number>(0);
   const hydratedDraftKeyRef = useRef<string | null>(null);
   const lastInheritedQuestionIdRef = useRef<string | null>(null);
@@ -364,10 +392,27 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   }, [room.id]);
 
   const explainSlideIndex = room.currentSlideIndex ?? 0;
-  const activeExplainSlide = useMemo(() => {
-    if (explainSlideIndex <= 0 || explainSlides.length === 0) return null;
-    return explainSlides.find((s) => s.pageIndex === explainSlideIndex) ?? null;
+  const activeExplainSlidePos = useMemo(() => {
+    if (explainSlideIndex <= 0 || explainSlides.length === 0) return -1;
+    return explainSlides.findIndex((s) => s.pageIndex === explainSlideIndex);
   }, [explainSlideIndex, explainSlides]);
+  const activeExplainSlide = useMemo(() => {
+    if (activeExplainSlidePos < 0) return null;
+    return explainSlides[activeExplainSlidePos] ?? null;
+  }, [activeExplainSlidePos, explainSlides]);
+
+  const explainFileGroups = useMemo(
+    () => groupSlidesIntoFiles(explainSlides),
+    [explainSlides]
+  );
+
+  const activeExplainFileGroup = useMemo(() => {
+    if (!activeExplainSlide || explainFileGroups.length === 0) return null;
+    return (
+      explainFileGroups.find((g) => g.slides.some((s) => s.id === activeExplainSlide.id)) ??
+      explainFileGroups[0]
+    );
+  }, [explainFileGroups, activeExplainSlide?.id]);
 
   // Subscribe to per-user annotation layers for the active Explain Mode slide (when an image/PDF page is shown)
   useEffect(() => {
@@ -1345,107 +1390,87 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     }
   };
 
-  // Supervisor: upload Image or PDF onto the Explain Mode whiteboard
+  const triggerExplainFilePicker = (
+    intent: 'append' | 'replaceAll' | 'replaceFile',
+    targetGroup: SlideFileGroup | null = null
+  ) => {
+    if (!isSupervisor || explainUploading) return;
+    explainUploadIntentRef.current = intent;
+    explainReplaceTargetGroupRef.current = targetGroup;
+    explainFileInputRef.current?.click();
+  };
+
+  // Supervisor: upload one or multiple Images/PDFs onto the Explain Mode whiteboard
   const handleExplainFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const picked: File[] = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    if (!file || !isSupervisor) return;
+    if (picked.length === 0 || !isSupervisor) return;
+
+    const intent = explainUploadIntentRef.current;
+    const targetGroup = explainReplaceTargetGroupRef.current;
 
     setExplainUploadError(null);
+    setExplainSaveFeedback(null);
     setExplainUploading(true);
-    const shouldAppend = explainAppendModeRef.current && explainSlides.length > 0;
 
     try {
-      let newImages: string[] = [];
-      const isPdf =
-        file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      const isReplaceAll = intent === 'replaceAll' || explainSlides.length === 0;
+      const isReplaceSingleFile = intent === 'replaceFile' && Boolean(targetGroup);
 
-      if (isPdf) {
-        setExplainUploadStatus('جاري قراءة صفحات ملف PDF...');
-        newImages = await renderPdfToSlideImages(
-          file,
-          (done, total) => {
-            setExplainUploadStatus(`جاري تجهيز الصفحة ${done} من ${total}...`);
-          },
-          25
+      const maxRemaining = isReplaceAll
+        ? MAX_ROOM_SLIDES
+        : isReplaceSingleFile && targetGroup
+        ? Math.max(0, MAX_ROOM_SLIDES - (explainSlides.length - targetGroup.slides.length))
+        : Math.max(0, MAX_ROOM_SLIDES - explainSlides.length);
+
+      if (maxRemaining <= 0) {
+        setExplainUploadError(
+          `تم الوصول للحد الأقصى (${MAX_ROOM_SLIDES} صفحة). احذف ملفاً أولاً لإضافة ملفات جديدة.`
         );
-      } else if (file.type.startsWith('image/')) {
-        setExplainUploadStatus('جاري تجهيز الصورة للسبورة...');
-        const imgUrl = await compressSlideImageToDataUrl(file);
-        newImages = [imgUrl];
-      } else {
-        setExplainUploadError('يرجى اختيار صورة (PNG / JPG) أو ملف PDF صالح');
         setExplainUploading(false);
         return;
       }
 
-      if (newImages.length === 0) {
-        setExplainUploadError('لم يتم العثور على صفحات قابلة للعرض في الملف');
-        setExplainUploading(false);
-        return;
-      }
+      const { batches, totalPages, warnings } = await parseUploadedFilesToBatches(
+        picked,
+        maxRemaining,
+        (status) => setExplainUploadStatus(status)
+      );
 
-      const maxAllowed = shouldAppend ? Math.max(0, 100 - explainSlides.length) : 100;
-      const slicedImages = newImages.slice(0, maxAllowed);
-      if (slicedImages.length === 0) {
-        setExplainUploadError('تم الوصول للحد الأقصى (100 صفحة)');
-        setExplainUploading(false);
-        return;
-      }
-
-      if (!shouldAppend && explainSlides.length > 0) {
-        setExplainUploadStatus('جاري استبدال الشرائح السابقة...');
-        for (const oldSlide of explainSlides) {
-          const oldLayersSnap = await getDocs(
-            query(
-              collection(db, 'rooms', room.id, 'slides', oldSlide.id, 'layers'),
-              where('roomId', '==', room.id),
-              where('slideId', '==', oldSlide.id)
-            )
-          );
-          const delBatch = writeBatch(db);
-          oldLayersSnap.forEach((d) => delBatch.delete(d.ref));
-          delBatch.delete(doc(db, 'rooms', room.id, 'slides', oldSlide.id));
-          await delBatch.commit();
-        }
-      }
-
-      const startIndex = shouldAppend
-        ? Math.max(...explainSlides.map((s) => s.pageIndex), 0) + 1
-        : 1;
-      const batchStamp = Date.now();
-      const CHUNK_SIZE = 5;
-
-      for (let i = 0; i < slicedImages.length; i += CHUNK_SIZE) {
-        const chunk = slicedImages.slice(i, i + CHUNK_SIZE);
-        setExplainUploadStatus(
-          `جاري رفع الصفحات (${Math.min(i + chunk.length, slicedImages.length)} / ${slicedImages.length})...`
+      if (batches.length === 0 || totalPages === 0) {
+        setExplainUploadError(
+          warnings[0] || 'لم يتم العثور على صور أو ملفات PDF صالحة للعرض'
         );
-        const batch = writeBatch(db);
-        chunk.forEach((imgData, offset) => {
-          const pageIndex = startIndex + i + offset;
-          const slideId = `ex_${batchStamp}_${pageIndex}`;
-          batch.set(doc(db, 'rooms', room.id, 'slides', slideId), {
-            id: slideId,
-            roomId: room.id,
-            pageIndex,
-            imageData: imgData,
-            createdAt: serverTimestamp(),
-          });
+        setExplainUploading(false);
+        return;
+      }
+
+      let baselineSlides = explainSlides;
+      if (isReplaceSingleFile && targetGroup) {
+        setExplainUploadStatus(`جاري استبدال «${targetGroup.fileName}»...`);
+        await removeSlidesAndReindex({
+          roomId: room.id,
+          allSlides: explainSlides,
+          slidesToRemove: targetGroup.slides,
+          currentSlideIndex: explainSlideIndex,
         });
-        await batch.commit();
+        const removedSet = new Set(targetGroup.slides.map((s) => s.id));
+        baselineSlides = explainSlides
+          .filter((s) => !removedSet.has(s.id))
+          .map((s, idx) => ({ ...s, pageIndex: idx + 1 }));
       }
 
-      const nextCount = shouldAppend
-        ? explainSlides.length + slicedImages.length
-        : slicedImages.length;
-      const targetPage = shouldAppend ? startIndex : 1;
-
-      await updateDoc(doc(db, 'rooms', room.id), {
-        currentSlideIndex: targetPage,
-        slideCount: nextCount,
-        updatedAt: serverTimestamp(),
+      await uploadSlideBatchesToRoom({
+        roomId: room.id,
+        existingSlides: baselineSlides,
+        batches,
+        replaceAll: isReplaceAll,
+        onProgress: (status) => setExplainUploadStatus(status),
       });
+
+      if (warnings.length > 0) {
+        setExplainUploadError(warnings.join(' · '));
+      }
       playDuoSound('correct');
     } catch (err) {
       console.error(err);
@@ -1453,13 +1478,16 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     } finally {
       setExplainUploading(false);
       setExplainUploadStatus('');
+      explainReplaceTargetGroupRef.current = null;
     }
   };
 
   const handleExplainGoToPage = async (targetPage: number) => {
     if (!isSupervisor || explainBusy) return;
+    const minPage = explainSlides[0]?.pageIndex ?? 1;
+    const maxPage = explainSlides[explainSlides.length - 1]?.pageIndex ?? explainSlides.length;
     const clamped =
-      targetPage <= 0 ? 0 : Math.max(1, Math.min(explainSlides.length, targetPage));
+      targetPage <= 0 ? 0 : Math.max(minPage, Math.min(maxPage, targetPage));
     try {
       await updateDoc(doc(db, 'rooms', room.id), {
         currentSlideIndex: clamped,
@@ -1472,35 +1500,162 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     }
   };
 
-  const handleRemoveExplainSlides = async () => {
-    if (!isSupervisor || explainUploading || explainSlides.length === 0) return;
+  const handleRemoveExplainFileGroup = async (group: SlideFileGroup) => {
+    if (!isSupervisor || explainUploading || group.slides.length === 0) return;
     setExplainUploading(true);
-    setExplainUploadStatus('جاري إزالة صفحات الشرح والعودة للسبورة البيضاء...');
+    setExplainUploadStatus(`جاري إزالة «${group.fileName}» وإعادة ترتيب الصفحات...`);
     try {
-      for (const oldSlide of explainSlides) {
-        const oldLayersSnap = await getDocs(
-          query(
-            collection(db, 'rooms', room.id, 'slides', oldSlide.id, 'layers'),
-            where('roomId', '==', room.id),
-            where('slideId', '==', oldSlide.id)
-          )
-        );
-        const delBatch = writeBatch(db);
-        oldLayersSnap.forEach((d) => delBatch.delete(d.ref));
-        delBatch.delete(doc(db, 'rooms', room.id, 'slides', oldSlide.id));
-        await delBatch.commit();
-      }
-      await updateDoc(doc(db, 'rooms', room.id), {
-        currentSlideIndex: 0,
-        slideCount: 0,
-        updatedAt: serverTimestamp(),
+      await removeSlidesAndReindex({
+        roomId: room.id,
+        allSlides: explainSlides,
+        slidesToRemove: group.slides,
+        currentSlideIndex: explainSlideIndex,
       });
+      setExplainPendingDeleteGroup(null);
       playDuoSound('pop');
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, `rooms/${room.id}/slides`);
     } finally {
       setExplainUploading(false);
       setExplainUploadStatus('');
+    }
+  };
+
+  const handleRemoveExplainSlides = async () => {
+    if (!isSupervisor || explainUploading || explainSlides.length === 0) return;
+    setExplainUploading(true);
+    setExplainUploadStatus('جاري إزالة ملفات الشرح والعودة للسبورة البيضاء...');
+    try {
+      await removeSlidesAndReindex({
+        roomId: room.id,
+        allSlides: explainSlides,
+        slidesToRemove: explainSlides,
+        currentSlideIndex: 0,
+      });
+      setExplainConfirmClearAll(false);
+      setExplainPendingDeleteGroup(null);
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${room.id}/slides`);
+    } finally {
+      setExplainUploading(false);
+      setExplainUploadStatus('');
+    }
+  };
+
+  const handleSaveExplainSessionToArchive = async () => {
+    if (explainSavingSession) return;
+    setExplainSavingSession(true);
+    setExplainSaveFeedback(null);
+    try {
+      const { savedCount } = await saveSessionFilesToArchive({
+        uid: profile.uid,
+        room,
+        participants,
+        userRole: isSupervisor ? 'supervisor' : 'student',
+        slides: explainSlides,
+        blankExplainLayers: explainLayers,
+        legacySharedStrokes: sharedStrokes,
+      });
+      setExplainSaveMenuOpen(false);
+      setExplainSaveFeedback({
+        type: 'success',
+        text: `تم حفظ ${savedCount} صفحة/سبورة وجميع الرسومات في «اختباراتي المحفوظة»!`,
+      });
+      playDuoSound('correct');
+    } catch (err) {
+      setExplainSaveFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر حفظ ملفات الجلسة في الحساب',
+      });
+    } finally {
+      setExplainSavingSession(false);
+    }
+  };
+
+  const handleDownloadCurrentExplainBoard = async () => {
+    if (explainSavingSession) return;
+    setExplainSavingSession(true);
+    setExplainSaveFeedback(null);
+    try {
+      const layersToRender: Stroke[][] = activeExplainSlide
+        ? [
+            localSlideExplainStrokes,
+            ...explainSlideLayers
+              .filter((l) => l.authorId !== profile.uid)
+              .map((l) => l.strokes),
+          ]
+        : [
+            localExplainStrokes,
+            ...explainLayers
+              .filter((l) => l.id !== profile.uid)
+              .map((l) => l.strokes),
+            ...(sharedBoardExists && sharedStrokes.length > 0 ? [sharedStrokes] : []),
+          ];
+
+      const dataUrl = await renderAnnotatedSlideToDataUrl(
+        activeExplainSlide?.imageData,
+        layersToRender
+      );
+      const fname = activeExplainSlide
+        ? `${(activeExplainSlide.fileName || room.id).replace(/\.[^.]+$/, '')}_p${
+            activeExplainSlide.filePageIndex ?? activeExplainSlide.pageIndex
+          }.png`
+        : `${room.id}_explain_board.png`;
+      triggerDataUrlDownload(dataUrl, fname);
+      setExplainSaveMenuOpen(false);
+      setExplainSaveFeedback({
+        type: 'success',
+        text: 'تم تنزيل اللوحة الحالية مع الشرح على جهازك!',
+      });
+      playDuoSound('pop');
+    } catch {
+      setExplainSaveFeedback({
+        type: 'error',
+        text: 'تعذر تجهيز الصورة للتنزيل',
+      });
+    } finally {
+      setExplainSavingSession(false);
+    }
+  };
+
+  const handleDownloadAllExplainSlides = async () => {
+    if (explainSavingSession || explainSlides.length === 0) return;
+    setExplainSavingSession(true);
+    setExplainSaveFeedback(null);
+    try {
+      for (let i = 0; i < explainSlides.length; i++) {
+        const s = explainSlides[i];
+        const strokeLayers =
+          activeExplainSlide && s.id === activeExplainSlide.id
+            ? [
+                localSlideExplainStrokes,
+                ...explainSlideLayers
+                  .filter((l) => l.authorId !== profile.uid)
+                  .map((l) => l.strokes),
+              ]
+            : await fetchSlideStrokeLayers(room.id, s.id);
+        const dataUrl = await renderAnnotatedSlideToDataUrl(s.imageData, strokeLayers);
+        const baseName = (s.fileName || room.id).replace(/\.[^.]+$/, '');
+        const pageNum = s.filePageIndex ?? s.pageIndex;
+        triggerDataUrlDownload(dataUrl, `${i + 1}_${baseName}_p${pageNum}.png`);
+        if (i < explainSlides.length - 1) {
+          await new Promise((res) => window.setTimeout(res, 180));
+        }
+      }
+      setExplainSaveMenuOpen(false);
+      setExplainSaveFeedback({
+        type: 'success',
+        text: `تم تنزيل جميع صفحات الشرح (${explainSlides.length} صورة) مع التعليقات!`,
+      });
+      playDuoSound('correct');
+    } catch {
+      setExplainSaveFeedback({
+        type: 'error',
+        text: 'تعذر تنزيل بعض صفحات الشرح',
+      });
+    } finally {
+      setExplainSavingSession(false);
     }
   };
 
@@ -1885,18 +2040,19 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       {/* ==================== EXPLAIN MODE (SHARED SYNCHRONIZED BOARD) ==================== */}
       {isExplainMode ? (
         <div className="flex flex-col gap-4 sm:gap-5">
-          {/* Hidden Upload Input for Supervisor (Image or PDF) */}
+          {/* Hidden Multi-File Upload Input for Supervisor (Images or PDFs) */}
           {isSupervisor && (
             <input
               ref={explainFileInputRef}
               type="file"
               accept="application/pdf,image/*"
+              multiple
               onChange={handleExplainFileSelected}
               className="hidden"
             />
           )}
 
-          {/* Explain Mode Status, PDF/Image Controls & Per-Student Permissions Card */}
+          {/* Explain Mode Status, Multi-File Controls & Per-Student Permissions Card */}
           <div className="duo-card p-4 sm:p-6 bg-[#DDF4FF]/45 border-[#1CB0F6] flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -1914,22 +2070,34 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               </div>
 
               {!isSupervisor && (
-                isAmIBlockedInExplain ? (
-                  <span className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs sm:text-sm font-black">
-                    <Lock className="w-4 h-4 shrink-0" />
-                    <span>أوقف المشرف الكتابة عنك مؤقتاً — يمكنك المشاهدة والتكبير</span>
-                  </span>
-                ) : canDrawOnSharedBoard ? (
-                  <span className="px-4 py-2 rounded-xl bg-[#D7FFB8] border-2 border-[#58CC02] text-[#46A302] text-xs sm:text-sm font-black">
-                    {isExplainOpenToAll
-                      ? 'السبورة مفتوحة للجميع — يمكنك الكتابة والرسم مع المشرف والطلاب!'
-                      : 'أنت تملك القلم الآن — ارسم وسيظهر شرحك للجميع'}
-                  </span>
-                ) : (
-                  <span className="px-4 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] text-[#777777] text-xs sm:text-sm font-black">
-                    الكتابة مقتصرة حالياً على {currentPresenterName}
-                  </span>
-                )
+                <div className="flex flex-wrap items-center gap-2">
+                  {isAmIBlockedInExplain ? (
+                    <span className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs sm:text-sm font-black">
+                      <Lock className="w-4 h-4 shrink-0" />
+                      <span>أوقف المشرف الكتابة عنك مؤقتاً — يمكنك المشاهدة والتكبير</span>
+                    </span>
+                  ) : canDrawOnSharedBoard ? (
+                    <span className="px-4 py-2 rounded-xl bg-[#D7FFB8] border-2 border-[#58CC02] text-[#46A302] text-xs sm:text-sm font-black">
+                      {isExplainOpenToAll
+                        ? 'السبورة مفتوحة للجميع — يمكنك الكتابة والرسم مع المشرف والطلاب!'
+                        : 'أنت تملك القلم الآن — ارسم وسيظهر شرحك للجميع'}
+                    </span>
+                  ) : (
+                    <span className="px-4 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] text-[#777777] text-xs sm:text-sm font-black">
+                      الكتابة مقتصرة حالياً على {currentPresenterName}
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={explainSavingSession}
+                    onClick={() => void handleDownloadCurrentExplainBoard()}
+                    className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-3 border-[#1CB0F6] text-xs font-black text-[#1899D6] hover:bg-[#DDF4FF] cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>حفظ اللوحة</span>
+                  </button>
+                </div>
               )}
 
               {isSupervisor && (
@@ -1937,15 +2105,20 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                   <button
                     type="button"
                     disabled={explainUploading}
-                    onClick={() => {
-                      explainAppendModeRef.current = false;
-                      explainFileInputRef.current?.click();
-                    }}
-                    className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FFC800] hover:bg-[#FFD324] border-2 border-b-4 border-[#E5A400] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-60"
+                    onClick={() =>
+                      triggerExplainFilePicker(
+                        explainSlides.length > 0 ? 'append' : 'replaceAll'
+                      )
+                    }
+                    className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-xs font-black text-white cursor-pointer disabled:opacity-60"
                   >
-                    <Upload className="w-4 h-4" />
+                    {explainSlides.length > 0 ? (
+                      <FilePlus2 className="w-4 h-4" />
+                    ) : (
+                      <Upload className="w-4 h-4" />
+                    )}
                     <span>
-                      {explainSlides.length > 0 ? 'تغيير الصورة / PDF' : 'رفع صورة أو PDF'}
+                      {explainSlides.length > 0 ? 'إضافة ملفات' : 'رفع ملفات (PDF / صور)'}
                     </span>
                   </button>
 
@@ -1953,16 +2126,66 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     <button
                       type="button"
                       disabled={explainUploading}
-                      onClick={() => {
-                        explainAppendModeRef.current = true;
-                        explainFileInputRef.current?.click();
-                      }}
+                      onClick={() => triggerExplainFilePicker('replaceAll')}
                       className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#1CB0F6] text-xs font-black text-[#1899D6] hover:bg-[#DDF4FF] cursor-pointer disabled:opacity-60"
                     >
-                      <FilePlus2 className="w-4 h-4" />
-                      <span>إضافة صفحات</span>
+                      <Upload className="w-4 h-4" />
+                      <span>استبدال الكل</span>
                     </button>
                   )}
+
+                  <div className="relative">
+                    <button
+                      type="button"
+                      disabled={explainSavingSession}
+                      onClick={() => setExplainSaveMenuOpen((prev) => !prev)}
+                      className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FFC800] hover:bg-[#FFD324] border-2 border-b-4 border-[#E5A400] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-60"
+                    >
+                      {explainSavingSession ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <BookmarkPlus className="w-4 h-4" />
+                      )}
+                      <span>حفظ ملفات الجلسة</span>
+                    </button>
+
+                    {explainSaveMenuOpen && (
+                      <div className="absolute left-0 top-full mt-2 w-64 z-30 duo-card p-2 bg-white border-2 border-[#E5E5E5] shadow-xl flex flex-col gap-1.5">
+                        <button
+                          type="button"
+                          disabled={
+                            explainSavingSession ||
+                            (explainSlides.length === 0 && !hasAnyExplainStrokes)
+                          }
+                          onClick={() => void handleSaveExplainSessionToArchive()}
+                          className="duo-btn w-full flex items-center gap-2 px-3 py-2.5 rounded-xl bg-[#D7FFB8]/65 hover:bg-[#D7FFB8] border border-[#58CC02] text-[#46A302] text-xs font-black text-right cursor-pointer disabled:opacity-50"
+                        >
+                          <BookmarkCheck className="w-4 h-4 shrink-0" />
+                          <span>حفظ الكل في «اختباراتي المحفوظة»</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={explainSavingSession}
+                          onClick={() => void handleDownloadCurrentExplainBoard()}
+                          className="duo-btn w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F7F7F7] hover:bg-[#DDF4FF] border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black text-right cursor-pointer"
+                        >
+                          <ImageDown className="w-4 h-4 text-[#1CB0F6] shrink-0" />
+                          <span>تنزيل اللوحة الحالية (PNG)</span>
+                        </button>
+                        {explainSlides.length > 0 && (
+                          <button
+                            type="button"
+                            disabled={explainSavingSession}
+                            onClick={() => void handleDownloadAllExplainSlides()}
+                            className="duo-btn w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F7F7F7] hover:bg-[#DDF4FF] border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black text-right cursor-pointer"
+                          >
+                            <Download className="w-4 h-4 text-[#1899D6] shrink-0" />
+                            <span>تنزيل كل صفحات الشرح ({explainSlides.length})</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {hasAnyExplainStrokes && (
                     <button
@@ -1979,106 +2202,280 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               )}
             </div>
 
-            {/* Supervisor Upload Progress / Error */}
+            {/* Supervisor Upload Progress / Error / Save Feedback */}
             {explainUploading && (
               <div className="p-3 rounded-xl bg-[#FFF4CC] border-2 border-[#FFC800] text-xs sm:text-sm font-black text-[#9A6B00] flex items-center gap-2">
                 <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span>{explainUploadStatus || 'جاري تجهيز الملف...'}</span>
+                <span>{explainUploadStatus || 'جاري تجهيز الملفات...'}</span>
               </div>
             )}
             {explainUploadError && (
-              <div className="p-3 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs sm:text-sm font-extrabold text-[#EA2B2B]">
-                {explainUploadError}
+              <div className="p-3 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs sm:text-sm font-extrabold text-[#EA2B2B] flex items-center justify-between gap-2">
+                <span>{explainUploadError}</span>
+                <button
+                  type="button"
+                  onClick={() => setExplainUploadError(null)}
+                  className="cursor-pointer hover:opacity-75"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            {explainSaveFeedback && (
+              <div
+                className={`p-3 rounded-xl border-2 text-xs sm:text-sm font-black flex items-center justify-between gap-2 ${
+                  explainSaveFeedback.type === 'success'
+                    ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                    : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                }`}
+              >
+                <span>{explainSaveFeedback.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setExplainSaveFeedback(null)}
+                  className="cursor-pointer hover:opacity-75"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             )}
 
-            {/* Uploaded Image / PDF Page Navigation Strip in Explain Mode */}
+            {/* Multi-File Switcher & Page Navigation Strip in Explain Mode */}
             {explainSlides.length > 0 && (
-              <div className="pt-3 border-t-2 border-[#BCE8FF] flex flex-wrap items-center justify-between gap-2.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="flex items-center gap-1.5 text-xs font-black text-[#1899D6]">
-                    <FileText className="w-4 h-4" />
-                    <span>
-                      {activeExplainSlide
-                        ? `صفحة ${activeExplainSlide.pageIndex} من ${explainSlides.length}`
-                        : `السبورة البيضاء (${explainSlides.length} صفحة محفوظة)`}
+              <div className="pt-3 border-t-2 border-[#BCE8FF] flex flex-col gap-2.5">
+                {/* Multi-File Tabs Row */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-black text-[#1899D6]">
+                    <FolderOpen className="w-4 h-4" />
+                    <span>ملفات الشرح ({explainFileGroups.length})</span>
+                    <span className="font-latin text-[11px] text-[#777777]">
+                      · إجمالي {explainSlides.length} صفحة
                     </span>
-                  </span>
+                  </div>
 
                   {isSupervisor && (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        disabled={!activeExplainSlide || activeExplainSlide.pageIndex <= 1}
-                        onClick={() =>
-                          void handleExplainGoToPage((activeExplainSlide?.pageIndex ?? 2) - 1)
-                        }
-                        className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-40"
-                      >
-                        <ChevronRight className="w-3.5 h-3.5" />
-                        <span>السابقة</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={
-                          explainSlideIndex >= explainSlides.length
-                        }
-                        onClick={() =>
-                          void handleExplainGoToPage(
-                            activeExplainSlide ? activeExplainSlide.pageIndex + 1 : 1
-                          )
-                        }
-                        className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-40"
-                      >
-                        <span>التالية</span>
-                        <ChevronLeft className="w-3.5 h-3.5" />
-                      </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {activeExplainFileGroup && (
+                        <button
+                          type="button"
+                          disabled={explainUploading}
+                          onClick={() =>
+                            triggerExplainFilePicker('replaceFile', activeExplainFileGroup)
+                          }
+                          className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-[#DDF4FF] border border-[#1CB0F6] text-[#1899D6] text-[11px] font-black cursor-pointer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>تغيير هذا الملف</span>
+                        </button>
+                      )}
+
+                      {!explainConfirmClearAll ? (
+                        <button
+                          type="button"
+                          disabled={explainUploading}
+                          onClick={() => setExplainConfirmClearAll(true)}
+                          className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-[#E5E5E5] text-[11px] font-black text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>إزالة كل الملفات</span>
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-1 bg-[#FFDFE0] border border-[#FF4B4B] rounded-lg px-2 py-0.5">
+                          <span className="text-[11px] font-black text-[#EA2B2B]">
+                            إزالة الكل؟
+                          </span>
+                          <button
+                            type="button"
+                            disabled={explainUploading}
+                            onClick={() => void handleRemoveExplainSlides()}
+                            className="px-2 py-0.5 rounded bg-[#EA2B2B] text-white text-[10px] font-black cursor-pointer"
+                          >
+                            نعم
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setExplainConfirmClearAll(false)}
+                            className="px-2 py-0.5 rounded bg-white text-[#3C3C3C] text-[10px] font-black cursor-pointer"
+                          >
+                            إلغاء
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
 
-                {isSupervisor && (
-                  <div className="flex flex-wrap items-center gap-1.5">
+                {/* File Tabs + Blank Board Pill */}
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {isSupervisor && (
                     <button
                       type="button"
                       onClick={() => void handleExplainGoToPage(0)}
-                      className={`duo-btn px-2.5 py-1 rounded-xl border-2 text-xs font-black cursor-pointer ${
+                      className={`duo-btn px-3 py-1.5 rounded-xl border-2 text-xs font-black cursor-pointer shrink-0 ${
                         explainSlideIndex === 0
                           ? 'bg-[#58CC02] border-[#46A302] text-white'
-                          : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                          : 'bg-white border-[#E5E5E5] text-[#3C3C3C] hover:bg-[#F7F7F7]'
                       }`}
                     >
                       سبورة بيضاء
                     </button>
+                  )}
 
-                    <div className="flex items-center gap-1 overflow-x-auto max-w-full">
-                      {explainSlides.map((s) => (
+                  {explainFileGroups.map((group) => {
+                    const isGroupActive =
+                      activeExplainFileGroup?.fileId === group.fileId &&
+                      Boolean(activeExplainSlide);
+                    return (
+                      <div
+                        key={group.fileId}
+                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border-2 shrink-0 transition-all ${
+                          isGroupActive
+                            ? 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                            : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                        }`}
+                      >
                         <button
-                          key={s.id}
                           type="button"
-                          onClick={() => void handleExplainGoToPage(s.pageIndex)}
-                          className={`font-latin min-w-[28px] h-7 px-2 rounded-lg text-xs font-black cursor-pointer shrink-0 ${
-                            explainSlideIndex === s.pageIndex
-                              ? 'bg-[#1CB0F6] text-white border-2 border-[#1899D6]'
-                              : 'bg-white text-[#777777] border border-[#E5E5E5] hover:text-[#3C3C3C]'
+                          disabled={!isSupervisor}
+                          onClick={() => void handleExplainGoToPage(group.startPageIndex)}
+                          className={`flex items-center gap-1.5 text-xs font-black ${
+                            isSupervisor ? 'cursor-pointer' : 'cursor-default'
                           }`}
                         >
-                          {s.pageIndex}
+                          <FileText className="w-3.5 h-3.5 shrink-0" />
+                          <span className="max-w-[150px] truncate">{group.fileName}</span>
+                          <span
+                            className={`font-latin px-1.5 py-0.5 rounded-md text-[10px] font-black ${
+                              isGroupActive
+                                ? 'bg-white/25 text-white'
+                                : 'bg-[#F7F7F7] text-[#777777] border border-[#E5E5E5]'
+                            }`}
+                          >
+                            {group.slides.length} ص
+                          </span>
                         </button>
-                      ))}
-                    </div>
 
-                    <button
-                      type="button"
-                      disabled={explainUploading}
-                      onClick={() => void handleRemoveExplainSlides()}
-                      className="duo-btn px-2.5 py-1 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer"
-                      title="إزالة الصور والملف بالكامل"
-                    >
-                      إزالة الملف
-                    </button>
+                        {isSupervisor && (
+                          <button
+                            type="button"
+                            disabled={explainUploading}
+                            onClick={() => setExplainPendingDeleteGroup(group)}
+                            title={`إزالة «${group.fileName}»`}
+                            className={`p-0.5 rounded-md cursor-pointer ${
+                              isGroupActive
+                                ? 'hover:bg-white/25 text-white'
+                                : 'hover:bg-[#FFDFE0] text-[#EA2B2B]'
+                            }`}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Inline Single-File Removal Confirmation */}
+                {isSupervisor && explainPendingDeleteGroup && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-[#FFDFE0]/75 border-2 border-[#FF4B4B]">
+                    <span className="text-xs font-black text-[#EA2B2B]">
+                      هل تريد إزالة الملف «{explainPendingDeleteGroup.fileName}» (
+                      {explainPendingDeleteGroup.slides.length} صفحة) مع رسوماته؟
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={explainUploading}
+                        onClick={() =>
+                          void handleRemoveExplainFileGroup(explainPendingDeleteGroup)
+                        }
+                        className="duo-btn px-3 py-1 rounded-lg bg-[#EA2B2B] text-white text-xs font-black cursor-pointer disabled:opacity-50"
+                      >
+                        نعم، إزالة
+                      </button>
+                      <button
+                        type="button"
+                        disabled={explainUploading}
+                        onClick={() => setExplainPendingDeleteGroup(null)}
+                        className="duo-btn px-3 py-1 rounded-lg bg-white border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
                   </div>
                 )}
+
+                {/* Page Navigation Controls for Active File */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-black text-[#1899D6]">
+                      <FileText className="w-4 h-4" />
+                      <span>
+                        {activeExplainSlide
+                          ? activeExplainFileGroup && explainFileGroups.length > 1
+                            ? `صفحة ${activeExplainSlide.filePageIndex ?? 1} من ${activeExplainFileGroup.slides.length} (الإجمالي ${activeExplainSlidePos + 1}/${explainSlides.length})`
+                            : `صفحة ${activeExplainSlidePos + 1} من ${explainSlides.length}`
+                          : `السبورة البيضاء (${explainSlides.length} صفحة مرفوعة)`}
+                      </span>
+                    </span>
+
+                    {isSupervisor && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={!activeExplainSlide || activeExplainSlidePos <= 0}
+                          onClick={() => {
+                            const prevSlide = explainSlides[activeExplainSlidePos - 1];
+                            if (prevSlide) void handleExplainGoToPage(prevSlide.pageIndex);
+                          }}
+                          className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-40"
+                        >
+                          <ChevronRight className="w-3.5 h-3.5" />
+                          <span>السابقة</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            activeExplainSlidePos >= explainSlides.length - 1 &&
+                            Boolean(activeExplainSlide)
+                          }
+                          onClick={() => {
+                            const nextSlide = activeExplainSlide
+                              ? explainSlides[activeExplainSlidePos + 1]
+                              : explainSlides[0];
+                            if (nextSlide) void handleExplainGoToPage(nextSlide.pageIndex);
+                          }}
+                          className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-40"
+                        >
+                          <span>التالية</span>
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {isSupervisor &&
+                    activeExplainSlide &&
+                    activeExplainFileGroup &&
+                    activeExplainFileGroup.slides.length > 1 && (
+                      <div className="flex items-center gap-1 overflow-x-auto max-w-full">
+                        {activeExplainFileGroup.slides.map((s, idx) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => void handleExplainGoToPage(s.pageIndex)}
+                            className={`font-latin min-w-[28px] h-7 px-2 rounded-lg text-xs font-black cursor-pointer shrink-0 ${
+                              activeExplainSlide.id === s.id
+                                ? 'bg-[#1CB0F6] text-white border-2 border-[#1899D6]'
+                                : 'bg-white text-[#777777] border border-[#E5E5E5] hover:text-[#3C3C3C]'
+                            }`}
+                          >
+                            {s.filePageIndex ?? idx + 1}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                </div>
               </div>
             )}
 

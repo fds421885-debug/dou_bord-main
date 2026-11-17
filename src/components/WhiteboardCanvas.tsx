@@ -2,12 +2,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Eraser,
   Hand,
+  Maximize2,
+  Palette,
   PenTool,
   RotateCcw,
   Trash2,
   ZoomIn,
   ZoomOut,
-  Maximize2,
 } from 'lucide-react';
 import type { Stroke } from '../types';
 import { DuoLockShield } from './DuoIcons';
@@ -16,15 +17,24 @@ export const BOARD_WIDTH = 1200;
 export const BOARD_HEIGHT = 700;
 
 export const PEN_COLORS = [
-  { id: 'black', label: 'أسود', hex: '#1F2937', ring: 'ring-[#1F2937]' },
-  { id: 'red', label: 'أحمر', hex: '#EA2B2B', ring: 'ring-[#EA2B2B]' },
-  { id: 'green', label: 'أخضر', hex: '#58CC02', ring: 'ring-[#58CC02]' },
+  { id: 'black', label: 'أسود', hex: '#1F2937' },
+  { id: 'blue', label: 'أزرق', hex: '#1CB0F6' },
+  { id: 'red', label: 'أحمر', hex: '#EA2B2B' },
+  { id: 'green', label: 'أخضر', hex: '#58CC02' },
+  { id: 'gold', label: 'ذهبي', hex: '#FFC800' },
+  { id: 'orange', label: 'برتقالي', hex: '#FF9600' },
+  { id: 'purple', label: 'بنفسجي', hex: '#CE82FF' },
+  { id: 'pink', label: 'وردي', hex: '#FF6B9D' },
+  { id: 'teal', label: 'تركواز', hex: '#0D9488' },
+  { id: 'gray', label: 'رمادي', hex: '#6B7280' },
 ] as const;
 
 const PEN_SIZES = [
+  { label: 'دقيق', size: 2 },
   { label: 'رفيع', size: 4 },
   { label: 'متوسط', size: 8 },
-  { label: 'عريض', size: 15 },
+  { label: 'سميك', size: 14 },
+  { label: 'عريض', size: 22 },
 ];
 
 export function renderStrokesToCanvas(
@@ -559,12 +569,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             <span>{viewOnlyLabel || 'وضع المشاهدة المباشرة — يمكنك التكبير أو التحريك لمتابعة الشرح'}</span>
           </div>
         ) : (
-        /* Colors & Tools */
+        /* Colors, Thickness Slider & Drawing Tools */
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-          {/* 3 Mandatory Colors: Black, Red, Green */}
-          <div className="flex items-center gap-1 bg-white border-2 border-[#E5E5E5] rounded-xl px-1.5 sm:px-2 py-1">
+          {/* Expanded Colors Palette + Custom Color Picker */}
+          <div className="flex flex-wrap items-center gap-1 bg-white border-2 border-[#E5E5E5] rounded-xl px-1.5 sm:px-2 py-1">
             {PEN_COLORS.map((c) => {
-              const active = tool === 'pen' && color === c.hex;
+              const active = tool === 'pen' && color.toLowerCase() === c.hex.toLowerCase();
               return (
                 <button
                   key={c.id}
@@ -575,45 +585,118 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
                     setTool('pen');
                   }}
                   title={c.label}
-                  className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-extrabold transition-all whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                  aria-label={c.label}
+                  className={`w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center transition-transform shrink-0 cursor-pointer disabled:opacity-50 ${
                     active
-                      ? 'bg-[#E5F7FF] text-[#1899D6] ring-2 ring-[#1CB0F6]'
-                      : 'text-[#3C3C3C] hover:bg-[#F7F7F7]'
+                      ? 'ring-2 ring-offset-1 ring-[#1CB0F6] scale-110'
+                      : 'hover:scale-105'
                   }`}
                 >
                   <span
-                    className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full border-2 border-white shadow-sm shrink-0"
+                    className="w-4 h-4 sm:w-5 sm:h-5 rounded-full border border-black/15 shadow-xs block"
                     style={{ backgroundColor: c.hex }}
                   />
-                  <span>{c.label}</span>
                 </button>
               );
             })}
+
+            {/* Custom Any-Color Picker */}
+            <label
+              title="لون مخصص"
+              className={`relative w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center cursor-pointer transition-transform shrink-0 border border-[#E5E5E5] bg-[#F7F7F7] hover:scale-105 ${
+                tool === 'pen' &&
+                !PEN_COLORS.some((c) => c.hex.toLowerCase() === color.toLowerCase())
+                  ? 'ring-2 ring-offset-1 ring-[#1CB0F6] scale-110'
+                  : ''
+              }`}
+              style={{
+                backgroundColor: !PEN_COLORS.some(
+                  (c) => c.hex.toLowerCase() === color.toLowerCase()
+                )
+                  ? color
+                  : undefined,
+              }}
+            >
+              <Palette
+                className={`w-3.5 h-3.5 ${
+                  !PEN_COLORS.some((c) => c.hex.toLowerCase() === color.toLowerCase())
+                    ? 'text-white drop-shadow'
+                    : 'text-[#777777]'
+                }`}
+              />
+              <input
+                type="color"
+                disabled={disabled}
+                value={color}
+                onChange={(e) => {
+                  setColor(e.target.value);
+                  setTool('pen');
+                }}
+                aria-label="اختيار لون مخصص"
+                className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+              />
+            </label>
           </div>
 
-          {/* Pen Sizes */}
-          <div className="flex items-center gap-1 bg-white border-2 border-[#E5E5E5] rounded-xl px-1.5 sm:px-2 py-1">
-            {PEN_SIZES.map((p) => {
-              const active = penSize === p.size && tool !== 'pan';
-              return (
-                <button
-                  key={p.size}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => {
-                    setPenSize(p.size);
-                    if (tool === 'pan') setTool('pen');
+          {/* Pen & Eraser Width Presets + Continuous Slider */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-white border-2 border-[#E5E5E5] rounded-xl px-2 py-1">
+            <div className="flex items-center gap-1">
+              {PEN_SIZES.map((p) => {
+                const active = penSize === p.size && tool !== 'pan';
+                return (
+                  <button
+                    key={p.size}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      setPenSize(p.size);
+                      if (tool === 'pan') setTool('pen');
+                    }}
+                    title={`${p.label} (${p.size}px)`}
+                    className={`px-1.5 sm:px-2 py-1 rounded-lg text-[11px] font-extrabold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                      active
+                        ? 'bg-[#D7FFB8] text-[#46A302] ring-1 ring-[#58CC02]'
+                        : 'text-[#777777] hover:bg-[#F7F7F7]'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center gap-1.5 pr-1.5 border-r border-[#E5E5E5]">
+              <span
+                className="w-5 h-5 rounded-md bg-[#F7F7F7] border border-[#E5E5E5] flex items-center justify-center shrink-0"
+                title={`سمك الخط الحالي: ${penSize}`}
+              >
+                <span
+                  className="rounded-full block transition-all"
+                  style={{
+                    width: `${Math.max(3, Math.min(18, Math.round(penSize * 0.65)))}px`,
+                    height: `${Math.max(3, Math.min(18, Math.round(penSize * 0.65)))}px`,
+                    backgroundColor: tool === 'eraser' ? '#9CA3AF' : color,
                   }}
-                  className={`px-2 sm:px-2.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-extrabold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
-                    active
-                      ? 'bg-[#D7FFB8] text-[#46A302]'
-                      : 'text-[#777777] hover:bg-[#F7F7F7]'
-                  }`}
-                >
-                  {p.label}
-                </button>
-              );
-            })}
+                />
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={36}
+                step={1}
+                disabled={disabled}
+                value={penSize}
+                onChange={(e) => {
+                  setPenSize(Number(e.target.value));
+                  if (tool === 'pan') setTool('pen');
+                }}
+                aria-label="التحكم في سمك الخط"
+                className="w-20 sm:w-24 accent-[#58CC02] cursor-pointer disabled:opacity-50"
+              />
+              <span className="font-latin text-[11px] font-black text-[#3C3C3C] min-w-[26px] text-center">
+                {penSize}px
+              </span>
+            </div>
           </div>
 
           {/* Pen / Eraser / Undo / Clear */}

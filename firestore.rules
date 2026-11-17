@@ -112,11 +112,14 @@ service cloud.firestore {
 
     function isValidSlide(data) {
       return data.keys().hasAll(['id', 'roomId', 'pageIndex', 'imageData', 'createdAt'])
-        && data.keys().hasOnly(['id', 'roomId', 'pageIndex', 'imageData', 'createdAt'])
+        && data.keys().hasOnly(['id', 'roomId', 'pageIndex', 'imageData', 'fileId', 'fileName', 'filePageIndex', 'createdAt'])
         && isValidId(data.id)
         && isValidId(data.roomId)
         && data.pageIndex is int && data.pageIndex >= 1 && data.pageIndex <= 100
         && data.imageData is string && data.imageData.size() >= 10 && data.imageData.size() <= 480000
+        && (!('fileId' in data) || isValidId(data.fileId))
+        && (!('fileName' in data) || (data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 160))
+        && (!('filePageIndex' in data) || (data.filePageIndex is int && data.filePageIndex >= 1 && data.filePageIndex <= 100))
         && data.createdAt is timestamp;
     }
 
@@ -502,6 +505,8 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['currentSlideIndex', 'slideCount', 'updatedAt']))
           || (existing().status == 'active'
             && incoming().diff(existing()).affectedKeys().hasOnly(['interactiveEditor', 'interactiveEditorName', 'updatedAt']))
+          || (existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['interactiveEditor', 'interactiveEditorName', 'explainBlockedIds', 'updatedAt']))
           || (incoming().status == 'finished'
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
         );
@@ -524,6 +529,15 @@ service cloud.firestore {
             get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
             || get(/databases/$(database)/documents/rooms/$(roomId)).data.mode == 'explain'
           );
+        allow update: if isValidId(roomId) && isValidId(slideId) && isVerified()
+          && isValidSlide(incoming())
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().imageData == existing().imageData
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['pageIndex'])
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
+          && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
         allow delete: if isValidId(roomId) && isValidId(slideId) && isVerified()
           && get(/databases/$(database)/documents/rooms/$(roomId)).data.supervisorId == request.auth.uid
           && get(/databases/$(database)/documents/rooms/$(roomId)).data.status == 'active';
@@ -553,6 +567,7 @@ service cloud.firestore {
                 && (
                   (
                     get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
+                    && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
                     && (
                       get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == 'all'
                       || get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == request.auth.uid
@@ -587,6 +602,7 @@ service cloud.firestore {
                 && (
                   (
                     get(/databases/$(database)/documents/rooms/$(roomId)).data.sessionType == 'interactive'
+                    && isNotExplainBlocked(get(/databases/$(database)/documents/rooms/$(roomId)).data)
                     && (
                       get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == 'all'
                       || get(/databases/$(database)/documents/rooms/$(roomId)).data.interactiveEditor == request.auth.uid

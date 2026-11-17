@@ -43,6 +43,9 @@ export interface InteractiveSlide {
   roomId: string;
   pageIndex: number;
   imageData: string;
+  fileId?: string;
+  fileName?: string;
+  filePageIndex?: number;
   createdAt?: unknown;
 }
 

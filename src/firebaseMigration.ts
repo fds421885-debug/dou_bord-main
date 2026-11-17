@@ -814,6 +814,11 @@ export async function runFirebaseMigration(params: {
                 roomId: srcRoom.id,
                 pageIndex: Math.min(100, Math.max(1, slide.pageIndex)),
                 imageData: slide.imageData,
+                ...(slide.fileId ? { fileId: slide.fileId } : {}),
+                ...(slide.fileName ? { fileName: slide.fileName.slice(0, 160) } : {}),
+                ...(typeof slide.filePageIndex === 'number'
+                  ? { filePageIndex: Math.min(100, Math.max(1, slide.filePageIndex)) }
+                  : {}),
                 createdAt: serverTimestamp(),
               });
               migratedSlidesCount++;

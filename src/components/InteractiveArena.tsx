@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   collection,
+  deleteDoc,
   doc,
-  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -12,24 +12,34 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  Ban,
+  BookmarkCheck,
+  BookmarkPlus,
   ChevronLeft,
   ChevronRight,
+  Download,
   Eraser,
   FilePlus2,
   FileText,
   Flag,
+  FolderOpen,
+  ImageDown,
+  Loader2,
   Lock,
   Maximize2,
   Minimize2,
   PenTool,
   Radio,
+  RefreshCw,
   Sparkles,
+  Trash2,
   Trophy,
+  Unlock,
   Upload,
   Users,
+  X,
 } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { compressSlideImageToDataUrl, renderPdfToSlideImages } from '../pdfUtils';
 import type {
   InteractiveSlide,
   Participant,
@@ -39,9 +49,21 @@ import type {
   Stroke,
   UserProfile,
 } from '../types';
+import {
+  MAX_ROOM_SLIDES,
+  fetchSlideStrokeLayers,
+  groupSlidesIntoFiles,
+  parseUploadedFilesToBatches,
+  removeSlidesAndReindex,
+  renderAnnotatedSlideToDataUrl,
+  saveSessionFilesToArchive,
+  triggerDataUrlDownload,
+  uploadSlideBatchesToRoom,
+  type SlideFileGroup,
+} from '../slideFiles';
 import { playDuoSound } from './DuoIcons';
 import { mergeActiveRoomSnapshot } from '../localDraftStore';
-import { WhiteboardCanvas } from './WhiteboardCanvas';
+import { doesStrokeIntersectEraser, WhiteboardCanvas } from './WhiteboardCanvas';
 import { CompetitionArena } from './CompetitionArena';
 
 interface InteractiveArenaProps {
@@ -72,7 +94,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
   const writeInFlightRef = useRef<boolean>(false);
   const pendingSaveRef = useRef<{ slideId: string; strokes: Stroke[] } | null>(null);
 
-  // Supervisor upload & session controls
+  // Supervisor upload & multi-file management state
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string>('');
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -82,8 +104,20 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [finishingRoom, setFinishingRoom] = useState(false);
 
+  // File removal & session saving state
+  const [pendingDeleteGroup, setPendingDeleteGroup] = useState<SlideFileGroup | null>(null);
+  const [confirmClearAllFiles, setConfirmClearAllFiles] = useState(false);
+  const [removingFiles, setRemovingFiles] = useState(false);
+  const [saveMenuOpen, setSaveMenuOpen] = useState(false);
+  const [savingSession, setSavingSession] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const appendModeRef = useRef<boolean>(false);
+  const uploadIntentRef = useRef<'append' | 'replaceAll' | 'replaceFile'>('replaceAll');
+  const replaceTargetGroupRef = useRef<SlideFileGroup | null>(null);
 
   const isCompetitionMode = room.mode === 'competition';
 
@@ -115,14 +149,27 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     }
   }, [syncedSlideIndex, slides.length]);
 
-  const activeSlide = useMemo(() => {
-    if (slides.length === 0) return null;
-    return (
-      slides.find((s) => s.pageIndex === localPageIndex) ??
-      slides[Math.min(Math.max(localPageIndex - 1, 0), slides.length - 1)] ??
-      slides[0]
-    );
+  const activeSlideIndexPos = useMemo(() => {
+    if (slides.length === 0) return -1;
+    const exactIdx = slides.findIndex((s) => s.pageIndex === localPageIndex);
+    if (exactIdx >= 0) return exactIdx;
+    return Math.min(Math.max(localPageIndex - 1, 0), slides.length - 1);
   }, [slides, localPageIndex]);
+
+  const activeSlide = useMemo(() => {
+    if (activeSlideIndexPos < 0 || slides.length === 0) return null;
+    return slides[activeSlideIndexPos] ?? slides[0];
+  }, [slides, activeSlideIndexPos]);
+
+  const fileGroups = useMemo(() => groupSlidesIntoFiles(slides), [slides]);
+
+  const activeFileGroup = useMemo(() => {
+    if (!activeSlide || fileGroups.length === 0) return null;
+    return (
+      fileGroups.find((g) => g.slides.some((s) => s.id === activeSlide.id)) ??
+      fileGroups[0]
+    );
+  }, [fileGroups, activeSlide?.id]);
 
   // Subscribe to all annotation layers for the currently viewed slide
   useEffect(() => {
@@ -203,11 +250,15 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     return () => window.clearTimeout(timer);
   }, [room, participants, slides, layers, isSupervisor]);
 
+  const blockedIds = room.explainBlockedIds ?? [];
+  const isAmIBlocked = !isSupervisor && blockedIds.includes(profile.uid);
+
   const canDraw = useMemo(() => {
     if (!activeSlide) return false;
     if (isSupervisor) return true;
+    if (isAmIBlocked) return false;
     return room.interactiveEditor === 'all' || room.interactiveEditor === profile.uid;
-  }, [activeSlide, isSupervisor, room.interactiveEditor, profile.uid]);
+  }, [activeSlide, isSupervisor, isAmIBlocked, room.interactiveEditor, profile.uid]);
 
   const otherLayers = useMemo(() => {
     return layers
@@ -218,6 +269,25 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
   const activeContributors = useMemo(() => {
     return layers.filter((l) => (l.strokes?.length ?? 0) > 0);
   }, [layers]);
+
+  const writerStrokeCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    if (myStrokes.length > 0) {
+      map.set(profile.uid, myStrokes.length);
+    }
+    layers.forEach((l) => {
+      const count = l.strokes?.length ?? 0;
+      if (count > 0 && l.authorId !== profile.uid) {
+        map.set(l.authorId, count);
+      }
+    });
+    return map;
+  }, [layers, myStrokes.length, profile.uid]);
+
+  const hasOtherWritersOnPage = useMemo(
+    () => layers.some((l) => l.authorId !== profile.uid && (l.strokes?.length ?? 0) > 0),
+    [layers, profile.uid]
+  );
 
   // Serialized Firestore writer so strokes never race or drop during fast drawing
   const flushSaveQueue = useCallback(async () => {
@@ -251,7 +321,6 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         });
       }
     } catch (err) {
-      // Fallback: if updateDoc failed because doc wasn't created yet, try setDoc once
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes('NOT_FOUND') || errMsg.includes('No document to update')) {
         try {
@@ -287,124 +356,108 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     void flushSaveQueue();
   };
 
-  // Supervisor: upload PDF or Image (replace or append pages)
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const triggerFilePicker = (
+    intent: 'append' | 'replaceAll' | 'replaceFile',
+    targetGroup: SlideFileGroup | null = null
+  ) => {
+    if (!isSupervisor || uploading) return;
+    uploadIntentRef.current = intent;
+    replaceTargetGroupRef.current = targetGroup;
+    fileInputRef.current?.click();
+  };
+
+  // Supervisor: upload one or multiple PDFs / Images (append, replace single file, or replace all)
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked: File[] = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    if (!file || !isSupervisor) return;
+    if (picked.length === 0 || !isSupervisor) return;
+
+    const intent = uploadIntentRef.current;
+    const targetGroup = replaceTargetGroupRef.current;
 
     setUploadError(null);
+    setSaveFeedback(null);
     setUploading(true);
-    const shouldAppend = appendModeRef.current && slides.length > 0;
 
     try {
-      let newImages: string[] = [];
-      const isPdf =
-        file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      const isReplaceAll = intent === 'replaceAll' || slides.length === 0;
+      const isReplaceSingleFile = intent === 'replaceFile' && Boolean(targetGroup);
 
-      if (isPdf) {
-        setUploadStatus('جاري قراءة صفحات ملف PDF...');
-        newImages = await renderPdfToSlideImages(
-          file,
-          (done, total) => {
-            setUploadStatus(`جاري تجهيز الصفحة ${done} من ${total}...`);
-          },
-          25
+      const maxRemaining = isReplaceAll
+        ? MAX_ROOM_SLIDES
+        : isReplaceSingleFile && targetGroup
+        ? Math.max(0, MAX_ROOM_SLIDES - (slides.length - targetGroup.slides.length))
+        : Math.max(0, MAX_ROOM_SLIDES - slides.length);
+
+      if (maxRemaining <= 0) {
+        setUploadError(`تم الوصول للحد الأقصى (${MAX_ROOM_SLIDES} صفحة في الجلسة). احذف ملفاً أولاً لإضافة ملفات جديدة.`);
+        setUploading(false);
+        return;
+      }
+
+      const { batches, totalPages, warnings } = await parseUploadedFilesToBatches(
+        picked,
+        maxRemaining,
+        (status) => setUploadStatus(status)
+      );
+
+      if (batches.length === 0 || totalPages === 0) {
+        setUploadError(
+          warnings[0] || 'لم يتم العثور على ملفات PDF أو صور صالحة للعرض.'
         );
-      } else if (file.type.startsWith('image/')) {
-        setUploadStatus('جاري تجهيز الصورة...');
-        const imgUrl = await compressSlideImageToDataUrl(file);
-        newImages = [imgUrl];
-      } else {
-        setUploadError('يرجى اختيار ملف PDF أو صورة صالحة (PNG / JPG)');
         setUploading(false);
         return;
       }
 
-      if (newImages.length === 0) {
-        setUploadError('لم يتم العثور على صفحات قابلة للعرض في هذا الملف');
-        setUploading(false);
-        return;
-      }
+      let baselineSlides = slides;
 
-      const maxAllowed = shouldAppend ? Math.max(0, 100 - slides.length) : 100;
-      const slicedImages = newImages.slice(0, maxAllowed);
-      if (slicedImages.length === 0) {
-        setUploadError('تم الوصول للحد الأقصى (100 صفحة في الجلسة)');
-        setUploading(false);
-        return;
-      }
-
-      // If replacing, delete existing slides and their layers first
-      if (!shouldAppend && slides.length > 0) {
-        setUploadStatus('جاري استبدال الصفحات السابقة...');
-        for (const oldSlide of slides) {
-          const oldLayersSnap = await getDocs(
-            query(
-              collection(db, 'rooms', room.id, 'slides', oldSlide.id, 'layers'),
-              where('roomId', '==', room.id),
-              where('slideId', '==', oldSlide.id)
-            )
-          );
-          const delBatch = writeBatch(db);
-          oldLayersSnap.forEach((d) => delBatch.delete(d.ref));
-          delBatch.delete(doc(db, 'rooms', room.id, 'slides', oldSlide.id));
-          await delBatch.commit();
-        }
+      if (isReplaceSingleFile && targetGroup) {
+        setUploadStatus(`جاري استبدال «${targetGroup.fileName}»...`);
+        await removeSlidesAndReindex({
+          roomId: room.id,
+          allSlides: slides,
+          slidesToRemove: targetGroup.slides,
+          currentSlideIndex: syncedSlideIndex,
+        });
+        const removedSet = new Set(targetGroup.slides.map((s) => s.id));
+        const remainingSorted = slides
+          .filter((s) => !removedSet.has(s.id))
+          .map((s, idx) => ({ ...s, pageIndex: idx + 1 }));
+        baselineSlides = remainingSorted;
+        targetGroup.slides.forEach((s) => createdSlideIdsRef.current.delete(s.id));
+      } else if (isReplaceAll && slides.length > 0) {
         createdSlideIdsRef.current.clear();
       }
 
-      const startIndex = shouldAppend
-        ? Math.max(...slides.map((s) => s.pageIndex), 0) + 1
-        : 1;
-      const batchStamp = Date.now();
-
-      // Upload in chunks of 5 slides per batch to stay comfortably inside Firestore limits
-      const CHUNK_SIZE = 5;
-      for (let i = 0; i < slicedImages.length; i += CHUNK_SIZE) {
-        const chunk = slicedImages.slice(i, i + CHUNK_SIZE);
-        setUploadStatus(
-          `جاري رفع الصفحات (${Math.min(i + chunk.length, slicedImages.length)} / ${slicedImages.length})...`
-        );
-        const batch = writeBatch(db);
-        chunk.forEach((imgData, offset) => {
-          const pageIndex = startIndex + i + offset;
-          const slideId = `s_${batchStamp}_${pageIndex}`;
-          batch.set(doc(db, 'rooms', room.id, 'slides', slideId), {
-            id: slideId,
-            roomId: room.id,
-            pageIndex,
-            imageData: imgData,
-            createdAt: serverTimestamp(),
-          });
-        });
-        await batch.commit();
-      }
-
-      const nextCount = shouldAppend ? slides.length + slicedImages.length : slicedImages.length;
-      const targetPage = shouldAppend ? startIndex : 1;
-
-      await updateDoc(doc(db, 'rooms', room.id), {
-        currentSlideIndex: targetPage,
-        slideCount: nextCount,
-        updatedAt: serverTimestamp(),
+      const { firstNewPageIndex } = await uploadSlideBatchesToRoom({
+        roomId: room.id,
+        existingSlides: baselineSlides,
+        batches,
+        replaceAll: isReplaceAll,
+        onProgress: (status) => setUploadStatus(status),
       });
 
-      setLocalPageIndex(targetPage);
+      setLocalPageIndex(firstNewPageIndex);
+      if (warnings.length > 0) {
+        setUploadError(warnings.join(' · '));
+      }
       playDuoSound('correct');
     } catch (err) {
       console.error(err);
-      setUploadError('تعذر رفع الملف، تأكد من أن الملف غير محمي بكلمة مرور وحاول مرة أخرى');
+      setUploadError('تعذر رفع الملفات، تأكد أن الملفات غير محمية بكلمة مرور وحاول مرة أخرى');
     } finally {
       setUploading(false);
       setUploadStatus('');
+      replaceTargetGroupRef.current = null;
     }
   };
 
   // Navigate pages (supervisor updates synced room page; student flips locally)
   const handleGoToPage = async (targetPage: number) => {
     if (slides.length === 0) return;
-    const clamped = Math.max(1, Math.min(slides.length, targetPage));
+    const minPage = slides[0]?.pageIndex ?? 1;
+    const maxPage = slides[slides.length - 1]?.pageIndex ?? slides.length;
+    const clamped = Math.max(minPage, Math.min(maxPage, targetPage));
     setLocalPageIndex(clamped);
     playDuoSound('pop');
 
@@ -421,13 +474,169 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     }
   };
 
+  // Remove a single file group (all its slides & layers) and re-index remaining slides cleanly
+  const handleConfirmRemoveFileGroup = async (group: SlideFileGroup) => {
+    if (!isSupervisor || removingFiles) return;
+    setRemovingFiles(true);
+    setUploadError(null);
+    try {
+      const { nextCurrentSlideIndex } = await removeSlidesAndReindex({
+        roomId: room.id,
+        allSlides: slides,
+        slidesToRemove: group.slides,
+        currentSlideIndex: syncedSlideIndex,
+      });
+      group.slides.forEach((s) => createdSlideIdsRef.current.delete(s.id));
+      setLocalPageIndex(nextCurrentSlideIndex > 0 ? nextCurrentSlideIndex : 1);
+      setPendingDeleteGroup(null);
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${room.id}/slides`);
+    } finally {
+      setRemovingFiles(false);
+    }
+  };
+
+  // Remove all uploaded files from the session cleanly
+  const handleConfirmClearAllFiles = async () => {
+    if (!isSupervisor || removingFiles || slides.length === 0) return;
+    setRemovingFiles(true);
+    setUploadError(null);
+    try {
+      await removeSlidesAndReindex({
+        roomId: room.id,
+        allSlides: slides,
+        slidesToRemove: slides,
+        currentSlideIndex: syncedSlideIndex,
+      });
+      createdSlideIdsRef.current.clear();
+      setLocalPageIndex(1);
+      setConfirmClearAllFiles(false);
+      setPendingDeleteGroup(null);
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${room.id}/slides`);
+    } finally {
+      setRemovingFiles(false);
+    }
+  };
+
+  // Save session files & boards to personal archive (اختباراتي المحفوظة)
+  const handleSaveSessionToArchive = async () => {
+    if (savingSession || slides.length === 0) return;
+    setSavingSession(true);
+    setSaveFeedback(null);
+    try {
+      const { savedCount } = await saveSessionFilesToArchive({
+        uid: profile.uid,
+        room,
+        participants,
+        userRole: isSupervisor ? 'supervisor' : 'student',
+        slides,
+      });
+      setSaveFeedback({
+        type: 'success',
+        text: `تم حفظ ${savedCount} صفحة وجميع الحلول في «اختباراتي المحفوظة» بنجاح!`,
+      });
+      setSaveMenuOpen(false);
+      playDuoSound('correct');
+    } catch (err) {
+      console.error(err);
+      setSaveFeedback({
+        type: 'error',
+        text: 'تعذر حفظ ملفات الجلسة في الحساب، يمكنك المحاولة مرة أخرى.',
+      });
+    } finally {
+      setSavingSession(false);
+    }
+  };
+
+  // Download active slide annotated as PNG
+  const handleDownloadCurrentSlide = async () => {
+    if (!activeSlide || savingSession) return;
+    setSavingSession(true);
+    setSaveFeedback(null);
+    try {
+      const allLayersOnPage: Stroke[][] = [];
+      allLayersOnPage.push(myStrokes);
+      layers.forEach((l) => {
+        if (l.authorId !== profile.uid && (l.strokes?.length ?? 0) > 0) {
+          allLayersOnPage.push(l.strokes);
+        }
+      });
+      const dataUrl = await renderAnnotatedSlideToDataUrl(
+        activeSlide.imageData,
+        allLayersOnPage
+      );
+      const baseName = (activeSlide.fileName || room.id).replace(/\.[^.]+$/, '');
+      const pageNum = activeSlide.filePageIndex ?? activeSlide.pageIndex;
+      triggerDataUrlDownload(dataUrl, `${baseName}_p${pageNum}.png`);
+      setSaveMenuOpen(false);
+      setSaveFeedback({
+        type: 'success',
+        text: 'تم تنزيل الصفحة الحالية مع الرسومات على جهازك!',
+      });
+      playDuoSound('pop');
+    } catch {
+      setSaveFeedback({
+        type: 'error',
+        text: 'تعذر تجهيز صورة الصفحة للتنزيل.',
+      });
+    } finally {
+      setSavingSession(false);
+    }
+  };
+
+  // Download ALL slides with everyone's annotations sequentially
+  const handleDownloadAllSlides = async () => {
+    if (slides.length === 0 || savingSession) return;
+    setSavingSession(true);
+    setSaveFeedback(null);
+    try {
+      for (let i = 0; i < slides.length; i++) {
+        const s = slides[i];
+        const strokeLayers =
+          activeSlide && s.id === activeSlide.id
+            ? [
+                myStrokes,
+                ...layers
+                  .filter((l) => l.authorId !== profile.uid)
+                  .map((l) => l.strokes),
+              ]
+            : await fetchSlideStrokeLayers(room.id, s.id);
+        const dataUrl = await renderAnnotatedSlideToDataUrl(s.imageData, strokeLayers);
+        const baseName = (s.fileName || room.id).replace(/\.[^.]+$/, '');
+        const pageNum = s.filePageIndex ?? s.pageIndex;
+        triggerDataUrlDownload(dataUrl, `${i + 1}_${baseName}_p${pageNum}.png`);
+        if (i < slides.length - 1) {
+          await new Promise((res) => window.setTimeout(res, 180));
+        }
+      }
+      setSaveMenuOpen(false);
+      setSaveFeedback({
+        type: 'success',
+        text: `تم تنزيل جميع صفحات الجلسة (${slides.length} صورة) بالحلول والرسومات!`,
+      });
+      playDuoSound('correct');
+    } catch {
+      setSaveFeedback({
+        type: 'error',
+        text: 'تعذر تنزيل بعض صفحات الجلسة.',
+      });
+    } finally {
+      setSavingSession(false);
+    }
+  };
+
   const handleSetInteractiveEditor = async (editorId: string, editorName: string) => {
     if (!isSupervisor || updatingEditor) return;
     setUpdatingEditor(true);
     try {
+      const nextBlocked = blockedIds.filter((id) => id !== editorId);
       await updateDoc(doc(db, 'rooms', room.id), {
         interactiveEditor: editorId,
         interactiveEditorName: editorName,
+        explainBlockedIds: nextBlocked,
         updatedAt: serverTimestamp(),
       });
       playDuoSound('pop');
@@ -435,6 +644,148 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
       handleFirestoreError(err, OperationType.UPDATE, `rooms/${room.id}`);
     } finally {
       setUpdatingEditor(false);
+    }
+  };
+
+  // Supervisor: block or allow a specific student from writing in Interactive Mode
+  const handleToggleBlockStudent = async (studentId: string) => {
+    if (!isSupervisor || updatingEditor) return;
+    setUpdatingEditor(true);
+    const currentlyBlocked = blockedIds.includes(studentId);
+    const nextBlocked = currentlyBlocked
+      ? blockedIds.filter((id) => id !== studentId)
+      : Array.from(new Set([...blockedIds, studentId]));
+
+    try {
+      if (!currentlyBlocked && room.interactiveEditor === studentId) {
+        await updateDoc(doc(db, 'rooms', room.id), {
+          interactiveEditor: 'supervisor',
+          interactiveEditorName: profile.fullNameQuad,
+          explainBlockedIds: nextBlocked,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await updateDoc(doc(db, 'rooms', room.id), {
+          explainBlockedIds: nextBlocked,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `rooms/${room.id}`);
+    } finally {
+      setUpdatingEditor(false);
+    }
+  };
+
+  // Supervisor: direct Eraser sweep erases ANY student's strokes on contact
+  const handleSupervisorEraserSweep = async (eraserStroke: Stroke) => {
+    if (!isSupervisor || !activeSlide || !eraserStroke.isEraser) return;
+    const hitRadius = Math.max(eraserStroke.width * 2.4, 24) / 2 + 8;
+
+    try {
+      const batch = writeBatch(db);
+      let mutations = 0;
+
+      for (const layer of layers) {
+        if (layer.authorId === profile.uid || !layer.strokes?.length) continue;
+        const kept = layer.strokes.filter(
+          (s) => !doesStrokeIntersectEraser(eraserStroke.pts, s.pts, hitRadius)
+        );
+        if (kept.length !== layer.strokes.length) {
+          batch.update(
+            doc(
+              db,
+              'rooms',
+              room.id,
+              'slides',
+              activeSlide.id,
+              'layers',
+              layer.id
+            ),
+            {
+              strokes: kept,
+              updatedAt: serverTimestamp(),
+            }
+          );
+          mutations++;
+        }
+      }
+
+      if (mutations > 0) {
+        await batch.commit();
+      }
+    } catch (err) {
+      console.error('Supervisor eraser sweep error:', err);
+    }
+  };
+
+  // Supervisor: clear a specific contributor's strokes (student or supervisor) on active slide
+  const handleClearPersonStrokes = async (targetUid: string) => {
+    if (!isSupervisor || !activeSlide || clearingPage) return;
+    setClearingPage(true);
+    try {
+      if (targetUid === profile.uid) {
+        lastLocalEditAtRef.current = 0;
+        pendingSaveRef.current = null;
+        setMyStrokes([]);
+      }
+      const targetLayer = layers.find((l) => l.authorId === targetUid);
+      if (targetLayer) {
+        await deleteDoc(
+          doc(
+            db,
+            'rooms',
+            room.id,
+            'slides',
+            activeSlide.id,
+            'layers',
+            targetLayer.id
+          )
+        );
+        if (targetUid === profile.uid) {
+          createdSlideIdsRef.current.delete(activeSlide.id);
+        }
+      }
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.DELETE,
+        `rooms/${room.id}/slides/${activeSlide.id}/layers`
+      );
+    } finally {
+      setClearingPage(false);
+    }
+  };
+
+  // Supervisor: clear ONLY other participants' writing on this page (keep supervisor strokes)
+  const handleClearStudentsOnlyOnPage = async () => {
+    if (!isSupervisor || !activeSlide || clearingPage) return;
+    setClearingPage(true);
+    try {
+      const batch = writeBatch(db);
+      let count = 0;
+      for (const layer of layers) {
+        if (layer.authorId !== profile.uid && (layer.strokes?.length ?? 0) > 0) {
+          batch.delete(
+            doc(db, 'rooms', room.id, 'slides', activeSlide.id, 'layers', layer.id)
+          );
+          count++;
+        }
+      }
+      if (count > 0) {
+        await batch.commit();
+      }
+      playDuoSound('pop');
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.DELETE,
+        `rooms/${room.id}/slides/${activeSlide.id}/layers`
+      );
+    } finally {
+      setClearingPage(false);
     }
   };
 
@@ -456,6 +807,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
       }
       await batch.commit();
       lastLocalEditAtRef.current = 0;
+      pendingSaveRef.current = null;
       setMyStrokes([]);
       playDuoSound('pop');
     } catch (err) {
@@ -514,6 +866,9 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
     syncedSlideIndex > 0 &&
     localPageIndex !== syncedSlideIndex;
 
+  const canGoPrev = activeSlideIndexPos > 0;
+  const canGoNext = activeSlideIndexPos >= 0 && activeSlideIndexPos < slides.length - 1;
+
   return (
     <div
       className={
@@ -522,12 +877,13 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
           : 'max-w-[1440px] mx-auto px-2.5 sm:px-6 py-3 sm:py-5 flex flex-col gap-3 sm:gap-4'
       }
     >
-      {/* Hidden file input for PDF or Images */}
+      {/* Hidden multi-file input for PDFs or Images */}
       <input
         ref={fileInputRef}
         type="file"
         accept="application/pdf,image/*"
-        onChange={handleFileSelected}
+        multiple
+        onChange={handleFilesSelected}
         className="hidden"
       />
 
@@ -616,30 +972,80 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               <>
                 <button
                   type="button"
-                  disabled={uploading}
-                  onClick={() => {
-                    appendModeRef.current = false;
-                    fileInputRef.current?.click();
-                  }}
-                  className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                  disabled={uploading || removingFiles}
+                  onClick={() =>
+                    triggerFilePicker(slides.length > 0 ? 'append' : 'replaceAll')
+                  }
+                  className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
                 >
-                  <Upload className="w-4 h-4" />
-                  <span>{slides.length > 0 ? 'رفع PDF / صورة جديدة' : 'رفع PDF أو صورة'}</span>
+                  {slides.length > 0 ? (
+                    <FilePlus2 className="w-4 h-4" />
+                  ) : (
+                    <Upload className="w-4 h-4" />
+                  )}
+                  <span>{slides.length > 0 ? 'إضافة ملفات' : 'رفع ملفات (PDF / صور)'}</span>
                 </button>
 
                 {slides.length > 0 && (
                   <button
                     type="button"
-                    disabled={uploading}
-                    onClick={() => {
-                      appendModeRef.current = true;
-                      fileInputRef.current?.click();
-                    }}
+                    disabled={uploading || removingFiles}
+                    onClick={() => triggerFilePicker('replaceAll')}
                     className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] hover:border-[#1CB0F6] text-[#1899D6] text-xs font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
                   >
-                    <FilePlus2 className="w-4 h-4" />
-                    <span>إضافة صفحة</span>
+                    <Upload className="w-4 h-4" />
+                    <span>استبدال الكل</span>
                   </button>
+                )}
+
+                {slides.length > 0 && (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      disabled={savingSession}
+                      onClick={() => setSaveMenuOpen((prev) => !prev)}
+                      className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#FFC800] hover:bg-[#FFD324] border-2 border-b-4 border-[#E5A400] text-[#3C3C3C] text-xs font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                    >
+                      {savingSession ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <BookmarkPlus className="w-4 h-4" />
+                      )}
+                      <span>حفظ ملفات الجلسة</span>
+                    </button>
+
+                    {saveMenuOpen && (
+                      <div className="absolute left-0 top-full mt-2 w-64 z-30 duo-card p-2 bg-white border-2 border-[#E5E5E5] shadow-xl flex flex-col gap-1.5">
+                        <button
+                          type="button"
+                          disabled={savingSession}
+                          onClick={() => void handleSaveSessionToArchive()}
+                          className="duo-btn w-full flex items-center gap-2 px-3 py-2.5 rounded-xl bg-[#D7FFB8]/65 hover:bg-[#D7FFB8] border border-[#58CC02] text-[#46A302] text-xs font-black text-right cursor-pointer"
+                        >
+                          <BookmarkCheck className="w-4 h-4 shrink-0" />
+                          <span>حفظ الكل في «اختباراتي المحفوظة»</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingSession || !activeSlide}
+                          onClick={() => void handleDownloadCurrentSlide()}
+                          className="duo-btn w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F7F7F7] hover:bg-[#DDF4FF] border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black text-right cursor-pointer"
+                        >
+                          <ImageDown className="w-4 h-4 text-[#1CB0F6] shrink-0" />
+                          <span>تنزيل الصفحة الحالية (PNG)</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingSession || slides.length === 0}
+                          onClick={() => void handleDownloadAllSlides()}
+                          className="duo-btn w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F7F7F7] hover:bg-[#DDF4FF] border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black text-right cursor-pointer"
+                        >
+                          <Download className="w-4 h-4 text-[#1899D6] shrink-0" />
+                          <span>تنزيل جميع الصفحات ({slides.length} صورة)</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 {activeSlide && activeContributors.length > 0 && (
@@ -654,6 +1060,18 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
                   </button>
                 )}
               </>
+            )}
+
+            {!isSupervisor && !isCompetitionMode && activeSlide && (
+              <button
+                type="button"
+                disabled={savingSession}
+                onClick={() => void handleDownloadCurrentSlide()}
+                className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#DDF4FF] border-2 border-b-4 border-[#1CB0F6] text-[#1899D6] text-xs font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
+              >
+                <Download className="w-4 h-4" />
+                <span>حفظ الصفحة</span>
+              </button>
             )}
 
             {!isCompetitionMode && (
@@ -689,72 +1107,200 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
           </div>
         </div>
 
-        {/* Supervisor Collaborative Permission Selector */}
+        {/* Supervisor Collaborative Permission & Moderation Panel */}
         {isSupervisor && !isCompetitionMode && slides.length > 0 && (
-          <div className="pt-2.5 border-t-2 border-[#F0F0F0] flex flex-nowrap sm:flex-wrap items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-            <span className="text-xs font-black text-[#3C3C3C] ml-1 shrink-0">
-              من يكتب الآن:
-            </span>
+          <div className="pt-2.5 border-t-2 border-[#F0F0F0] flex flex-col gap-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-black text-[#3C3C3C] shrink-0">
+                  التحكم بالكتابة ومسح خطوط الآخرين:
+                </span>
 
-            <button
-              type="button"
-              disabled={updatingEditor}
-              onClick={() => handleSetInteractiveEditor('supervisor', profile.fullNameQuad)}
-              className={`duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border-2 border-b-3 text-xs font-black cursor-pointer shrink-0 ${
-                room.interactiveEditor === 'supervisor'
-                  ? 'bg-[#3C3C3C] border-[#1F2937] text-white'
-                  : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
-              }`}
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>المشرف فقط</span>
-            </button>
-
-            <button
-              type="button"
-              disabled={updatingEditor}
-              onClick={() => handleSetInteractiveEditor('all', 'الجميع')}
-              className={`duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border-2 border-b-3 text-xs font-black cursor-pointer shrink-0 ${
-                room.interactiveEditor === 'all'
-                  ? 'bg-[#58CC02] border-[#46A302] text-white'
-                  : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>الجميع يحل معاً</span>
-            </button>
-
-            {participants.map((p) => {
-              const selected = room.interactiveEditor === p.uid;
-              return (
                 <button
-                  key={p.uid}
                   type="button"
                   disabled={updatingEditor}
-                  onClick={() => handleSetInteractiveEditor(p.uid, p.fullNameQuad)}
+                  onClick={() => handleSetInteractiveEditor('supervisor', profile.fullNameQuad)}
                   className={`duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border-2 border-b-3 text-xs font-black cursor-pointer shrink-0 ${
-                    selected
-                      ? 'bg-[#FFC800] border-[#E5A400] text-[#3C3C3C]'
-                      : 'bg-white border-[#E5E5E5] text-[#777777] hover:text-[#3C3C3C]'
+                    room.interactiveEditor === 'supervisor'
+                      ? 'bg-[#3C3C3C] border-[#1F2937] text-white'
+                      : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
                   }`}
                 >
-                  <PenTool className="w-3.5 h-3.5" />
-                  <span className="max-w-[140px] truncate">{p.fullNameQuad}</span>
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>المشرف فقط</span>
                 </button>
-              );
-            })}
+
+                <button
+                  type="button"
+                  disabled={updatingEditor}
+                  onClick={() => handleSetInteractiveEditor('all', 'الجميع')}
+                  className={`duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border-2 border-b-3 text-xs font-black cursor-pointer shrink-0 ${
+                    room.interactiveEditor === 'all'
+                      ? 'bg-[#58CC02] border-[#46A302] text-white'
+                      : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C]'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>الجميع يكتب معاً</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {hasOtherWritersOnPage && (
+                  <button
+                    type="button"
+                    disabled={clearingPage}
+                    onClick={() => void handleClearStudentsOnlyOnPage()}
+                    className="duo-btn flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#FFDFE0]/70 border-2 border-[#FF4B4B] text-[11px] font-black text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer disabled:opacity-50"
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                    <span>مسح كتابات الطلاب فقط</span>
+                  </button>
+                )}
+
+                {myStrokes.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={clearingPage}
+                    onClick={() => void handleClearPersonStrokes(profile.uid)}
+                    className="duo-btn flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-[11px] font-black text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer disabled:opacity-50"
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                    <span>مسح خط المشرف</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {participants.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {participants.map((p) => {
+                  const selected = room.interactiveEditor === p.uid;
+                  const isBlocked = blockedIds.includes(p.uid);
+                  const strokeCount = writerStrokeCounts.get(p.uid) ?? 0;
+
+                  return (
+                    <div
+                      key={p.uid}
+                      className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl border-2 bg-white ${
+                        isBlocked
+                          ? 'border-[#FF4B4B]/60 bg-[#FFDFE0]/25'
+                          : selected
+                          ? 'border-[#FFC800] bg-[#FFF4CC]/35'
+                          : 'border-[#E5E5E5]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-xs font-black text-[#3C3C3C] truncate max-w-[140px]">
+                          {p.fullNameQuad}
+                        </span>
+                        {strokeCount > 0 && (
+                          <span className="font-latin px-1.5 py-0.5 rounded-md bg-[#DDF4FF] text-[#1899D6] text-[10px] font-black shrink-0">
+                            {strokeCount} خط
+                          </span>
+                        )}
+                        {isBlocked && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-[#FFDFE0] text-[#EA2B2B] text-[10px] font-black shrink-0">
+                            ممنوع
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={updatingEditor}
+                          onClick={() => void handleToggleBlockStudent(p.uid)}
+                          title={isBlocked ? 'إتاحة الكتابة له' : 'منعه من الكتابة'}
+                          className={`duo-btn flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-black cursor-pointer ${
+                            isBlocked
+                              ? 'bg-[#58CC02] border-[#46A302] text-white'
+                              : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B] hover:bg-[#FFC7C9]'
+                          }`}
+                        >
+                          {isBlocked ? (
+                            <>
+                              <Unlock className="w-3 h-3" />
+                              <span>السماح</span>
+                            </>
+                          ) : (
+                            <>
+                              <Ban className="w-3 h-3" />
+                              <span>منع</span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={updatingEditor}
+                          onClick={() =>
+                            void handleSetInteractiveEditor(p.uid, p.fullNameQuad)
+                          }
+                          className={`duo-btn flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-black cursor-pointer ${
+                            selected
+                              ? 'bg-[#FFC800] border-[#E5A400] text-[#3C3C3C]'
+                              : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C] hover:bg-[#FFF4CC]'
+                          }`}
+                        >
+                          <PenTool className="w-3 h-3" />
+                          <span>{selected ? 'يكتب الآن' : 'القلم له'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={clearingPage || strokeCount === 0}
+                          onClick={() => void handleClearPersonStrokes(p.uid)}
+                          title="مسح ما كتبه هذا الطالب"
+                          className="duo-btn flex items-center gap-1 px-2 py-1 rounded-lg border border-[#E5E5E5] bg-white text-[11px] font-black text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                        >
+                          <Eraser className="w-3 h-3" />
+                          <span>مسح</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Upload progress / error */}
-        {uploading && (
-          <div className="p-3 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-[#1899D6] text-xs font-black">
-            {uploadStatus || 'جاري تجهيز الملف...'}
+        {/* Upload / Removal progress / Save feedback banners */}
+        {(uploading || removingFiles) && (
+          <div className="p-3 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-[#1899D6] text-xs font-black flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>{uploadStatus || 'جاري تحديث ملفات الجلسة...'}</span>
           </div>
         )}
         {uploadError && (
-          <div className="p-3 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs font-black">
-            {uploadError}
+          <div className="p-3 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs font-black flex items-center justify-between gap-2">
+            <span>{uploadError}</span>
+            <button
+              type="button"
+              onClick={() => setUploadError(null)}
+              className="text-[#EA2B2B] hover:opacity-75 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+        {saveFeedback && (
+          <div
+            className={`p-3 rounded-xl border-2 text-xs font-black flex items-center justify-between gap-2 ${
+              saveFeedback.type === 'success'
+                ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+            }`}
+          >
+            <span>{saveFeedback.text}</span>
+            <button
+              type="button"
+              onClick={() => setSaveFeedback(null)}
+              className="cursor-pointer hover:opacity-75"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         )}
       </div>
@@ -777,24 +1323,21 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               </div>
               <div className="max-w-lg flex flex-col gap-2">
                 <h2 className="text-2xl font-black text-[#3C3C3C]">
-                  ارفع ملف PDF أو صورة ليملأ الشاشة للجميع
+                  ارفع ملفاً أو أكثر (PDF أو صور) ليملأ الشاشة للجميع
                 </h2>
                 <p className="text-sm font-bold text-[#777777]">
-                  بعد الرفع ستظهر الصفحات فوراً بالتزامن عند جميع الطلاب، أو يمكنك التبديل مباشرة إلى «وضع المنافسة» لعمل تحدٍ من اختباراتك واختبارات الطلاب!
+                  يمكنك تحديد أكثر من ملف في وقت واحد، والتنقل وتبديل الملفات أثناء الجلسة بحرية، أو الانتقال مباشرة إلى «وضع المنافسة»!
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-center gap-3">
                 <button
                   type="button"
                   disabled={uploading}
-                  onClick={() => {
-                    appendModeRef.current = false;
-                    fileInputRef.current?.click();
-                  }}
+                  onClick={() => triggerFilePicker('replaceAll')}
                   className="duo-btn flex items-center gap-2.5 px-8 py-4 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-[5px] border-[#46A302] text-white text-lg font-black cursor-pointer disabled:opacity-60"
                 >
                   <Upload className="w-5 h-5" />
-                  <span>{uploading ? 'جاري الرفع...' : 'اختيار ملف PDF أو صورة'}</span>
+                  <span>{uploading ? 'جاري الرفع...' : 'اختيار ملفات PDF أو صور'}</span>
                 </button>
                 <button
                   type="button"
@@ -817,7 +1360,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
                   بدأت الجلسة التفاعلية!
                 </h2>
                 <p className="text-sm font-bold text-[#777777]">
-                  يقوم المشرف الآن برفع ملف الـ PDF أو الصورة التفاعلية، وسيظهر أمامك ويملأ الشاشة فور رفعه.
+                  يقوم المشرف الآن برفع ملفات الجلسة، وستظهر أمامك وتملأ الشاشة فور رفعها.
                 </p>
               </div>
             </>
@@ -825,13 +1368,165 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         </div>
       ) : (
         <div className="duo-card p-3 sm:p-4 flex flex-col gap-3">
+          {/* Multi-File Switcher Strip */}
+          <div className="flex flex-col gap-2 pb-2.5 border-b-2 border-[#F0F0F0]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-black text-[#3C3C3C]">
+                <FolderOpen className="w-4 h-4 text-[#1CB0F6]" />
+                <span>ملفات الجلسة ({fileGroups.length})</span>
+                <span className="font-latin text-[11px] text-[#777777]">
+                  · إجمالي {slides.length} صفحة
+                </span>
+              </div>
+
+              {isSupervisor && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {activeFileGroup && (
+                    <button
+                      type="button"
+                      disabled={uploading || removingFiles}
+                      onClick={() => triggerFilePicker('replaceFile', activeFileGroup)}
+                      title="استبدال الملف المعروض حالياً بملف آخر"
+                      className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#DDF4FF] hover:bg-[#C6ECFF] border border-[#1CB0F6] text-[#1899D6] text-[11px] font-black cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>تغيير هذا الملف</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={uploading || removingFiles}
+                    onClick={() => triggerFilePicker('append')}
+                    className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#D7FFB8] hover:bg-[#C3F79E] border border-[#58CC02] text-[#46A302] text-[11px] font-black cursor-pointer disabled:opacity-50"
+                  >
+                    <FilePlus2 className="w-3.5 h-3.5" />
+                    <span>إضافة ملف</span>
+                  </button>
+
+                  {!confirmClearAllFiles ? (
+                    <button
+                      type="button"
+                      disabled={uploading || removingFiles}
+                      onClick={() => setConfirmClearAllFiles(true)}
+                      className="duo-btn flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-[#FFDFE0] border border-[#E5E5E5] text-[#EA2B2B] text-[11px] font-black cursor-pointer disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>إزالة كل الملفات</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1 bg-[#FFDFE0] border border-[#FF4B4B] rounded-lg px-2 py-0.5">
+                      <span className="text-[11px] font-black text-[#EA2B2B]">إزالة الكل؟</span>
+                      <button
+                        type="button"
+                        disabled={removingFiles}
+                        onClick={() => void handleConfirmClearAllFiles()}
+                        className="px-2 py-0.5 rounded bg-[#EA2B2B] text-white text-[10px] font-black cursor-pointer"
+                      >
+                        نعم
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClearAllFiles(false)}
+                        className="px-2 py-0.5 rounded bg-white text-[#3C3C3C] text-[10px] font-black cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* File Tabs */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1">
+              {fileGroups.map((group) => {
+                const isGroupActive = activeFileGroup?.fileId === group.fileId;
+                return (
+                  <div
+                    key={group.fileId}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border-2 border-b-3 shrink-0 transition-all ${
+                      isGroupActive
+                        ? 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                        : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#3C3C3C] hover:bg-white'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => void handleGoToPage(group.startPageIndex)}
+                      className="flex items-center gap-1.5 text-xs font-black cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5 shrink-0" />
+                      <span className="max-w-[160px] truncate">{group.fileName}</span>
+                      <span
+                        className={`font-latin px-1.5 py-0.5 rounded-md text-[10px] font-black ${
+                          isGroupActive
+                            ? 'bg-white/25 text-white'
+                            : 'bg-white text-[#777777] border border-[#E5E5E5]'
+                        }`}
+                      >
+                        {group.slides.length} ص
+                      </span>
+                    </button>
+
+                    {isSupervisor && (
+                      <button
+                        type="button"
+                        disabled={removingFiles || uploading}
+                        onClick={() => setPendingDeleteGroup(group)}
+                        title={`إزالة «${group.fileName}»`}
+                        className={`p-0.5 rounded-md cursor-pointer transition-colors ${
+                          isGroupActive
+                            ? 'hover:bg-white/25 text-white'
+                            : 'hover:bg-[#FFDFE0] text-[#EA2B2B]'
+                        }`}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Inline Single-File Removal Confirmation */}
+            {isSupervisor && pendingDeleteGroup && (
+              <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-[#FFDFE0]/70 border-2 border-[#FF4B4B]">
+                <span className="text-xs font-black text-[#EA2B2B]">
+                  هل تريد إزالة الملف «{pendingDeleteGroup.fileName}» ({pendingDeleteGroup.slides.length} صفحة) مع رسوماته؟
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={removingFiles}
+                    onClick={() => void handleConfirmRemoveFileGroup(pendingDeleteGroup)}
+                    className="duo-btn px-3 py-1 rounded-lg bg-[#EA2B2B] text-white text-xs font-black cursor-pointer disabled:opacity-50"
+                  >
+                    {removingFiles ? 'جاري الإزالة...' : 'نعم، إزالة الملف'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={removingFiles}
+                    onClick={() => setPendingDeleteGroup(null)}
+                    className="duo-btn px-3 py-1 rounded-lg bg-white border border-[#E5E5E5] text-[#3C3C3C] text-xs font-black cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Page Navigation Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b-2 border-[#F0F0F0]">
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={localPageIndex <= 1}
-                onClick={() => handleGoToPage(localPageIndex - 1)}
+                disabled={!canGoPrev}
+                onClick={() => {
+                  const prevSlide = slides[activeSlideIndexPos - 1];
+                  if (prevSlide) void handleGoToPage(prevSlide.pageIndex);
+                }}
                 className="duo-btn flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] hover:bg-[#F7F7F7] cursor-pointer disabled:opacity-40"
               >
                 <ChevronRight className="w-4 h-4" />
@@ -839,13 +1534,18 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               </button>
 
               <span className="font-latin px-3 py-1 rounded-xl bg-[#F7F7F7] border border-[#E5E5E5] text-xs font-black text-[#3C3C3C]">
-                صفحة {localPageIndex} / {slides.length}
+                {activeFileGroup && fileGroups.length > 1
+                  ? `${activeSlide?.filePageIndex ?? 1} / ${activeFileGroup.slides.length} (الكل ${activeSlideIndexPos + 1}/${slides.length})`
+                  : `صفحة ${activeSlideIndexPos + 1} / ${slides.length}`}
               </span>
 
               <button
                 type="button"
-                disabled={localPageIndex >= slides.length}
-                onClick={() => handleGoToPage(localPageIndex + 1)}
+                disabled={!canGoNext}
+                onClick={() => {
+                  const nextSlide = slides[activeSlideIndexPos + 1];
+                  if (nextSlide) void handleGoToPage(nextSlide.pageIndex);
+                }}
                 className="duo-btn flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border-2 border-b-3 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] hover:bg-[#F7F7F7] cursor-pointer disabled:opacity-40"
               >
                 <span>التالية</span>
@@ -853,17 +1553,17 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               </button>
             </div>
 
-            {/* Quick Page Numbers */}
-            {slides.length > 1 && (
+            {/* Quick Page Numbers for the Active File */}
+            {activeFileGroup && activeFileGroup.slides.length > 1 && (
               <div className="flex items-center gap-1.5 overflow-x-auto max-w-full py-1">
-                {slides.map((s) => {
-                  const isActive = s.pageIndex === localPageIndex;
+                {activeFileGroup.slides.map((s, idx) => {
+                  const isActive = s.id === activeSlide?.id;
                   const isSupervisorHere = room.currentSlideIndex === s.pageIndex;
                   return (
                     <button
                       key={s.id}
                       type="button"
-                      onClick={() => handleGoToPage(s.pageIndex)}
+                      onClick={() => void handleGoToPage(s.pageIndex)}
                       className={`font-latin min-w-[32px] h-8 px-2 rounded-lg text-xs font-black transition-all cursor-pointer shrink-0 ${
                         isActive
                           ? 'bg-[#1CB0F6] text-white border-2 border-[#1899D6]'
@@ -872,14 +1572,14 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
                           : 'bg-[#F7F7F7] text-[#777777] border border-[#E5E5E5] hover:bg-white'
                       }`}
                     >
-                      {s.pageIndex}
+                      {s.filePageIndex ?? idx + 1}
                     </button>
                   );
                 })}
               </div>
             )}
 
-            {/* Return to supervisor page notice OR active writers count */}
+            {/* Return to supervisor page notice OR active writers hint */}
             {outOfSyncFromSupervisor ? (
               <button
                 type="button"
@@ -891,7 +1591,12 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
               </button>
             ) : (
               <div className="flex items-center gap-2 text-xs font-bold text-[#777777]">
-                {canDraw ? (
+                {isAmIBlocked ? (
+                  <span className="text-[#EA2B2B] font-black flex items-center gap-1">
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>أوقف المشرف الكتابة عنك مؤقتاً — يمكنك المشاهدة والتكبير</span>
+                  </span>
+                ) : canDraw ? (
                   <span className="text-[#46A302] font-black">
                     يمكنك الكتابة والحل مباشرة فوق الصفحة
                   </span>
@@ -906,27 +1611,51 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
           <WhiteboardCanvas
             strokes={myStrokes}
             onStrokesChange={handleMyStrokesChange}
+            onEraserSweep={
+              isSupervisor
+                ? (eraserStroke) => void handleSupervisorEraserSweep(eraserStroke)
+                : undefined
+            }
             backgroundImage={activeSlide?.imageData}
             overlayStrokeLayers={otherLayers}
             viewOnly={!canDraw}
+            viewOnlyLabel={
+              isAmIBlocked
+                ? 'أوقف المشرف الكتابة عنك مؤقتاً — يمكنك المشاهدة والتكبير فقط'
+                : 'وضع المشاهدة — يمكنك التكبير أو تقليب الصفحات لمتابعة الحل'
+            }
             syncIntervalMs={240}
             heightClass={
               isFullscreen
-                ? 'h-[calc(100dvh-235px)] sm:h-[calc(100dvh-205px)] min-h-[240px]'
+                ? 'h-[calc(100dvh-265px)] sm:h-[calc(100dvh-235px)] min-h-[240px]'
                 : 'h-[48dvh] min-h-[240px] sm:h-[64dvh] md:h-[72dvh]'
             }
           />
 
-          {/* Active Contributors on this page */}
+          {/* Active Contributors on this page (with Supervisor quick-erase per person) */}
           {activeContributors.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 pt-1 text-xs font-bold text-[#777777]">
               <span>المشاركون بالكتابة في هذه الصفحة:</span>
               {activeContributors.map((layer) => (
                 <span
                   key={layer.id}
-                  className="px-2.5 py-0.5 rounded-lg bg-[#F7F7F7] border border-[#E5E5E5] text-[#3C3C3C] font-extrabold"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#F7F7F7] border border-[#E5E5E5] text-[#3C3C3C] font-extrabold"
                 >
-                  {layer.authorName}
+                  <span>{layer.authorName}</span>
+                  <span className="font-latin text-[10px] text-[#1899D6]">
+                    ({layer.strokes?.length ?? 0})
+                  </span>
+                  {isSupervisor && (
+                    <button
+                      type="button"
+                      disabled={clearingPage}
+                      onClick={() => void handleClearPersonStrokes(layer.authorId)}
+                      title={`مسح كتابة ${layer.authorName}`}
+                      className="text-[#EA2B2B] hover:bg-[#FFDFE0] rounded p-0.5 cursor-pointer disabled:opacity-40"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </span>
               ))}
             </div>

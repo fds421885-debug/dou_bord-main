@@ -561,6 +561,20 @@
           "type": "string",
           "maxLength": 480000
         },
+        "fileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "filePageIndex": {
+          "type": "integer"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"

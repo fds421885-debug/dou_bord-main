@@ -8,7 +8,6 @@ import {
   FileJson,
   FilePlus2,
   FolderOpen,
-  Loader2,
   History,
   Pencil,
   Play,
@@ -37,6 +36,7 @@ import { ExamReview } from './ExamReview';
 import { deleteAttempt, describeTiming, formatDuration, newAttemptId } from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
+import { DuoLoading } from './DuoLoading';
 
 type Mode =
   | { kind: 'list' }
@@ -482,9 +482,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       )}
 
       {loading ? (
-        <div className="flex items-center justify-center py-10 text-[#777777]">
-          <Loader2 className="w-6 h-6 animate-spin" />
-        </div>
+        <DuoLoading
+          variant="card"
+          title="جاري تحميل نماذج اختباراتك وسجلاتك..."
+          subtitle="يتم مزامنة الأسئلة والأشكال الهندسية والرسوم البيانية"
+          accent="purple"
+        />
       ) : quizzes.length === 0 ? (
         <div className={`${card} p-8 text-center text-sm font-bold text-[#777777]`}>
           لا توجد اختبارات بعد. ابدأ بإنشاء اختبار أو استيراده.

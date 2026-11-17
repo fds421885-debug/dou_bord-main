@@ -30,6 +30,7 @@ import {
 } from '../firebaseMigration';
 import type { Room, UserProfile } from '../types';
 import { playDuoSound } from './DuoIcons';
+import { DuoLoading } from './DuoLoading';
 
 interface DatabaseMigrationModalProps {
   open: boolean;
@@ -99,6 +100,7 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
     setMigrating(true);
     setProgress({
       step: 'parsing',
+      percent: 3,
       message: 'جاري التحقق من إعدادات قاعدة البيانات الجديدة...',
     });
 
@@ -251,18 +253,26 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
 
               <ul className="text-xs sm:text-sm font-bold text-[#3C3C3C] grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                 <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
-                  ✅ تم نقل بيانات حسابك واسمك الرباعي
+                  ✅ تم نقل الحساب الشخصي والهوية وإعدادات المنصة
                 </li>
                 <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
-                  📚 الاختبارات المحفوظة المنقولة:{' '}
+                  🏫 الغرف المنقولة:{' '}
                   <span className="font-latin font-black">
-                    {result.migratedSavedTestsCount}
+                    {result.migratedRoomsCount}
+                  </span>{' '}
+                  · الأسئلة:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedQuestionsCount}
                   </span>
                 </li>
                 <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
-                  🏁 محاولات الاختبار المنقولة:{' '}
+                  🖼️ الشرائح والملفات:{' '}
                   <span className="font-latin font-black">
-                    {result.migratedAttemptsCount}
+                    {result.migratedSlidesCount}
+                  </span>{' '}
+                  · طبقات السبورة:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedLayersCount}
                   </span>
                 </li>
                 <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
@@ -271,16 +281,45 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                     {result.migratedMyQuizzesCount}
                   </span>
                 </li>
+                <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
+                  📚 الاختبارات المحفوظة:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedSavedTestsCount}
+                  </span>
+                </li>
+                <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40">
+                  🏁 محاولات الاختبار:{' '}
+                  <span className="font-latin font-black">
+                    {result.migratedAttemptsCount}
+                  </span>
+                </li>
+                {(result.migratedSharedQuizzesCount > 0 ||
+                  result.migratedCompetitionsCount > 0 ||
+                  result.migratedBoardsCount > 0) && (
+                  <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40 sm:col-span-2">
+                    🏆 المسابقات المنقولة:{' '}
+                    <span className="font-latin font-black">
+                      {result.migratedCompetitionsCount}
+                    </span>{' '}
+                    · النماذج المشتركة:{' '}
+                    <span className="font-latin font-black">
+                      {result.migratedSharedQuizzesCount}
+                    </span>{' '}
+                    · صبورات الحل:{' '}
+                    <span className="font-latin font-black">
+                      {result.migratedBoardsCount}
+                    </span>
+                  </li>
+                )}
                 {result.migratedRoomId && (
                   <li className="px-3 py-2 rounded-xl bg-white/90 border border-[#58CC02]/40 sm:col-span-2">
                     {result.roomCreatedAsSupervisor ? (
                       <>
-                        🏫 تم نقل الغرفة{' '}
+                        🚀 الغرفة النشطة المعتمدة:{' '}
                         <span className="font-latin font-black text-[#1899D6]">
                           {result.migratedRoomId}
                         </span>{' '}
-                        ({result.migratedQuestionsCount} سؤال ·{' '}
-                        {result.migratedSlidesCount} شريحة)
+                        جاهزة الآن بالكامل على القاعدة الجديدة
                       </>
                     ) : result.roomRejoinedAsStudent ? (
                       <>
@@ -301,6 +340,12 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
                     )}
                   </li>
                 )}
+                <li className="px-3 py-2 rounded-xl bg-[#D7FFB8]/80 border border-[#58CC02] text-[#46A302] sm:col-span-2">
+                  🌐{' '}
+                  {result.platformPointerUpdated
+                    ? 'تم اعتماد القاعدة الجديدة رسمياً لجميع مستخدمي المنصة (سينتقل الطلاب والمشرفون تلقائياً عند التحديث، ويمكن للجميع النقل مجدداً لأي قاعدة مستقبلية).'
+                    : 'أصبحت هذه القاعدة معتمدة لديك بالكامل، وشارك الرابط أدناه مع بقية الطلاب والمشرفين لتحويلهم فوراً.'}
+                </li>
               </ul>
             </div>
 
@@ -440,12 +485,18 @@ export const DatabaseMigrationModal: React.FC<DatabaseMigrationModalProps> = ({
               )}
             </div>
 
-            {/* Live Migration Progress */}
+            {/* Live Migration Progress with Duolingo Percentage Bar */}
             {migrating && progress && (
-              <div className="p-3.5 rounded-2xl bg-[#F0F9FF] border-2 border-[#1CB0F6] flex items-center gap-3 text-sm font-black text-[#1899D6]">
-                <Loader2 className="w-5 h-5 animate-spin shrink-0" />
-                <span>{progress.message}</span>
-              </div>
+              <DuoLoading
+                variant="inline"
+                title={progress.message}
+                subtitle={
+                  progress.detail ||
+                  'جاري نقل كافة الغرف والملفات والاختبارات والرسومات...'
+                }
+                percent={progress.percent}
+                accent="blue"
+              />
             )}
 
             {/* Setup Assistance when Target Project needs Rules or Google Auth */}

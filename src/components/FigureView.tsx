@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import type { FigureColor, FigureElement, FigureLabelPos, FigurePoint, QuizFigure } from '../types';
 import { FIGURE_COLOR_MAP, formatFigureLabel } from '../quizFigure';
@@ -8,9 +8,52 @@ interface FigureViewProps {
   className?: string;
   compact?: boolean;
   allowZoom?: boolean;
+  interactive?: boolean;
+  editMode?: 'point' | 'shape';
+  snapStep?: number;
+  selectedElementIdx?: number | null;
+  selectedPointId?: string | null;
+  onSelectElement?: (idx: number) => void;
+  onSelectPoint?: (id: string) => void;
+  onMovePoint?: (pointId: string, x: number, y: number) => void;
+  onMoveElement?: (elIdx: number, dx: number, dy: number) => void;
 }
 
 type Pt2 = { x: number; y: number };
+
+interface ComputedLayout {
+  ptsMap: Map<string, FigurePoint>;
+  W: number;
+  H: number;
+  scale: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  offsetX: number;
+  offsetY: number;
+  sx: (x: number) => number;
+  sy: (y: number) => number;
+  centroidMath: Pt2;
+  extendedEndpoints: Map<number, { p1: Pt2; p2: Pt2 }>;
+  stepUnit: number;
+}
+
+type DragSession =
+  | {
+      kind: 'point';
+      pointId: string;
+      pointerId: number;
+      startMath: Pt2;
+      origPoint: Pt2;
+    }
+  | {
+      kind: 'element';
+      elIdx: number;
+      pointerId: number;
+      startMath: Pt2;
+      lastOffset: Pt2;
+    };
 
 const FONT_STACK = "'Cairo', 'Nunito', system-ui, sans-serif";
 
@@ -80,6 +123,13 @@ function chevronPoints(mid: Pt2, dirX: number, dirY: number, size = 6.5): string
   return `${(backX + px * wing).toFixed(1)},${(backY + py * wing).toFixed(1)} ${tipX.toFixed(1)},${tipY.toFixed(1)} ${(backX - px * wing).toFixed(1)},${(backY - py * wing).toFixed(1)}`;
 }
 
+function roundSnap(v: number, snapStep: number): number {
+  if (snapStep && snapStep > 0) {
+    return Math.round(Math.round(v / snapStep) * snapStep * 1000) / 1000;
+  }
+  return Math.round(v * 100) / 100;
+}
+
 const HaloText: React.FC<React.SVGProps<SVGTextElement>> = ({ children, style, ...rest }) => (
   <text
     fontFamily={FONT_STACK}
@@ -102,10 +152,34 @@ export const FigureView: React.FC<FigureViewProps> = ({
   className = '',
   compact = false,
   allowZoom = true,
+  interactive = false,
+  editMode = 'shape',
+  snapStep = 0.25,
+  selectedElementIdx = null,
+  selectedPointId = null,
+  onSelectElement,
+  onSelectPoint,
+  onMovePoint,
+  onMoveElement,
 }) => {
   const [zoomed, setZoomed] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
-  const layout = useMemo(() => {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<DragSession | null>(null);
+  const frozenBoundsRef = useRef<{
+    W: number;
+    H: number;
+    scale: number;
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+
+  const liveLayout = useMemo<ComputedLayout>(() => {
     const ptsMap = new Map<string, FigurePoint>();
     figure.points.forEach((p) => ptsMap.set(p.id, p));
 
@@ -140,7 +214,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
           const a1 = rad(el.endDeg);
           expand(c.x + el.r * Math.cos(a0), c.y + el.r * Math.sin(a0));
           expand(c.x + el.r * Math.cos(a1), c.y + el.r * Math.sin(a1));
-          // include axis extrema inside the arc sweep if covered
           [0, 90, 180, 270].forEach((deg) => {
             const s = normAngle(a0);
             const e = normAngle(a1);
@@ -187,7 +260,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
     spanX = Math.max(1e-3, maxX - minX);
     spanY = Math.max(1e-3, maxY - minY);
 
-    // Ensure square aspect ratio (1:1) inside SVG viewBox
     const W = 540;
     const padX = 52;
     const padY = 46;
@@ -216,7 +288,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
           }
         : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 
-    // Choose clean grid step in math units
     const roughStep = Math.max(spanX, spanY) / 8;
     const pow10 = Math.pow(10, Math.floor(Math.log10(roughStep)));
     const norm = roughStep / pow10;
@@ -231,6 +302,8 @@ export const FigureView: React.FC<FigureViewProps> = ({
       maxX,
       minY,
       maxY,
+      offsetX,
+      offsetY,
       sx,
       sy,
       centroidMath,
@@ -239,7 +312,143 @@ export const FigureView: React.FC<FigureViewProps> = ({
     };
   }, [figure]);
 
-  const { ptsMap, W, H, scale, minX, maxX, minY, maxY, sx, sy, centroidMath, extendedEndpoints, stepUnit } = layout;
+  // While actively dragging on canvas, freeze the projection so shapes move 1:1 under the cursor
+  const activeBounds = isDragging && frozenBoundsRef.current ? frozenBoundsRef.current : liveLayout;
+  const W = activeBounds.W;
+  const H = activeBounds.H;
+  const scale = activeBounds.scale;
+  const minX = activeBounds.minX;
+  const maxX = activeBounds.maxX;
+  const minY = activeBounds.minY;
+  const maxY = activeBounds.maxY;
+  const offsetX = activeBounds.offsetX;
+  const offsetY = activeBounds.offsetY;
+  const sx = (x: number) => offsetX + (x - minX) * scale;
+  const sy = (y: number) => offsetY + (maxY - y) * scale;
+
+  const { ptsMap, centroidMath, extendedEndpoints, stepUnit } = liveLayout;
+
+  const clientToMath = (clientX: number, clientY: number): Pt2 | null => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const bounds = frozenBoundsRef.current || activeBounds;
+    const meetScale = Math.min(rect.width / bounds.W, rect.height / bounds.H);
+    const viewLeft = rect.left + (rect.width - bounds.W * meetScale) / 2;
+    const viewTop = rect.top + (rect.height - bounds.H * meetScale) / 2;
+    const svgX = (clientX - viewLeft) / meetScale;
+    const svgY = (clientY - viewTop) / meetScale;
+    return {
+      x: bounds.minX + (svgX - bounds.offsetX) / bounds.scale,
+      y: bounds.maxY - (svgY - bounds.offsetY) / bounds.scale,
+    };
+  };
+
+  const freezeBounds = () => {
+    frozenBoundsRef.current = {
+      W: liveLayout.W,
+      H: liveLayout.H,
+      scale: liveLayout.scale,
+      minX: liveLayout.minX,
+      maxX: liveLayout.maxX,
+      minY: liveLayout.minY,
+      maxY: liveLayout.maxY,
+      offsetX: liveLayout.offsetX,
+      offsetY: liveLayout.offsetY,
+    };
+  };
+
+  const startPointDrag = (e: React.PointerEvent, p: FigurePoint) => {
+    if (!interactive) return;
+    e.stopPropagation();
+    e.preventDefault();
+    onSelectPoint?.(p.id);
+    if (!onMovePoint) return;
+    freezeBounds();
+    const m = clientToMath(e.clientX, e.clientY);
+    if (!m) return;
+    dragRef.current = {
+      kind: 'point',
+      pointId: p.id,
+      pointerId: e.pointerId,
+      startMath: m,
+      origPoint: { x: p.x, y: p.y },
+    };
+    setIsDragging(true);
+    try {
+      svgRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore if pointer capture unavailable
+    }
+  };
+
+  const startElementInteraction = (e: React.PointerEvent, idx: number, draggable = true) => {
+    if (!interactive) return;
+    e.stopPropagation();
+    onSelectElement?.(idx);
+    if (editMode !== 'shape' || !draggable || !onMoveElement) return;
+    e.preventDefault();
+    freezeBounds();
+    const m = clientToMath(e.clientX, e.clientY);
+    if (!m) return;
+    dragRef.current = {
+      kind: 'element',
+      elIdx: idx,
+      pointerId: e.pointerId,
+      startMath: m,
+      lastOffset: { x: 0, y: 0 },
+    };
+    setIsDragging(true);
+    try {
+      svgRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSvgPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const sess = dragRef.current;
+    if (!sess || !interactive) return;
+    const m = clientToMath(e.clientX, e.clientY);
+    if (!m) return;
+
+    if (sess.kind === 'point' && onMovePoint) {
+      const dx = m.x - sess.startMath.x;
+      const dy = m.y - sess.startMath.y;
+      const nx = roundSnap(sess.origPoint.x + dx, snapStep);
+      const ny = roundSnap(sess.origPoint.y + dy, snapStep);
+      onMovePoint(sess.pointId, nx, ny);
+      return;
+    }
+
+    if (sess.kind === 'element' && onMoveElement) {
+      const rawDx = m.x - sess.startMath.x;
+      const rawDy = m.y - sess.startMath.y;
+      const targetDx = roundSnap(rawDx, snapStep);
+      const targetDy = roundSnap(rawDy, snapStep);
+      const stepDx = Math.round((targetDx - sess.lastOffset.x) * 1000) / 1000;
+      const stepDy = Math.round((targetDy - sess.lastOffset.y) * 1000) / 1000;
+      if (stepDx !== 0 || stepDy !== 0) {
+        sess.lastOffset = { x: targetDx, y: targetDy };
+        onMoveElement(sess.elIdx, stepDx, stepDy);
+      }
+    }
+  };
+
+  const endDrag = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    frozenBoundsRef.current = null;
+    setIsDragging(false);
+    try {
+      if (svgRef.current?.hasPointerCapture(e.pointerId)) {
+        svgRef.current.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const renderTicksSvg = (
     p1Svg: Pt2,
@@ -276,7 +485,11 @@ export const FigureView: React.FC<FigureViewProps> = ({
     return items;
   };
 
-  const renderElement = (el: FigureElement, idx: number) => {
+  const renderElement = (el: FigureElement, idx: number, allowInteractive: boolean) => {
+    const isSelected = allowInteractive && selectedElementIdx === idx;
+    const shapeCursor =
+      allowInteractive && editMode === 'shape' ? 'grab' : allowInteractive ? 'pointer' : undefined;
+
     if (el.type === 'polygon') {
       const pts = el.points.map((id) => ptsMap.get(id)).filter((p): p is FigurePoint => !!p);
       if (pts.length < 3) return null;
@@ -287,18 +500,32 @@ export const FigureView: React.FC<FigureViewProps> = ({
       const fillMeta = hasFill ? colorOf(el.fill) : null;
       const fillOpacity = el.fill === 'white' ? 1 : el.fillOpacity ?? 0.16;
 
-      // Polygon centroid in math space to place sideLabels cleanly outside
       const polyCenter: Pt2 = {
         x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
         y: pts.reduce((s, p) => s + p.y, 0) / pts.length,
       };
 
       return (
-        <g key={`poly-${idx}`}>
+        <g
+          key={`poly-${idx}`}
+          style={{ cursor: shapeCursor }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, true) : undefined}
+        >
+          {isSelected && (
+            <polygon
+              points={pointsAttr}
+              fill="none"
+              stroke="#A560E8"
+              strokeWidth={6}
+              strokeOpacity={0.35}
+              strokeLinejoin="round"
+              pointerEvents="none"
+            />
+          )}
           <polygon
             points={pointsAttr}
-            fill={fillMeta ? fillMeta.fill : 'none'}
-            fillOpacity={hasFill ? fillOpacity : undefined}
+            fill={fillMeta ? fillMeta.fill : allowInteractive ? '#FFFFFF' : 'none'}
+            fillOpacity={hasFill ? fillOpacity : allowInteractive ? 0.001 : undefined}
             stroke={strokeMeta.stroke}
             strokeWidth={2.6}
             strokeLinejoin="round"
@@ -321,7 +548,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
               let nx = -dy / len;
               let ny = dx / len;
               const pcSvg = { x: sx(polyCenter.x), y: sy(polyCenter.y) };
-              // Flip normal to point away from polygon centroid
               if ((midX - pcSvg.x) * nx + (midY - pcSvg.y) * ny < 0) {
                 nx = -nx;
                 ny = -ny;
@@ -395,7 +621,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
         }
       }
 
-      // Compute perpendicular label offset away from centroid
       let labelX = midX;
       let labelY = midY - 12;
       if (labelText) {
@@ -411,7 +636,35 @@ export const FigureView: React.FC<FigureViewProps> = ({
       }
 
       return (
-        <g key={`seg-${idx}`}>
+        <g
+          key={`seg-${idx}`}
+          style={{ cursor: shapeCursor }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, true) : undefined}
+        >
+          {allowInteractive && (
+            <line
+              x1={p1Svg.x}
+              y1={p1Svg.y}
+              x2={p2Svg.x}
+              y2={p2Svg.y}
+              stroke="transparent"
+              strokeWidth={14}
+              strokeLinecap="round"
+            />
+          )}
+          {isSelected && (
+            <line
+              x1={p1Svg.x}
+              y1={p1Svg.y}
+              x2={p2Svg.x}
+              y2={p2Svg.y}
+              stroke="#A560E8"
+              strokeWidth={7}
+              strokeOpacity={0.35}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+          )}
           <line
             x1={p1Svg.x}
             y1={p1Svg.y}
@@ -476,13 +729,30 @@ export const FigureView: React.FC<FigureViewProps> = ({
           : null;
 
       return (
-        <g key={`circ-${idx}`}>
+        <g
+          key={`circ-${idx}`}
+          style={{ cursor: shapeCursor }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, true) : undefined}
+        >
+          {isSelected && (
+            <circle
+              cx={cx}
+              cy={cy}
+              r={rSvg + 4}
+              fill="none"
+              stroke="#A560E8"
+              strokeWidth={4}
+              strokeOpacity={0.4}
+              strokeDasharray="6 4"
+              pointerEvents="none"
+            />
+          )}
           <circle
             cx={cx}
             cy={cy}
             r={rSvg}
-            fill={fillMeta ? fillMeta.fill : 'none'}
-            fillOpacity={hasFill ? fillOpacity : undefined}
+            fill={fillMeta ? fillMeta.fill : allowInteractive ? '#FFFFFF' : 'none'}
+            fillOpacity={hasFill ? fillOpacity : allowInteractive ? 0.001 : undefined}
             stroke={strokeMeta.stroke}
             strokeWidth={2.6}
             strokeDasharray={el.dashed ? '6 5' : undefined}
@@ -569,7 +839,22 @@ export const FigureView: React.FC<FigureViewProps> = ({
       const ly = cy - labelDist * Math.sin(midA) + 4;
 
       return (
-        <g key={`arc-${idx}`}>
+        <g
+          key={`arc-${idx}`}
+          style={{ cursor: shapeCursor }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, true) : undefined}
+        >
+          {isSelected && (
+            <path
+              d={d}
+              fill="none"
+              stroke="#A560E8"
+              strokeWidth={6}
+              strokeOpacity={0.38}
+              strokeLinejoin="round"
+              pointerEvents="none"
+            />
+          )}
           <path
             d={d}
             fill={fillMeta ? fillMeta.fill : 'none'}
@@ -634,17 +919,21 @@ export const FigureView: React.FC<FigureViewProps> = ({
         const labelR = sq * 1.45 + 10;
 
         return (
-          <g key={`ang-${idx}`}>
+          <g
+            key={`ang-${idx}`}
+            style={{ cursor: allowInteractive ? 'pointer' : undefined }}
+            onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, false) : undefined}
+          >
             <polygon
               points={`${vx},${vy} ${p1.x},${p1.y} ${p2.x},${p2.y} ${p3.x},${p3.y}`}
               fill={cMeta.fill}
-              fillOpacity={0.35}
+              fillOpacity={isSelected ? 0.55 : 0.35}
             />
             <polyline
               points={`${p1.x},${p1.y} ${p2.x},${p2.y} ${p3.x},${p3.y}`}
               fill="none"
-              stroke={cMeta.stroke}
-              strokeWidth={2.2}
+              stroke={isSelected ? '#A560E8' : cMeta.stroke}
+              strokeWidth={isSelected ? 3 : 2.2}
               strokeLinejoin="round"
             />
             {el.label && (
@@ -684,8 +973,8 @@ export const FigureView: React.FC<FigureViewProps> = ({
             key={`ang-${idx}-a-${k}`}
             d={`M ${ap0.x.toFixed(1)} ${ap0.y.toFixed(1)} A ${rk.toFixed(1)} ${rk.toFixed(1)} 0 ${large} 0 ${ap1.x.toFixed(1)} ${ap1.y.toFixed(1)}`}
             fill="none"
-            stroke={cMeta.stroke}
-            strokeWidth={2.2}
+            stroke={isSelected ? '#A560E8' : cMeta.stroke}
+            strokeWidth={isSelected ? 3 : 2.2}
             strokeLinecap="round"
           />
         );
@@ -693,15 +982,18 @@ export const FigureView: React.FC<FigureViewProps> = ({
 
       const midAng = start + span / 2;
       const outerR = baseRSvg + (arcCount - 1) * 4.5;
-      // Push acute angle labels further out so text does not collide with arms
       const acuteBoost = span < 0.7 ? 20 : span < 1.1 ? 15 : 13;
       const labelDist = outerR + acuteBoost;
       const lx = vx + labelDist * Math.cos(midAng);
       const ly = vy - labelDist * Math.sin(midAng) + 4.5;
 
       return (
-        <g key={`ang-${idx}`}>
-          <path d={sectorD} fill={cMeta.fill} fillOpacity={0.22} />
+        <g
+          key={`ang-${idx}`}
+          style={{ cursor: allowInteractive ? 'pointer' : undefined }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, false) : undefined}
+        >
+          <path d={sectorD} fill={cMeta.fill} fillOpacity={isSelected ? 0.36 : 0.22} />
           {arcPaths}
           {el.label && (
             <HaloText x={lx} y={ly} textAnchor="middle" fill={cMeta.text} fontSize={13}>
@@ -714,17 +1006,31 @@ export const FigureView: React.FC<FigureViewProps> = ({
 
     if (el.type === 'label') {
       const cMeta = colorOf(el.color ?? 'ink');
+      const lx = sx(el.x);
+      const ly = sy(el.y) + 4;
       return (
-        <HaloText
+        <g
           key={`lbl-${idx}`}
-          x={sx(el.x)}
-          y={sy(el.y) + 4}
-          textAnchor="middle"
-          fill={cMeta.text}
-          fontSize={13}
+          style={{ cursor: shapeCursor }}
+          onPointerDown={allowInteractive ? (e) => startElementInteraction(e, idx, true) : undefined}
         >
-          {formatFigureLabel(el.text)}
-        </HaloText>
+          {isSelected && (
+            <circle
+              cx={lx}
+              cy={ly - 4}
+              r={16}
+              fill="#A560E8"
+              fillOpacity={0.14}
+              stroke="#A560E8"
+              strokeWidth={1.5}
+              strokeDasharray="3 3"
+              pointerEvents="none"
+            />
+          )}
+          <HaloText x={lx} y={ly} textAnchor="middle" fill={cMeta.text} fontSize={13}>
+            {formatFigureLabel(el.text)}
+          </HaloText>
+        </g>
       );
     }
 
@@ -771,16 +1077,19 @@ export const FigureView: React.FC<FigureViewProps> = ({
     return <g>{lines}</g>;
   };
 
-  const renderPointMarkersAndLabels = () =>
+  const renderPointMarkersAndLabels = (allowInteractive: boolean) =>
     figure.points.map((p) => {
       const px = sx(p.x);
       const py = sy(p.y);
       const away = unitVec(centroidMath, p);
       const off = labelOffsetFromPos(p.labelPos, away, 15);
       const labelText = p.label ? formatFigureLabel(p.label) : '';
+      const isPtSelected = allowInteractive && selectedPointId === p.id;
+      const pointModeActive = allowInteractive && editMode === 'point';
+
       return (
         <g key={`pt-${p.id}`}>
-          {p.dot && (
+          {p.dot && !allowInteractive && (
             <circle cx={px} cy={py} r={4} fill="#3C3C3C" stroke="#FFFFFF" strokeWidth={1.6} />
           )}
           {labelText && (
@@ -788,34 +1097,68 @@ export const FigureView: React.FC<FigureViewProps> = ({
               x={px + off.x}
               y={py + off.y}
               textAnchor="middle"
-              fill="#3C3C3C"
+              fill={isPtSelected ? '#7C3AED' : '#3C3C3C'}
               fontSize={13.5}
+              style={{ pointerEvents: 'none' }}
             >
               {labelText}
             </HaloText>
+          )}
+          {allowInteractive && (
+            <g
+              style={{ cursor: 'move' }}
+              onPointerDown={(e) => startPointDrag(e, p)}
+            >
+              {/* Generous invisible hit circle for touchscreens and mouse */}
+              <circle cx={px} cy={py} r={13} fill="transparent" />
+              {isPtSelected && (
+                <circle
+                  cx={px}
+                  cy={py}
+                  r={10}
+                  fill="#A560E8"
+                  fillOpacity={0.22}
+                  pointerEvents="none"
+                />
+              )}
+              <circle
+                cx={px}
+                cy={py}
+                r={isPtSelected ? 6.5 : pointModeActive ? 5.5 : p.dot ? 4.5 : 4}
+                fill={isPtSelected ? '#A560E8' : pointModeActive ? '#1CB0F6' : p.dot ? '#3C3C3C' : '#A560E8'}
+                fillOpacity={isPtSelected || pointModeActive || p.dot ? 1 : 0.72}
+                stroke="#FFFFFF"
+                strokeWidth={1.8}
+              />
+            </g>
           )}
         </g>
       );
     });
 
-  // Render polygons/circles/arcs first, then segments, then angles, then points/labels so overlays never get buried
+  // Render shapes (polygons, circles, arcs) strictly in user's layer order so shapes inside shapes stack cleanly,
+  // followed by segments, angles, then labels and interactive handles on top.
   const sortedElements = useMemo(() => {
-    const order = { polygon: 0, circle: 1, arc: 2, segment: 3, angle: 4, label: 5 };
+    const order = { polygon: 0, circle: 0, arc: 0, segment: 1, angle: 2, label: 3 };
     return figure.elements
       .map((el, idx) => ({ el, idx }))
-      .sort((a, b) => order[a.el.type] - order[b.el.type]);
+      .sort((a, b) => order[a.el.type] - order[b.el.type] || a.idx - b.idx);
   }, [figure.elements]);
 
-  const svgElement = (
+  const renderSvg = (allowInteractive: boolean) => (
     <svg
+      ref={allowInteractive ? svgRef : undefined}
       viewBox={`0 0 ${W} ${H}`}
-      className="w-full h-auto block"
+      className={`w-full h-auto block ${allowInteractive ? 'touch-none select-none' : ''}`}
       role="img"
       aria-label={figure.title || 'شكل هندسي'}
+      onPointerMove={allowInteractive ? handleSvgPointerMove : undefined}
+      onPointerUp={allowInteractive ? endDrag : undefined}
+      onPointerCancel={allowInteractive ? endDrag : undefined}
     >
       {renderGridLines()}
-      {sortedElements.map(({ el, idx }) => renderElement(el, idx))}
-      {renderPointMarkersAndLabels()}
+      {sortedElements.map(({ el, idx }) => renderElement(el, idx, allowInteractive))}
+      {renderPointMarkersAndLabels(allowInteractive)}
     </svg>
   );
 
@@ -848,7 +1191,7 @@ export const FigureView: React.FC<FigureViewProps> = ({
           </div>
         )}
         <div dir="ltr" className="rounded-xl bg-[#FAFAFA] border border-[#F0F0F0] overflow-hidden">
-          {svgElement}
+          {renderSvg(interactive && !zoomed)}
         </div>
         {figure.caption && (
           <p className="mt-2 text-xs font-extrabold text-[#777777] text-center">
@@ -880,7 +1223,7 @@ export const FigureView: React.FC<FigureViewProps> = ({
               </button>
             </div>
             <div dir="ltr" className="rounded-2xl border-2 border-[#E5E5E5] bg-[#FAFAFA] p-2">
-              {svgElement}
+              {renderSvg(false)}
             </div>
             {figure.caption && (
               <p className="text-sm font-extrabold text-[#777777] text-center">
@@ -893,3 +1236,4 @@ export const FigureView: React.FC<FigureViewProps> = ({
     </>
   );
 };
+

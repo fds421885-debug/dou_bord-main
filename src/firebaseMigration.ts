@@ -14,16 +14,21 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import { sanitizeChart } from './quizChart';
+import { sanitizeFigure } from './quizFigure';
 import {
   activateCustomFirebaseConfig,
+  activeFirebaseConfig,
   auth as sourceAuth,
   createFirestoreInstance,
   db as sourceDb,
   decodeCompactFirebaseConfig,
   encodeCompactFirebaseConfig,
+  firebaseTargetKey,
+  getPreviousFirebaseConfigs,
+  getSyncedSourceKeys,
   getTargetFirebaseAppName,
   isSameFirebaseTarget,
-  activeFirebaseConfig,
+  markSourceKeySynced,
   sanitizeFirebaseConfig,
   type FirebaseAppConfig,
 } from './firebase';
@@ -32,23 +37,26 @@ import {
   loadSessionSnapshot,
   saveQuizDraft,
   saveSessionSnapshot,
-  type StoredRoomSnapshot,
-  type StoredSavedTestsSnapshot,
   type StoredMyQuizzesSnapshot,
   type StoredQuizAttemptsSnapshot,
+  type StoredRoomSnapshot,
+  type StoredSavedTestsSnapshot,
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
 import type {
+  Competition,
+  CompetitionQuestion,
   ExplainLayer,
   InteractiveSlide,
+  MyQuiz,
   Participant,
   Question,
+  QuizAttempt,
   Room,
   SavedQuestion,
   SavedTest,
-  MyQuiz,
-  QuizAttempt,
   SharedExplainBoard,
+  SharedQuiz,
   SlideLayer,
   StudentBoard,
   UserProfile,
@@ -60,12 +68,15 @@ export interface MigrationProgress {
     | 'signing_in'
     | 'collecting'
     | 'migrating_profile'
-    | 'migrating_room'
+    | 'migrating_rooms'
     | 'migrating_saved'
     | 'migrating_quizzes'
     | 'migrating_attempts'
+    | 'finalizing'
     | 'done';
   message: string;
+  percent: number;
+  detail?: string;
 }
 
 export interface MigrationResult {
@@ -73,14 +84,37 @@ export interface MigrationResult {
   targetUid: string;
   shareUrl: string;
   migratedRoomId: string | null;
+  migratedRoomsCount: number;
   roomCreatedAsSupervisor: boolean;
   roomRejoinedAsStudent: boolean;
   roomPendingForStudent: boolean;
   migratedQuestionsCount: number;
   migratedSlidesCount: number;
+  migratedLayersCount: number;
+  migratedBoardsCount: number;
+  migratedSharedQuizzesCount: number;
+  migratedCompetitionsCount: number;
   migratedSavedTestsCount: number;
   migratedMyQuizzesCount: number;
   migratedAttemptsCount: number;
+  platformPointerUpdated: boolean;
+}
+
+export interface PlatformMigrationPointer {
+  id: string;
+  projectId: string;
+  apiKey: string;
+  authDomain: string;
+  appId: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  measurementId?: string;
+  firestoreDatabaseId?: string;
+  migratedBy: string;
+  migratedByName: string;
+  migratedRoomId?: string;
+  previousConfigs?: FirebaseAppConfig[];
+  updatedAt?: unknown;
 }
 
 export class MigrationNeedsSetupError extends Error {
@@ -122,7 +156,6 @@ export function parseFirebaseConfigSnippet(
 
   let parsed: FirebaseAppConfig | null = null;
 
-  // 1. Check if the user pasted a shareable ?fb=... URL directly
   if (/^https?:\/\//i.test(trimmed) || trimmed.includes('fb=')) {
     try {
       const normalizedUrl = /^https?:\/\//i.test(trimmed)
@@ -138,7 +171,6 @@ export function parseFirebaseConfigSnippet(
     }
   }
 
-  // 2. Try direct JSON parse
   if (!parsed && trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
       const obj = JSON.parse(trimmed) as unknown;
@@ -148,7 +180,6 @@ export function parseFirebaseConfigSnippet(
     }
   }
 
-  // 3. Extract keys safely from Firebase Console JS snippet (no eval)
   if (!parsed) {
     const extracted: Record<string, string> = {};
     for (const key of KNOWN_CONFIG_KEYS) {
@@ -174,8 +205,7 @@ export function parseFirebaseConfigSnippet(
   if (dbOverride !== undefined) {
     parsed = {
       ...parsed,
-      firestoreDatabaseId:
-        dbOverride === '(default)' ? '' : dbOverride,
+      firestoreDatabaseId: dbOverride === '(default)' ? '' : dbOverride,
     };
   }
 
@@ -197,8 +227,15 @@ export function buildShareMigrationUrl(
   return url.toString();
 }
 
-function getOrInitTargetApp(config: FirebaseAppConfig): FirebaseApp {
-  const appName = getTargetFirebaseAppName(config.projectId);
+export function getOrInitFirebaseApp(config: FirebaseAppConfig): FirebaseApp {
+  if (isSameFirebaseTarget(config, activeFirebaseConfig)) {
+    const primary = getApps().find((a) =>
+      a.name === '[DEFAULT]' ||
+      a.name === getTargetFirebaseAppName(activeFirebaseConfig.projectId, activeFirebaseConfig.firestoreDatabaseId)
+    );
+    if (primary) return primary;
+  }
+  const appName = getTargetFirebaseAppName(config.projectId, config.firestoreDatabaseId);
   const existing = getApps().find((a) => a.name === appName);
   if (existing) {
     return existing;
@@ -206,7 +243,7 @@ function getOrInitTargetApp(config: FirebaseAppConfig): FirebaseApp {
   return initializeApp(config, appName);
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms = 3500): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       reject(new Error('timeout'));
@@ -267,45 +304,333 @@ function classifyMigrationError(err: unknown, projectId: string): Error {
   return err instanceof Error ? err : new Error(raw);
 }
 
-interface CollectedSourceData {
-  oldUid: string | null;
-  profile: UserProfile | null;
-  room: Room | null;
+interface CollectedRoomData {
+  room: Room;
   myRole: 'supervisor' | 'student';
   participants: Participant[];
   questions: Question[];
+  boardsByQuestionId: Record<string, StudentBoard[]>;
   slides: InteractiveSlide[];
-  explainLayers: ExplainLayer[];
   slideLayers: SlideLayer[];
+  explainLayers: ExplainLayer[];
   sharedBoard: SharedExplainBoard | null;
-  boards: StudentBoard[];
+  sharedQuizzes: SharedQuiz[];
+  competitions: Competition[];
+  competitionQuestionsByCompId: Record<string, CompetitionQuestion[]>;
+  competitionBoardsByKey: Record<string, StudentBoard[]>;
+}
+
+interface CollectedSourceData {
+  oldUid: string | null;
+  profile: UserProfile | null;
+  primaryRoomId: string | null;
+  rooms: CollectedRoomData[];
   savedTests: SavedTest[];
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
   myQuizzes: MyQuiz[];
   quizAttempts: QuizAttempt[];
 }
 
+function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<string, unknown> {
+  const chart = q.chart ? sanitizeChart(q.chart) : null;
+  const figure = q.figure ? sanitizeFigure(q.figure) : null;
+  const expChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
+  const expFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
+  return {
+    ...(chart ? { chart } : {}),
+    ...(figure ? { figure } : {}),
+    ...(expChart ? { explanationChart: expChart } : {}),
+    ...(expFigure ? { explanationFigure: expFigure } : {}),
+    id: String(q.id || '').slice(0, 64) || `q_${Math.random().toString(36).slice(2, 10)}`,
+    text: String(q.text || '').slice(0, 2000),
+    choices: Array.isArray(q.choices)
+      ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
+      : [],
+    correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
+    answer: String(q.answer || '').slice(0, 1000),
+    explanation: String(q.explanation || '').slice(0, 2000),
+  };
+}
+
+function cleanSavedQuestionForFirestore(
+  sq: SavedQuestion,
+  ownerUid: string
+): Record<string, unknown> {
+  const chart = sq.chart ? sanitizeChart(sq.chart) : null;
+  const figure = sq.figure ? sanitizeFigure(sq.figure) : null;
+  const expChart = sq.explanationChart ? sanitizeChart(sq.explanationChart) : null;
+  const expFigure = sq.explanationFigure ? sanitizeFigure(sq.explanationFigure) : null;
+
+  return {
+    id: sq.id,
+    ownerId: ownerUid,
+    orderIndex: Math.min(200, Math.max(1, sq.orderIndex)),
+    text: (sq.text || '').slice(0, 2000),
+    imageData: sq.imageData && sq.imageData.length <= 480000 ? sq.imageData : '',
+    ...(Array.isArray(sq.choices) && sq.choices.length > 0
+      ? { choices: sq.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) }
+      : {}),
+    ...(typeof sq.correctIndex === 'number' && Number.isInteger(sq.correctIndex)
+      ? { correctIndex: Math.max(-1, Math.min(7, sq.correctIndex)) }
+      : {}),
+    ...(sq.explanation ? { explanation: String(sq.explanation).slice(0, 2000) } : {}),
+    ...(chart ? { chart } : {}),
+    ...(figure ? { figure } : {}),
+    ...(expChart ? { explanationChart: expChart } : {}),
+    ...(expFigure ? { explanationFigure: expFigure } : {}),
+    ...(typeof sq.winnerTimeMs === 'number' && Number.isFinite(sq.winnerTimeMs)
+      ? { winnerTimeMs: Math.max(0, Math.min(172800000, Math.round(sq.winnerTimeMs))) }
+      : {}),
+    status: sq.status || 'solving',
+    winnerName: (sq.winnerName || '').slice(0, 120),
+    boards: (sq.boards || []).slice(0, 100),
+    createdAt: serverTimestamp(),
+  };
+}
+
+async function collectRoomDetails(
+  fromDb: Firestore,
+  baseRoom: Room,
+  oldUid: string | null,
+  cachedRoom: StoredRoomSnapshot | null,
+  isSupervisorHint: boolean
+): Promise<CollectedRoomData> {
+  const useCached = cachedRoom && cachedRoom.room?.id === baseRoom.id ? cachedRoom : null;
+  let room: Room = baseRoom;
+
+  try {
+    const rSnap = await withTimeout(getDoc(doc(fromDb, 'rooms', baseRoom.id)));
+    if (rSnap.exists()) {
+      room = rSnap.data() as Room;
+    }
+  } catch {
+    // Fallback to baseRoom
+  }
+
+  const myRole: 'supervisor' | 'student' =
+    isSupervisorHint || (oldUid && room.supervisorId === oldUid)
+      ? 'supervisor'
+      : useCached?.myRole ?? 'student';
+
+  let participants: Participant[] = useCached?.participants ?? [];
+  try {
+    const pSnap = await withTimeout(
+      getDocs(query(collection(fromDb, 'rooms', room.id, 'participants'), where('roomId', '==', room.id)))
+    );
+    const list: Participant[] = [];
+    pSnap.forEach((d) => list.push(d.data() as Participant));
+    if (list.length > 0) participants = list;
+  } catch {
+    // Keep cached
+  }
+
+  let questions: Question[] = useCached?.questions ?? [];
+  try {
+    const qSnap = await withTimeout(
+      getDocs(query(collection(fromDb, 'rooms', room.id, 'questions'), where('roomId', '==', room.id)))
+    );
+    const list: Question[] = [];
+    qSnap.forEach((d) => list.push(d.data() as Question));
+    list.sort((a, b) => a.orderIndex - b.orderIndex);
+    if (list.length > 0) questions = list;
+  } catch {
+    // Keep cached
+  }
+
+  // Collect student boards for ALL questions (not just currentQuestionId!)
+  const boardsByQuestionId: Record<string, StudentBoard[]> = {};
+  if (useCached?.boards?.length && room.currentQuestionId) {
+    boardsByQuestionId[room.currentQuestionId] = useCached.boards;
+  }
+  for (const q of questions) {
+    try {
+      const bSnap = await withTimeout(
+        getDocs(
+          query(
+            collection(fromDb, 'rooms', room.id, 'questions', q.id, 'boards'),
+            where('roomId', '==', room.id),
+            where('questionId', '==', q.id)
+          )
+        )
+      );
+      const list: StudentBoard[] = [];
+      bSnap.forEach((d) => list.push(d.data() as StudentBoard));
+      if (list.length > 0) {
+        boardsByQuestionId[q.id] = list;
+      }
+    } catch {
+      // Keep cached fallback if available
+    }
+  }
+
+  let slides: InteractiveSlide[] = useCached?.slides ?? [];
+  try {
+    const sSnap = await withTimeout(
+      getDocs(query(collection(fromDb, 'rooms', room.id, 'slides'), where('roomId', '==', room.id)))
+    );
+    const list: InteractiveSlide[] = [];
+    sSnap.forEach((d) => list.push(d.data() as InteractiveSlide));
+    list.sort((a, b) => a.pageIndex - b.pageIndex);
+    if (list.length > 0) slides = list;
+  } catch {
+    // Keep cached
+  }
+
+  // Collect layers across ALL slides!
+  const slideLayersMap = new Map<string, SlideLayer>();
+  (useCached?.slideLayers ?? []).forEach((l) => {
+    slideLayersMap.set(`${l.slideId}::${l.id}`, l);
+  });
+  for (const slide of slides) {
+    try {
+      const slSnap = await withTimeout(
+        getDocs(
+          query(
+            collection(fromDb, 'rooms', room.id, 'slides', slide.id, 'layers'),
+            where('roomId', '==', room.id),
+            where('slideId', '==', slide.id)
+          )
+        )
+      );
+      slSnap.forEach((d) => {
+        const l = d.data() as SlideLayer;
+        slideLayersMap.set(`${l.slideId}::${l.id}`, l);
+      });
+    } catch {
+      // Ignore individual slide layer fetch failures
+    }
+  }
+  const slideLayers = Array.from(slideLayersMap.values());
+
+  let explainLayers: ExplainLayer[] = useCached?.explainLayers ?? [];
+  try {
+    const elSnap = await withTimeout(
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'explainLayers'), where('roomId', '==', room.id))
+      )
+    );
+    const list: ExplainLayer[] = [];
+    elSnap.forEach((d) => list.push(d.data() as ExplainLayer));
+    if (list.length > 0) explainLayers = list;
+  } catch {
+    // Keep cached
+  }
+
+  let sharedBoard: SharedExplainBoard | null = useCached?.sharedBoard ?? null;
+  try {
+    const sbSnap = await withTimeout(getDoc(doc(fromDb, 'rooms', room.id, 'sharedBoard', 'live')));
+    if (sbSnap.exists()) {
+      sharedBoard = sbSnap.data() as SharedExplainBoard;
+    }
+  } catch {
+    // Keep cached
+  }
+
+  let sharedQuizzes: SharedQuiz[] = [];
+  try {
+    const sqSnap = await withTimeout(
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'sharedQuizzes'), where('roomId', '==', room.id))
+      )
+    );
+    sqSnap.forEach((d) => sharedQuizzes.push(d.data() as SharedQuiz));
+  } catch {
+    // Ignore if unavailable
+  }
+
+  let competitions: Competition[] = [];
+  const competitionQuestionsByCompId: Record<string, CompetitionQuestion[]> = {};
+  const competitionBoardsByKey: Record<string, StudentBoard[]> = {};
+  try {
+    const cSnap = await withTimeout(
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'competitions'), where('roomId', '==', room.id))
+      )
+    );
+    cSnap.forEach((d) => competitions.push(d.data() as Competition));
+    for (const comp of competitions) {
+      try {
+        const cqSnap = await withTimeout(
+          getDocs(
+            query(
+              collection(fromDb, 'rooms', room.id, 'competitions', comp.id, 'questions'),
+              where('roomId', '==', room.id),
+              where('competitionId', '==', comp.id)
+            )
+          )
+        );
+        const cqList: CompetitionQuestion[] = [];
+        cqSnap.forEach((d) => cqList.push(d.data() as CompetitionQuestion));
+        cqList.sort((a, b) => a.orderIndex - b.orderIndex);
+        competitionQuestionsByCompId[comp.id] = cqList;
+
+        for (const cq of cqList) {
+          try {
+            const cbSnap = await withTimeout(
+              getDocs(
+                query(
+                  collection(
+                    fromDb,
+                    'rooms',
+                    room.id,
+                    'competitions',
+                    comp.id,
+                    'questions',
+                    cq.id,
+                    'boards'
+                  ),
+                  where('roomId', '==', room.id),
+                  where('questionId', '==', cq.id)
+                )
+              )
+            );
+            const cbList: StudentBoard[] = [];
+            cbSnap.forEach((d) => cbList.push(d.data() as StudentBoard));
+            if (cbList.length > 0) {
+              competitionBoardsByKey[`${comp.id}::${cq.id}`] = cbList;
+            }
+          } catch {
+            // Ignore board read errors
+          }
+        }
+      } catch {
+        // Ignore competition questions read errors
+      }
+    }
+  } catch {
+    // Ignore competitions read errors
+  }
+
+  return {
+    room,
+    myRole,
+    participants,
+    questions,
+    boardsByQuestionId,
+    slides,
+    slideLayers,
+    explainLayers,
+    sharedBoard,
+    sharedQuizzes,
+    competitions,
+    competitionQuestionsByCompId,
+    competitionBoardsByKey,
+  };
+}
+
 async function collectSourceData(
+  fromDb: Firestore,
+  oldUid: string | null,
   currentProfile: UserProfile | null,
   currentRoom: Room | null,
-  isSupervisorInCurrentRoom: boolean
+  isSupervisorInCurrentRoom: boolean,
+  onProgress: (p: MigrationProgress) => void
 ): Promise<CollectedSourceData> {
-  const cachedProfile =
-    await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile');
-  const cachedRoom =
-    await loadSessionSnapshot<StoredRoomSnapshot>('active_room');
-  const cachedSaved =
-    await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
-  const cachedQuizzes =
-    await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
-  const cachedAttempts =
-    await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
-
-  const oldUid =
-    currentProfile?.uid ??
-    sourceAuth.currentUser?.uid ??
-    cachedProfile?.uid ??
-    null;
+  const cachedProfile = await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile');
+  const cachedRoom = await loadSessionSnapshot<StoredRoomSnapshot>('active_room');
+  const cachedSaved = await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
+  const cachedQuizzes = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
+  const cachedAttempts = await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
 
   let fallbackQuad = '';
   try {
@@ -337,11 +662,10 @@ async function collectSourceData(
         }
       : null);
 
-  // Try live profile fetch from sourceDb if missing
   if (!profile && oldUid) {
     try {
       const pSnap = await withTimeout(
-        getDoc(doc(sourceDb, 'users', oldUid, 'private', 'profile'))
+        getDoc(doc(fromDb, 'users', oldUid, 'private', 'profile'))
       );
       if (pSnap.exists()) {
         profile = pSnap.data() as UserProfile;
@@ -351,122 +675,51 @@ async function collectSourceData(
     }
   }
 
-  let room: Room | null = currentRoom ?? cachedRoom?.room ?? null;
-  const myRole: 'supervisor' | 'student' = currentRoom
-    ? isSupervisorInCurrentRoom
-      ? 'supervisor'
-      : 'student'
-    : cachedRoom?.myRole ??
-      (room && oldUid && room.supervisorId === oldUid ? 'supervisor' : 'student');
+  onProgress({
+    step: 'collecting',
+    percent: 16,
+    message: 'جاري فحص الغرف والملفات والشرائح على القاعدة الحالية...',
+  });
 
-  let participants: Participant[] = cachedRoom?.participants ?? [];
-  let questions: Question[] = cachedRoom?.questions ?? [];
-  let slides: InteractiveSlide[] = cachedRoom?.slides ?? [];
-  let explainLayers: ExplainLayer[] = cachedRoom?.explainLayers ?? [];
-  let slideLayers: SlideLayer[] = cachedRoom?.slideLayers ?? [];
-  let sharedBoard: SharedExplainBoard | null = cachedRoom?.sharedBoard ?? null;
-  let boards: StudentBoard[] = cachedRoom?.boards ?? [];
-
-  // Best-effort live fetch of active room data (falls back immediately to snapshot if quota exceeded)
-  if (room) {
+  // Collect ALL rooms accessible to the user: currentRoom, cachedRoom, plus ALL supervisor-owned rooms
+  const candidateRoomsMap = new Map<string, Room>();
+  if (currentRoom) candidateRoomsMap.set(currentRoom.id, currentRoom);
+  if (cachedRoom?.room && !candidateRoomsMap.has(cachedRoom.room.id)) {
+    candidateRoomsMap.set(cachedRoom.room.id, cachedRoom.room);
+  }
+  if (oldUid) {
     try {
-      const rSnap = await withTimeout(getDoc(doc(sourceDb, 'rooms', room.id)));
-      if (rSnap.exists()) {
-        room = rSnap.data() as Room;
-      }
-    } catch {
-      // Use cached snapshot
-    }
-
-    try {
-      const qSnap = await withTimeout(
-        getDocs(
-          query(
-            collection(sourceDb, 'rooms', room.id, 'questions'),
-            where('roomId', '==', room.id)
-          )
-        )
+      const ownedRoomsSnap = await withTimeout(
+        getDocs(query(collection(fromDb, 'rooms'), where('supervisorId', '==', oldUid))),
+        8000
       );
-      const list: Question[] = [];
-      qSnap.forEach((d) => list.push(d.data() as Question));
-      list.sort((a, b) => a.orderIndex - b.orderIndex);
-      if (list.length > 0) questions = list;
+      ownedRoomsSnap.forEach((d) => {
+        const r = d.data() as Room;
+        candidateRoomsMap.set(r.id, r);
+      });
     } catch {
-      // Use cached snapshot
-    }
-
-    try {
-      const sSnap = await withTimeout(
-        getDocs(
-          query(
-            collection(sourceDb, 'rooms', room.id, 'slides'),
-            where('roomId', '==', room.id)
-          )
-        )
-      );
-      const list: InteractiveSlide[] = [];
-      sSnap.forEach((d) => list.push(d.data() as InteractiveSlide));
-      list.sort((a, b) => a.pageIndex - b.pageIndex);
-      if (list.length > 0) slides = list;
-    } catch {
-      // Use cached snapshot
-    }
-
-    try {
-      const elSnap = await withTimeout(
-        getDocs(
-          query(
-            collection(sourceDb, 'rooms', room.id, 'explainLayers'),
-            where('roomId', '==', room.id)
-          )
-        )
-      );
-      const list: ExplainLayer[] = [];
-      elSnap.forEach((d) => list.push(d.data() as ExplainLayer));
-      if (list.length > 0) explainLayers = list;
-    } catch {
-      // Use cached snapshot
-    }
-
-    try {
-      const sbSnap = await withTimeout(
-        getDoc(doc(sourceDb, 'rooms', room.id, 'sharedBoard', 'live'))
-      );
-      if (sbSnap.exists()) {
-        sharedBoard = sbSnap.data() as SharedExplainBoard;
-      }
-    } catch {
-      // Use cached snapshot
-    }
-
-    if (room.currentQuestionId) {
-      try {
-        const bSnap = await withTimeout(
-          getDocs(
-            query(
-              collection(
-                sourceDb,
-                'rooms',
-                room.id,
-                'questions',
-                room.currentQuestionId,
-                'boards'
-              ),
-              where('roomId', '==', room.id),
-              where('questionId', '==', room.currentQuestionId)
-            )
-          )
-        );
-        const list: StudentBoard[] = [];
-        bSnap.forEach((d) => list.push(d.data() as StudentBoard));
-        if (list.length > 0) boards = list;
-      } catch {
-        // Use cached snapshot
-      }
+      // Keep active/cached rooms if list fails (e.g. quota exceeded)
     }
   }
 
-  // Saved tests collection (best-effort live read -> fallback to IndexedDB snapshot)
+  const candidateRooms = Array.from(candidateRoomsMap.values());
+  const rooms: CollectedRoomData[] = [];
+  for (let i = 0; i < candidateRooms.length; i++) {
+    const r = candidateRooms[i];
+    const isSupHint =
+      (currentRoom && r.id === currentRoom.id && isSupervisorInCurrentRoom) ||
+      Boolean(oldUid && r.supervisorId === oldUid);
+    const details = await collectRoomDetails(fromDb, r, oldUid, cachedRoom, isSupHint);
+    rooms.push(details);
+  }
+
+  onProgress({
+    step: 'collecting',
+    percent: 24,
+    message: 'جاري تجميع الاختبارات المحفوظة واختباراتي والمحاولات...',
+  });
+
+  // ALL Saved Tests + questions (no 15-test truncation!)
   let savedTests: SavedTest[] = cachedSaved?.tests ?? [];
   const savedQuestionsByTestId: Record<string, SavedQuestion[]> = {
     ...(cachedSaved?.questionsByTestId ?? {}),
@@ -476,25 +729,24 @@ async function collectSourceData(
     try {
       const stSnap = await withTimeout(
         getDocs(
-          query(
-            collection(sourceDb, 'users', oldUid, 'savedTests'),
-            where('ownerId', '==', oldUid)
-          )
-        )
+          query(collection(fromDb, 'users', oldUid, 'savedTests'), where('ownerId', '==', oldUid))
+        ),
+        9000
       );
       const liveTests: SavedTest[] = [];
       stSnap.forEach((d) => liveTests.push(d.data() as SavedTest));
       if (liveTests.length > 0) {
         savedTests = liveTests;
-        for (const t of liveTests.slice(0, 15)) {
+        for (const t of liveTests) {
           try {
             const tqSnap = await withTimeout(
               getDocs(
                 query(
-                  collection(sourceDb, 'users', oldUid, 'savedTests', t.id, 'questions'),
+                  collection(fromDb, 'users', oldUid, 'savedTests', t.id, 'questions'),
                   where('ownerId', '==', oldUid)
                 )
-              )
+              ),
+              8000
             );
             const tqList: SavedQuestion[] = [];
             tqSnap.forEach((d) => tqList.push(d.data() as SavedQuestion));
@@ -510,57 +762,51 @@ async function collectSourceData(
     }
   }
 
-  // "اختباراتي": قراءة حية من قاعدة المصدر، وإن تعذرت (حصة/شبكة) نستخدم النسخة المحلية المخزنة
+  // ALL My Quizzes
   let myQuizzes: MyQuiz[] =
     cachedQuizzes && (!oldUid || cachedQuizzes.ownerId === oldUid) ? cachedQuizzes.quizzes : [];
   if (oldUid) {
     try {
       const qzSnap = await withTimeout(
         getDocs(
-          query(collection(sourceDb, 'users', oldUid, 'myQuizzes'), where('ownerId', '==', oldUid))
+          query(collection(fromDb, 'users', oldUid, 'myQuizzes'), where('ownerId', '==', oldUid))
         ),
-        8000
+        9000
       );
       const live: MyQuiz[] = [];
       qzSnap.forEach((d) => live.push(d.data() as MyQuiz));
-      // نجحت القراءة الحية: هي المرجع (بما فيها حالة عدم وجود اختبارات)
       myQuizzes = live;
     } catch {
-      // نبقى على النسخة المحلية
+      // Keep local snapshot
     }
   }
 
-  // محاولات الاختبار المحفوظة: قراءة حية ثم النسخة المحلية عند التعذر
+  // ALL Quiz Attempts
   let quizAttempts: QuizAttempt[] =
-    cachedAttempts && (!oldUid || cachedAttempts.ownerId === oldUid) ? cachedAttempts.attempts : [];
+    cachedAttempts && (!oldUid || cachedAttempts.ownerId === oldUid)
+      ? cachedAttempts.attempts
+      : [];
   if (oldUid) {
     try {
       const atSnap = await withTimeout(
         getDocs(
-          query(collection(sourceDb, 'users', oldUid, 'quizAttempts'), where('ownerId', '==', oldUid))
+          query(collection(fromDb, 'users', oldUid, 'quizAttempts'), where('ownerId', '==', oldUid))
         ),
-        8000
+        9000
       );
       const live: QuizAttempt[] = [];
       atSnap.forEach((d) => live.push(d.data() as QuizAttempt));
       quizAttempts = live;
     } catch {
-      // نبقى على النسخة المحلية
+      // Keep local snapshot
     }
   }
 
   return {
     oldUid,
     profile,
-    room,
-    myRole,
-    participants,
-    questions,
-    slides,
-    explainLayers,
-    slideLayers,
-    sharedBoard,
-    boards,
+    primaryRoomId: currentRoom?.id ?? cachedRoom?.room?.id ?? rooms[0]?.room.id ?? null,
+    rooms,
     savedTests,
     savedQuestionsByTestId,
     myQuizzes,
@@ -571,7 +817,7 @@ async function collectSourceData(
 async function signInOnTarget(
   targetConfig: FirebaseAppConfig
 ): Promise<{ targetApp: FirebaseApp; targetDb: Firestore; targetUser: User }> {
-  const targetApp = getOrInitTargetApp(targetConfig);
+  const targetApp = getOrInitFirebaseApp(targetConfig);
   const targetAuth = getAuth(targetApp);
   const targetDb = createFirestoreInstance(targetApp, targetConfig);
 
@@ -592,6 +838,227 @@ async function signInOnTarget(
   }
 
   return { targetApp, targetDb, targetUser };
+}
+
+async function migrateUserProfileToDb(params: {
+  targetDb: Firestore;
+  targetUser: User;
+  fallbackProfile: UserProfile | null;
+}): Promise<string> {
+  const { targetDb, targetUser, fallbackProfile } = params;
+  const targetUid = targetUser.uid;
+  const resolvedQuadName =
+    fallbackProfile?.fullNameQuad ||
+    (targetUser.displayName &&
+    targetUser.displayName.trim().split(/\s+/).length >= 4
+      ? targetUser.displayName.trim()
+      : '');
+
+  const targetProfileRef = doc(targetDb, 'users', targetUid, 'private', 'profile');
+  const existingProfileSnap = await getDoc(targetProfileRef);
+
+  if (resolvedQuadName && resolvedQuadName.length >= 5) {
+    if (existingProfileSnap.exists()) {
+      await updateDoc(targetProfileRef, {
+        fullNameQuad: resolvedQuadName.slice(0, 120),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(targetProfileRef, {
+        uid: targetUid,
+        fullNameQuad: resolvedQuadName.slice(0, 120),
+        email: targetUser.email || fallbackProfile?.email || 'user@example.com',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    try {
+      localStorage.setItem(`duoboard_quad_${targetUid}`, resolvedQuadName);
+      localStorage.setItem('duoboard_last_quad_name', resolvedQuadName);
+    } catch {
+      // Ignore storage errors
+    }
+
+    await saveSessionSnapshot({
+      key: 'user_profile',
+      uid: targetUid,
+      fullNameQuad: resolvedQuadName,
+      email: targetUser.email || fallbackProfile?.email || 'user@example.com',
+      updatedAt: Date.now(),
+    });
+    return resolvedQuadName;
+  }
+
+  if (existingProfileSnap.exists()) {
+    const existingData = existingProfileSnap.data() as UserProfile;
+    try {
+      localStorage.setItem(`duoboard_quad_${targetUid}`, existingData.fullNameQuad);
+      localStorage.setItem('duoboard_last_quad_name', existingData.fullNameQuad);
+    } catch {
+      // Ignore storage errors
+    }
+    return existingData.fullNameQuad;
+  }
+
+  return '';
+}
+
+async function writePersonalCollectionsToDb(params: {
+  targetDb: Firestore;
+  targetUid: string;
+  savedTests: SavedTest[];
+  savedQuestionsByTestId: Record<string, SavedQuestion[]>;
+  myQuizzes: MyQuiz[];
+  quizAttempts: QuizAttempt[];
+  onItemDone?: (kind: 'saved' | 'quiz' | 'attempt', label: string) => void;
+}): Promise<{
+  migratedSavedTestsCount: number;
+  migratedMyQuizzesCount: number;
+  migratedAttemptsCount: number;
+}> {
+  const {
+    targetDb,
+    targetUid,
+    savedTests,
+    savedQuestionsByTestId,
+    myQuizzes,
+    quizAttempts,
+    onItemDone,
+  } = params;
+
+  let migratedSavedTestsCount = 0;
+  for (const test of savedTests) {
+    const testRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id);
+    const existingSaved = await getDoc(testRef);
+    if (existingSaved.exists()) {
+      migratedSavedTestsCount++;
+      onItemDone?.('saved', test.title);
+      continue;
+    }
+
+    const savedQuestions = savedQuestionsByTestId[test.id] ?? [];
+    const CHUNK = 5;
+    const firstChunk = savedQuestions.slice(0, CHUNK);
+    const firstBatch = writeBatch(targetDb);
+
+    const safeSupervisorName =
+      test.supervisorName && test.supervisorName.length >= 5
+        ? test.supervisorName.slice(0, 120)
+        : 'مشرف الجلسة التعليمية';
+
+    firstBatch.set(testRef, {
+      id: test.id,
+      ownerId: targetUid,
+      roomCode: (test.roomCode || test.id).slice(0, 16),
+      title: (test.title || 'اختبار محفوظ').slice(0, 120),
+      userRole: test.userRole || 'student',
+      supervisorName: safeSupervisorName,
+      totalQuestions: Math.min(200, Math.max(0, savedQuestions.length || test.totalQuestions || 0)),
+      participantsSummary: (test.participantsSummary || []).slice(0, 100),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    for (const sq of firstChunk) {
+      const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
+      firstBatch.set(sqRef, cleanSavedQuestionForFirestore(sq, targetUid));
+    }
+    await firstBatch.commit();
+
+    for (let i = CHUNK; i < savedQuestions.length; i += CHUNK) {
+      const batch = writeBatch(targetDb);
+      for (const sq of savedQuestions.slice(i, i + CHUNK)) {
+        const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
+        batch.set(sqRef, cleanSavedQuestionForFirestore(sq, targetUid));
+      }
+      await batch.commit();
+    }
+
+    migratedSavedTestsCount++;
+    onItemDone?.('saved', test.title);
+  }
+
+  let migratedMyQuizzesCount = 0;
+  for (const quiz of myQuizzes) {
+    if (!quiz?.id || !Array.isArray(quiz.questions) || quiz.questions.length === 0) continue;
+    const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
+    const existingQuiz = await getDoc(quizRef);
+    if (existingQuiz.exists()) {
+      migratedMyQuizzesCount++;
+      onItemDone?.('quiz', quiz.title);
+      continue;
+    }
+    const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+    await setDoc(quizRef, {
+      id: quiz.id,
+      ownerId: targetUid,
+      title: (quiz.title || 'اختبار').slice(0, 120),
+      questions,
+      questionCount: questions.length,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    migratedMyQuizzesCount++;
+    onItemDone?.('quiz', quiz.title);
+  }
+
+  let migratedAttemptsCount = 0;
+  for (const at of quizAttempts) {
+    if (!at?.id || !Array.isArray(at.questions) || at.questions.length === 0) continue;
+    const atRef = doc(targetDb, 'users', targetUid, 'quizAttempts', at.id);
+    const existingAt = await getDoc(atRef);
+    if (existingAt.exists()) {
+      migratedAttemptsCount++;
+      onItemDone?.('attempt', at.title);
+      continue;
+    }
+    const qs: Record<string, unknown>[] = at.questions.slice(0, 100).map((q) => {
+      const base = cleanQuizQuestionForFirestore({
+        ...q,
+        answer: '',
+      });
+      delete base.answer;
+      return {
+        ...base,
+        id: String(q.id || '').slice(0, 120) || `q_${Math.random().toString(36).slice(2, 10)}`,
+        sourceQuizId: String(q.sourceQuizId || '').slice(0, 120),
+        sourceTitle: String(q.sourceTitle || '').slice(0, 120),
+      };
+    });
+    const answers = qs.map((_, i) => (Number.isInteger(at.answers?.[i]) ? at.answers[i] : -1));
+    const score = Math.min(
+      qs.length,
+      Math.max(
+        0,
+        qs.reduce((n, q, i) => n + (answers[i] === Number(q.correctIndex) ? 1 : 0), 0)
+      )
+    );
+    await setDoc(atRef, {
+      id: at.id,
+      ownerId: targetUid,
+      title: String(at.title || 'اختبار').slice(0, 200),
+      settings: at.settings && typeof at.settings === 'object' ? at.settings : {},
+      questions: qs,
+      answers,
+      score,
+      total: qs.length,
+      durationSec: Math.max(0, Math.min(172800, Math.round(Number(at.durationSec) || 0))),
+      finishedAt:
+        Number.isFinite(Number(at.finishedAt)) && Number(at.finishedAt) > 0
+          ? Math.round(Number(at.finishedAt))
+          : Date.now(),
+      createdAt: serverTimestamp(),
+    });
+    migratedAttemptsCount++;
+    onItemDone?.('attempt', at.title);
+  }
+
+  return {
+    migratedSavedTestsCount,
+    migratedMyQuizzesCount,
+    migratedAttemptsCount,
+  };
 }
 
 export async function runFirebaseMigration(params: {
@@ -617,6 +1084,7 @@ export async function runFirebaseMigration(params: {
 
   onProgress({
     step: 'signing_in',
+    percent: 8,
     message: 'جاري تسجيل الدخول على قاعدة البيانات الجديدة...',
   });
 
@@ -632,83 +1100,68 @@ export async function runFirebaseMigration(params: {
 
   onProgress({
     step: 'collecting',
-    message: 'جاري تجميع بيانات الحساب والغرفة والصبورات...',
+    percent: 14,
+    message: 'جاري تجميع كافة بيانات المنصة (الغرف، الاختبارات، الملفات، الصبورات)...',
   });
 
+  const cachedProfile = await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile');
+  const oldUid =
+    currentProfile?.uid ?? sourceAuth.currentUser?.uid ?? cachedProfile?.uid ?? null;
+
   const source = await collectSourceData(
+    sourceDb,
+    oldUid,
     currentProfile,
     currentRoom,
-    isSupervisorInCurrentRoom
+    isSupervisorInCurrentRoom,
+    onProgress
   );
 
   const targetUid = targetUser.uid;
-  const resolvedQuadName =
-    source.profile?.fullNameQuad ||
-    (targetUser.displayName &&
-    targetUser.displayName.trim().split(/\s+/).length >= 4
-      ? targetUser.displayName.trim()
-      : '');
+
+  // Compute total units for smooth real percentage reporting (25% -> 95%)
+  const totalRoomUnits = source.rooms.reduce(
+    (sum, r) =>
+      sum +
+      1 +
+      r.slides.length +
+      r.questions.length +
+      r.sharedQuizzes.length +
+      r.competitions.length,
+    0
+  );
+  const totalUnits = Math.max(
+    1,
+    1 +
+      totalRoomUnits +
+      source.savedTests.length +
+      source.myQuizzes.length +
+      source.quizAttempts.length
+  );
+  let completedUnits = 0;
+  const calcPercent = () => Math.min(94, 25 + Math.round((completedUnits / totalUnits) * 69));
 
   try {
     // 1. Migrate User Profile
     onProgress({
       step: 'migrating_profile',
-      message: 'جاري نقل بيانات الحساب...',
+      percent: 25,
+      message: 'جاري نقل بيانات الحساب الشخصي...',
     });
 
-    const targetProfileRef = doc(targetDb, 'users', targetUid, 'private', 'profile');
-    const existingProfileSnap = await getDoc(targetProfileRef);
-
-    if (resolvedQuadName && resolvedQuadName.length >= 5) {
-      if (existingProfileSnap.exists()) {
-        await updateDoc(targetProfileRef, {
-          fullNameQuad: resolvedQuadName,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await setDoc(targetProfileRef, {
-          uid: targetUid,
-          fullNameQuad: resolvedQuadName,
-          email: targetUser.email || source.profile?.email || 'user@example.com',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      try {
-        localStorage.setItem(`duoboard_quad_${targetUid}`, resolvedQuadName);
-        localStorage.setItem('duoboard_last_quad_name', resolvedQuadName);
-      } catch {
-        // Ignore storage errors
-      }
-
-      await saveSessionSnapshot({
-        key: 'user_profile',
-        uid: targetUid,
-        fullNameQuad: resolvedQuadName,
-        email: targetUser.email || source.profile?.email || 'user@example.com',
-        updatedAt: Date.now(),
-      });
-    } else if (existingProfileSnap.exists()) {
-      const existingData = existingProfileSnap.data() as UserProfile;
-      try {
-        localStorage.setItem(
-          `duoboard_quad_${targetUid}`,
-          existingData.fullNameQuad
-        );
-        localStorage.setItem('duoboard_last_quad_name', existingData.fullNameQuad);
-      } catch {
-        // Ignore storage errors
-      }
-    }
+    const resolvedQuadName = await migrateUserProfileToDb({
+      targetDb,
+      targetUser,
+      fallbackProfile: source.profile,
+    });
+    completedUnits++;
 
     // Re-key local quiz drafts (uploaded PDFs, selected pages, AI cache, draft strokes)
     if (source.oldUid && source.oldUid !== targetUid) {
       const allDrafts = await loadAllQuizDrafts();
       for (const d of allDrafts) {
         if (d.key.endsWith(`_${source.oldUid}`)) {
-          const newKey =
-            d.key.slice(0, d.key.length - source.oldUid.length) + targetUid;
+          const newKey = d.key.slice(0, d.key.length - source.oldUid.length) + targetUid;
           await saveQuizDraft({
             ...d,
             key: newKey,
@@ -718,31 +1171,40 @@ export async function runFirebaseMigration(params: {
       }
     }
 
-    // 2. Migrate Active Room state
-    let migratedRoomId: string | null = null;
+    // 2. Migrate ALL Collected Rooms (Questions, ALL Boards, ALL Slides, ALL Layers, SharedQuizzes, Competitions)
+    let migratedRoomId: string | null = source.primaryRoomId;
+    let migratedRoomsCount = 0;
     let roomCreatedAsSupervisor = false;
     let roomRejoinedAsStudent = false;
     let roomPendingForStudent = false;
     let migratedQuestionsCount = 0;
     let migratedSlidesCount = 0;
+    let migratedLayersCount = 0;
+    let migratedBoardsCount = 0;
+    let migratedSharedQuizzesCount = 0;
+    let migratedCompetitionsCount = 0;
 
-    if (source.room) {
-      const srcRoom = source.room;
-      migratedRoomId = srcRoom.id;
+    for (const roomBundle of source.rooms) {
+      const srcRoom = roomBundle.room;
+      const isPrimary = srcRoom.id === source.primaryRoomId;
 
       onProgress({
-        step: 'migrating_room',
-        message: `جاري نقل الغرفة (${srcRoom.id}) والأسئلة والصبورات...`,
+        step: 'migrating_rooms',
+        percent: calcPercent(),
+        message: `جاري نقل الغرفة (${srcRoom.id}) وكل ملفاتها وأسئلتها...`,
+        detail: `${srcRoom.title}`,
       });
 
       const targetRoomRef = doc(targetDb, 'rooms', srcRoom.id);
       const existingRoomSnap = await getDoc(targetRoomRef);
 
-      if (source.myRole === 'supervisor') {
+      if (roomBundle.myRole === 'supervisor') {
         const supervisorDisplayName =
           resolvedQuadName && resolvedQuadName.length >= 5
             ? resolvedQuadName
-            : srcRoom.supervisorName || 'المشرف العام للجلسة';
+            : srcRoom.supervisorName && srcRoom.supervisorName.length >= 5
+            ? srcRoom.supervisorName
+            : 'المشرف العام للجلسة';
 
         if (!existingRoomSnap.exists()) {
           await setDoc(targetRoomRef, {
@@ -766,46 +1228,50 @@ export async function runFirebaseMigration(params: {
           });
         }
 
-        const targetRoomData = existingRoomSnap.exists()
+        const freshRoomData = existingRoomSnap.exists()
           ? (existingRoomSnap.data() as Room)
           : null;
         const canEditRoom =
-          !targetRoomData ||
-          (targetRoomData.supervisorId === targetUid &&
-            targetRoomData.status !== 'finished');
+          !freshRoomData ||
+          (freshRoomData.supervisorId === targetUid && freshRoomData.status !== 'finished');
 
         if (canEditRoom) {
-          // Transition waiting -> active if needed
-          if (srcRoom.status !== 'waiting' && (!targetRoomData || targetRoomData.status === 'waiting')) {
+          if (srcRoom.status !== 'waiting' && (!freshRoomData || freshRoomData.status === 'waiting')) {
             await updateDoc(targetRoomRef, {
               status: 'active',
               updatedAt: serverTimestamp(),
             });
           }
 
-          // Slides require status === 'active' AND (sessionType === 'interactive' OR mode === 'explain')
           const needsExplainForSlides =
             (srcRoom.sessionType || 'quiz') !== 'interactive' &&
-            (source.slides.length > 0 ||
+            (roomBundle.slides.length > 0 ||
               srcRoom.mode === 'explain' ||
-              source.explainLayers.length > 0);
+              roomBundle.explainLayers.length > 0);
 
           if (needsExplainForSlides) {
             await updateDoc(targetRoomRef, {
               mode: 'explain',
-              explainPresenterId:
-                srcRoom.explainPresenterId === 'all' ? 'all' : targetUid,
+              explainPresenterId: srcRoom.explainPresenterId === 'all' ? 'all' : targetUid,
               explainPresenterName:
                 srcRoom.explainPresenterId === 'all'
                   ? 'الجميع'
                   : supervisorDisplayName.slice(0, 120),
               updatedAt: serverTimestamp(),
             });
+          } else if (srcRoom.mode === 'competition') {
+            await updateDoc(targetRoomRef, {
+              mode: 'competition',
+              updatedAt: serverTimestamp(),
+            });
           }
 
-          // Migrate slides
-          for (const slide of source.slides) {
-            if (!slide.imageData || slide.imageData.length > 480000) continue;
+          // Migrate ALL Slides & Current User's Layers on every slide
+          for (const slide of roomBundle.slides) {
+            if (!slide.imageData || slide.imageData.length > 480000) {
+              completedUnits++;
+              continue;
+            }
             const slideRef = doc(targetDb, 'rooms', srcRoom.id, 'slides', slide.id);
             const sSnap = await getDoc(slideRef);
             if (!sSnap.exists()) {
@@ -824,8 +1290,7 @@ export async function runFirebaseMigration(params: {
               migratedSlidesCount++;
             }
 
-            // Supervisor's own layer on this slide
-            const mySlideLayer = source.slideLayers.find(
+            const mySlideLayer = roomBundle.slideLayers.find(
               (l) =>
                 l.slideId === slide.id &&
                 (l.authorId === source.oldUid || l.authorId === targetUid)
@@ -849,52 +1314,55 @@ export async function runFirebaseMigration(params: {
                 strokes: mySlideLayer.strokes.slice(-400),
                 updatedAt: serverTimestamp(),
               });
+              migratedLayersCount++;
             }
+
+            completedUnits++;
+            onProgress({
+              step: 'migrating_rooms',
+              percent: calcPercent(),
+              message: `جاري نقل الشرائح والملفات (${srcRoom.id})...`,
+              detail: slide.fileName || `شريحة ${slide.pageIndex}`,
+            });
           }
 
-          if (source.slides.length > 0 || (srcRoom.currentSlideIndex ?? 0) > 0) {
+          if (roomBundle.slides.length > 0 || (srcRoom.currentSlideIndex ?? 0) > 0) {
             await updateDoc(targetRoomRef, {
-              currentSlideIndex: Math.min(
-                100,
-                Math.max(0, srcRoom.currentSlideIndex ?? 0)
-              ),
+              currentSlideIndex: Math.min(100, Math.max(0, srcRoom.currentSlideIndex ?? 0)),
               slideCount: Math.min(
                 100,
-                Math.max(source.slides.length, srcRoom.slideCount ?? 0)
+                Math.max(roomBundle.slides.length, srcRoom.slideCount ?? 0)
               ),
               updatedAt: serverTimestamp(),
             });
           }
 
-          // Migrate Supervisor's blank-board explain layer & sharedBoard
-          const myExplainLayer = source.explainLayers.find(
+          // Migrate blank-board explain layer & sharedBoard
+          const myExplainLayer = roomBundle.explainLayers.find(
             (l) => l.authorId === source.oldUid || l.authorId === targetUid
           );
           if (myExplainLayer && (myExplainLayer.strokes?.length ?? 0) > 0) {
-            await setDoc(
-              doc(targetDb, 'rooms', srcRoom.id, 'explainLayers', targetUid),
-              {
-                id: targetUid,
-                roomId: srcRoom.id,
-                authorId: targetUid,
-                authorName: supervisorDisplayName.slice(0, 120),
-                strokes: myExplainLayer.strokes.slice(-400),
-                updatedAt: serverTimestamp(),
-              }
-            );
+            await setDoc(doc(targetDb, 'rooms', srcRoom.id, 'explainLayers', targetUid), {
+              id: targetUid,
+              roomId: srcRoom.id,
+              authorId: targetUid,
+              authorName: supervisorDisplayName.slice(0, 120),
+              strokes: myExplainLayer.strokes.slice(-400),
+              updatedAt: serverTimestamp(),
+            });
+            migratedLayersCount++;
           }
 
-          if (source.sharedBoard && (source.sharedBoard.strokes?.length ?? 0) > 0) {
+          if (roomBundle.sharedBoard && (roomBundle.sharedBoard.strokes?.length ?? 0) > 0) {
             await setDoc(doc(targetDb, 'rooms', srcRoom.id, 'sharedBoard', 'live'), {
               roomId: srcRoom.id,
-              strokes: source.sharedBoard.strokes.slice(-400),
+              strokes: roomBundle.sharedBoard.strokes.slice(-400),
               updatedBy: targetUid,
               updatedByName: supervisorDisplayName.slice(0, 120),
               updatedAt: serverTimestamp(),
             });
           }
 
-          // Restore target room mode if it wasn't explain
           if (needsExplainForSlides && (srcRoom.mode || 'quiz') === 'quiz') {
             await updateDoc(targetRoomRef, {
               mode: 'quiz',
@@ -904,18 +1372,29 @@ export async function runFirebaseMigration(params: {
             });
           }
 
-          // Migrate Questions
-          for (const q of source.questions) {
+          // Migrate ALL Room Questions (preserving choices, chart, figure, sourceQuizTitle!)
+          for (const q of roomBundle.questions) {
             const qRef = doc(targetDb, 'rooms', srcRoom.id, 'questions', q.id);
             const qSnap = await getDoc(qRef);
             if (!qSnap.exists()) {
+              const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
+              const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
+              const sanitizedChoices =
+                Array.isArray(q.choices) && q.choices.length > 0
+                  ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
+                  : null;
               await setDoc(qRef, {
                 id: q.id,
                 roomId: srcRoom.id,
                 orderIndex: Math.min(200, Math.max(1, q.orderIndex)),
-                text: (q.text || '').slice(0, 1000),
-                imageData:
-                  q.imageData && q.imageData.length <= 480000 ? q.imageData : '',
+                text: (q.text || '').slice(0, 2000),
+                imageData: q.imageData && q.imageData.length <= 480000 ? q.imageData : '',
+                ...(sanitizedChoices ? { choices: sanitizedChoices } : {}),
+                ...(sanitizedChart ? { chart: sanitizedChart } : {}),
+                ...(sanitizedFigure ? { figure: sanitizedFigure } : {}),
+                ...(q.sourceQuizTitle
+                  ? { sourceQuizTitle: String(q.sourceQuizTitle).slice(0, 120) }
+                  : {}),
                 status: 'solving',
                 attemptsUsed: 0,
                 wrongStudentIds: [],
@@ -949,23 +1428,122 @@ export async function runFirebaseMigration(params: {
               }
               migratedQuestionsCount++;
             }
+            completedUnits++;
           }
 
-          if (srcRoom.currentQuestionId || source.questions.length > 0) {
+          if (srcRoom.currentQuestionId || roomBundle.questions.length > 0) {
             await updateDoc(targetRoomRef, {
               currentQuestionId: srcRoom.currentQuestionId || '',
               questionCount: Math.min(
                 200,
-                Math.max(source.questions.length, srcRoom.questionCount ?? 0)
+                Math.max(roomBundle.questions.length, srcRoom.questionCount ?? 0)
               ),
               updatedAt: serverTimestamp(),
             });
           }
 
-          if (
-            srcRoom.sessionType === 'interactive' &&
-            srcRoom.interactiveEditor === 'all'
-          ) {
+          // Migrate Room Shared Quizzes (supervisor preserves room quiz bank)
+          for (const sq of roomBundle.sharedQuizzes) {
+            if (!sq?.id || !Array.isArray(sq.questions) || sq.questions.length === 0) {
+              completedUnits++;
+              continue;
+            }
+            const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
+            const sqSnap = await getDoc(sqRef);
+            if (!sqSnap.exists()) {
+              const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+              await setDoc(sqRef, {
+                id: sq.id,
+                roomId: srcRoom.id,
+                authorId: targetUid,
+                authorName: (sq.authorName || supervisorDisplayName).slice(0, 120),
+                authorRole: 'supervisor',
+                title: (sq.title || 'نموذج مشترك').slice(0, 120),
+                questions: cleanedQs,
+                questionCount: cleanedQs.length,
+                updatedAt: serverTimestamp(),
+              });
+              migratedSharedQuizzesCount++;
+            }
+            completedUnits++;
+          }
+
+          // Migrate Competitions + Competition Questions
+          for (const comp of roomBundle.competitions) {
+            const compRef = doc(targetDb, 'rooms', srcRoom.id, 'competitions', comp.id);
+            const cSnap = await getDoc(compRef);
+            if (!cSnap.exists()) {
+              const competitorsList =
+                Array.isArray(comp.competitors) && comp.competitors.length > 0
+                  ? comp.competitors.slice(0, 100)
+                  : [{ uid: targetUid, name: supervisorDisplayName.slice(0, 120) }];
+              const competitorIdsList =
+                Array.isArray(comp.competitorIds) && comp.competitorIds.length > 0
+                  ? Array.from(new Set([targetUid, ...comp.competitorIds])).slice(0, 100)
+                  : [targetUid];
+
+              await setDoc(compRef, {
+                id: comp.id,
+                roomId: srcRoom.id,
+                createdBy: targetUid,
+                createdByName: supervisorDisplayName.slice(0, 120),
+                title: (comp.title || 'منافسة مباشرة').slice(0, 200),
+                settings: comp.settings || {},
+                includeSupervisor: Boolean(comp.includeSupervisor),
+                competitorIds: competitorIdsList,
+                competitors: competitorsList,
+                status: 'active',
+                phase: 'countdown',
+                currentIndex: 0,
+                totalQuestions: Math.min(100, Math.max(1, comp.totalQuestions || 1)),
+                countdownSec: Math.min(10, Math.max(1, comp.countdownSec || 3)),
+                phaseStartedAt: serverTimestamp(),
+                totalElapsedMs: 0,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+
+              const compQs = roomBundle.competitionQuestionsByCompId[comp.id] ?? [];
+              for (const cq of compQs) {
+                const cqRef = doc(
+                  targetDb,
+                  'rooms',
+                  srcRoom.id,
+                  'competitions',
+                  comp.id,
+                  'questions',
+                  cq.id
+                );
+                await setDoc(cqRef, {
+                  id: cq.id,
+                  roomId: srcRoom.id,
+                  competitionId: comp.id,
+                  orderIndex: Math.min(100, Math.max(1, cq.orderIndex)),
+                  question: cq.question,
+                  status: 'solving',
+                  winnerId: '',
+                  winnerName: '',
+                  winnerChoiceIndex: -1,
+                  winnerTimeMs: 0,
+                  wrongPlayerIds: [],
+                  attempts: [],
+                  updatedAt: serverTimestamp(),
+                });
+              }
+
+              if (comp.status === 'finished') {
+                await updateDoc(compRef, {
+                  status: 'finished',
+                  totalElapsedMs: Math.min(172800000, Math.max(0, comp.totalElapsedMs || 0)),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              migratedCompetitionsCount++;
+            }
+            completedUnits++;
+          }
+
+          if (srcRoom.sessionType === 'interactive' && srcRoom.interactiveEditor === 'all') {
             await updateDoc(targetRoomRef, {
               interactiveEditor: 'all',
               interactiveEditorName: 'الجميع',
@@ -980,19 +1558,14 @@ export async function runFirebaseMigration(params: {
             });
           }
         }
-        roomCreatedAsSupervisor = true;
+        migratedRoomsCount++;
+        if (isPrimary) roomCreatedAsSupervisor = true;
       } else {
-        // Student path: rejoin if supervisor already created the room on targetDb
+        // Student path: rejoin room if created by supervisor on targetDb + restore student's boards & layers
         if (existingRoomSnap.exists()) {
           const targetRoomData = existingRoomSnap.data() as Room;
           if (targetRoomData.status !== 'finished') {
-            const pRef = doc(
-              targetDb,
-              'rooms',
-              srcRoom.id,
-              'participants',
-              targetUid
-            );
+            const pRef = doc(targetDb, 'rooms', srcRoom.id, 'participants', targetUid);
             const pSnap = await getDoc(pRef);
             const studentName =
               resolvedQuadName && resolvedQuadName.length >= 5
@@ -1010,27 +1583,26 @@ export async function runFirebaseMigration(params: {
               });
             }
 
-            // Restore student's own strokes on current question if still solving
-            if (targetRoomData.currentQuestionId) {
-              const myOldBoard = source.boards.find(
+            // Restore student's boards across ALL solving questions
+            for (const q of roomBundle.questions) {
+              if (q.status !== 'solving') continue;
+              const qBoards = roomBundle.boardsByQuestionId[q.id] ?? [];
+              const myOldBoard = qBoards.find(
                 (b) => b.studentId === source.oldUid || b.studentId === targetUid
               );
-              if (myOldBoard && (myOldBoard.strokes?.length ?? 0) > 0) {
-                const qRef = doc(
-                  targetDb,
-                  'rooms',
-                  srcRoom.id,
-                  'questions',
-                  targetRoomData.currentQuestionId
+              if (!myOldBoard || (myOldBoard.strokes?.length ?? 0) === 0) continue;
+
+              try {
+                const targetQSnap = await getDoc(
+                  doc(targetDb, 'rooms', srcRoom.id, 'questions', q.id)
                 );
-                const qSnap = await getDoc(qRef);
-                if (qSnap.exists() && (qSnap.data() as Question).status === 'solving') {
+                if (targetQSnap.exists() && (targetQSnap.data() as Question).status === 'solving') {
                   const bRef = doc(
                     targetDb,
                     'rooms',
                     srcRoom.id,
                     'questions',
-                    targetRoomData.currentQuestionId,
+                    q.id,
                     'boards',
                     targetUid
                   );
@@ -1040,209 +1612,160 @@ export async function runFirebaseMigration(params: {
                       studentId: targetUid,
                       studentName: studentName.slice(0, 120),
                       roomId: srcRoom.id,
-                      questionId: targetRoomData.currentQuestionId,
+                      questionId: q.id,
                       strokes: myOldBoard.strokes.slice(-400),
                       submitted: Boolean(myOldBoard.submitted),
                       verdict: 'pending',
                       updatedAt: serverTimestamp(),
                     });
+                    migratedBoardsCount++;
                   }
                 }
+              } catch {
+                // Skip if board locked on target
+              }
+            }
+
+            // Restore student's sharedQuizzes authored by them
+            for (const sq of roomBundle.sharedQuizzes) {
+              if (sq.authorId !== source.oldUid && sq.authorId !== targetUid) continue;
+              try {
+                const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
+                const sqSnap = await getDoc(sqRef);
+                if (!sqSnap.exists() && Array.isArray(sq.questions) && sq.questions.length > 0) {
+                  const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+                  await setDoc(sqRef, {
+                    id: sq.id,
+                    roomId: srcRoom.id,
+                    authorId: targetUid,
+                    authorName: studentName.slice(0, 120),
+                    authorRole: 'student',
+                    title: (sq.title || 'نموذج').slice(0, 120),
+                    questions: cleanedQs,
+                    questionCount: cleanedQs.length,
+                    updatedAt: serverTimestamp(),
+                  });
+                  migratedSharedQuizzesCount++;
+                }
+              } catch {
+                // Skip if unavailable
               }
             }
           }
-          roomRejoinedAsStudent = true;
-        } else {
+          if (isPrimary) roomRejoinedAsStudent = true;
+        } else if (isPrimary) {
           roomPendingForStudent = true;
         }
       }
+      completedUnits++;
     }
 
-    // 3. Migrate Saved Tests archive
-    let migratedSavedTestsCount = 0;
-    if (source.savedTests.length > 0) {
-      onProgress({
-        step: 'migrating_saved',
-        message: `جاري نقل الاختبارات المحفوظة (${source.savedTests.length})...`,
-      });
+    // 3. Migrate ALL Saved Tests, MyQuizzes, QuizAttempts
+    onProgress({
+      step: 'migrating_saved',
+      percent: calcPercent(),
+      message: `جاري نقل الاختبارات المحفوظة (${source.savedTests.length}) واختباراتي (${source.myQuizzes.length}) والمحاولات (${source.quizAttempts.length})...`,
+    });
 
-      for (const test of source.savedTests) {
-        const testRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id);
-        const existingSaved = await getDoc(testRef);
-        if (existingSaved.exists()) continue;
-
-        const savedQuestions = source.savedQuestionsByTestId[test.id] ?? [];
-        const CHUNK = 5;
-        const firstChunk = savedQuestions.slice(0, CHUNK);
-        const firstBatch = writeBatch(targetDb);
-
-        const safeSupervisorName =
-          test.supervisorName && test.supervisorName.length >= 5
-            ? test.supervisorName.slice(0, 120)
-            : 'مشرف الجلسة التعليمية';
-
-        firstBatch.set(testRef, {
-          id: test.id,
-          ownerId: targetUid,
-          roomCode: (test.roomCode || test.id).slice(0, 16),
-          title: (test.title || 'اختبار محفوظ').slice(0, 120),
-          userRole: test.userRole || 'student',
-          supervisorName: safeSupervisorName,
-          totalQuestions: Math.min(200, Math.max(0, savedQuestions.length || test.totalQuestions || 0)),
-          participantsSummary: (test.participantsSummary || []).slice(0, 100),
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-
-        for (const sq of firstChunk) {
-          const sqRef = doc(
-            targetDb,
-            'users',
-            targetUid,
-            'savedTests',
-            test.id,
-            'questions',
-            sq.id
-          );
-          firstBatch.set(sqRef, {
-            id: sq.id,
-            ownerId: targetUid,
-            orderIndex: Math.min(200, Math.max(1, sq.orderIndex)),
-            text: (sq.text || '').slice(0, 1000),
-            imageData:
-              sq.imageData && sq.imageData.length <= 480000 ? sq.imageData : '',
-            status: sq.status || 'solving',
-            winnerName: (sq.winnerName || '').slice(0, 120),
-            boards: (sq.boards || []).slice(0, 100),
-            createdAt: serverTimestamp(),
+    const { migratedSavedTestsCount, migratedMyQuizzesCount, migratedAttemptsCount } =
+      await writePersonalCollectionsToDb({
+        targetDb,
+        targetUid,
+        savedTests: source.savedTests,
+        savedQuestionsByTestId: source.savedQuestionsByTestId,
+        myQuizzes: source.myQuizzes,
+        quizAttempts: source.quizAttempts,
+        onItemDone: (kind, label) => {
+          completedUnits++;
+          const step =
+            kind === 'saved'
+              ? 'migrating_saved'
+              : kind === 'quiz'
+              ? 'migrating_quizzes'
+              : 'migrating_attempts';
+          const msg =
+            kind === 'saved'
+              ? 'جاري نقل أرشيف الاختبارات المحفوظة...'
+              : kind === 'quiz'
+              ? 'جاري نقل نماذج «اختباراتي» مع الأشكال والرسوم...'
+              : 'جاري نقل سجل المحاولات والتقارير...';
+          onProgress({
+            step,
+            percent: calcPercent(),
+            message: msg,
+            detail: label,
           });
-        }
-
-        await firstBatch.commit();
-
-        for (let i = CHUNK; i < savedQuestions.length; i += CHUNK) {
-          const batch = writeBatch(targetDb);
-          for (const sq of savedQuestions.slice(i, i + CHUNK)) {
-            const sqRef = doc(
-              targetDb,
-              'users',
-              targetUid,
-              'savedTests',
-              test.id,
-              'questions',
-              sq.id
-            );
-            batch.set(sqRef, {
-              id: sq.id,
-              ownerId: targetUid,
-              orderIndex: Math.min(200, Math.max(1, sq.orderIndex)),
-              text: (sq.text || '').slice(0, 1000),
-              imageData:
-                sq.imageData && sq.imageData.length <= 480000 ? sq.imageData : '',
-              status: sq.status || 'solving',
-              winnerName: (sq.winnerName || '').slice(0, 120),
-              boards: (sq.boards || []).slice(0, 100),
-              createdAt: serverTimestamp(),
-            });
-          }
-          await batch.commit();
-        }
-
-        migratedSavedTestsCount++;
-      }
-    }
-
-
-    // 4. Migrate "اختباراتي" (my quizzes) — كل اختبار مستند واحد، فالعملية ذرية وقابلة للاستكمال:
-    //    ما نُقل سابقاً يُتخطى، وما لم يُنقل بعد يُكمل عند إعادة المحاولة.
-    let migratedMyQuizzesCount = 0;
-    if (source.myQuizzes.length > 0) {
-      onProgress({
-        step: 'migrating_quizzes',
-        message: `جاري نقل اختباراتي (${source.myQuizzes.length})...`,
+        },
       });
 
-      for (const quiz of source.myQuizzes) {
-        if (!quiz?.id || !Array.isArray(quiz.questions) || quiz.questions.length === 0) continue;
-        const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
-        const existingQuiz = await getDoc(quizRef);
-        if (existingQuiz.exists()) {
-          migratedMyQuizzesCount++;
-          continue;
-        }
-        const questions = quiz.questions.slice(0, 100).map((q) => ({
-          ...(q.chart && sanitizeChart(q.chart) ? { chart: sanitizeChart(q.chart) } : {}),
-          id: String(q.id || '').slice(0, 64) || `q_${Math.random().toString(36).slice(2, 10)}`,
-          text: String(q.text || '').slice(0, 2000),
-          choices: Array.isArray(q.choices) ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
-          correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
-          answer: String(q.answer || '').slice(0, 1000),
-          explanation: String(q.explanation || '').slice(0, 2000),
-        }));
-        await setDoc(quizRef, {
-          id: quiz.id,
-          ownerId: targetUid,
-          title: (quiz.title || 'اختبار').slice(0, 120),
-          questions,
-          questionCount: questions.length,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        migratedMyQuizzesCount++;
-      }
+    // 4. Write Global Platform Pointer so ALL users on the source DB switch automatically to targetConfig!
+    onProgress({
+      step: 'finalizing',
+      percent: 96,
+      message: 'جاري اعتماد القاعدة الجديدة كقاعدة رسمية للمنصة ومزامنة التحويل...',
+    });
+
+    const priorChain = [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]
+      .filter((c) => !isSameFirebaseTarget(c, targetConfig))
+      .slice(0, 6)
+      .map((c) => ({
+        apiKey: c.apiKey,
+        authDomain: c.authDomain,
+        projectId: c.projectId,
+        appId: c.appId,
+        ...(c.storageBucket ? { storageBucket: c.storageBucket } : {}),
+        ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
+        ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
+      }));
+
+    const buildPointerPayload = (uidValue: string) => ({
+      id: 'migration',
+      projectId: targetConfig.projectId,
+      apiKey: targetConfig.apiKey,
+      authDomain: targetConfig.authDomain,
+      appId: targetConfig.appId,
+      ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
+      ...(targetConfig.messagingSenderId
+        ? { messagingSenderId: targetConfig.messagingSenderId }
+        : {}),
+      ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
+      ...(targetConfig.firestoreDatabaseId
+        ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
+        : {}),
+      migratedBy: uidValue,
+      migratedByName: (resolvedQuadName || source.profile?.fullNameQuad || 'مشرف المنصة').slice(
+        0,
+        120
+      ),
+      ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
+      previousConfigs: priorChain,
+      updatedAt: serverTimestamp(),
+    });
+
+    let platformPointerUpdated = false;
+    try {
+      await setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid));
+    } catch {
+      // Non-fatal if target project uses older rules
     }
-
-
-    // 5. Migrate saved exam attempts (محاولات الاختبار) — مستند واحد لكل محاولة، قابلة للاستكمال
-    let migratedAttemptsCount = 0;
-    if (source.quizAttempts.length > 0) {
-      onProgress({
-        step: 'migrating_attempts',
-        message: `جاري نقل محاولات الاختبار (${source.quizAttempts.length})...`,
-      });
-
-      for (const at of source.quizAttempts) {
-        if (!at?.id || !Array.isArray(at.questions) || at.questions.length === 0) continue;
-        const atRef = doc(targetDb, 'users', targetUid, 'quizAttempts', at.id);
-        const existingAt = await getDoc(atRef);
-        if (existingAt.exists()) {
-          migratedAttemptsCount++;
-          continue;
-        }
-        const qs = at.questions.slice(0, 100).map((q) => ({
-          ...(q.chart && sanitizeChart(q.chart) ? { chart: sanitizeChart(q.chart) } : {}),
-          id: String(q.id || '').slice(0, 120) || `q_${Math.random().toString(36).slice(2, 10)}`,
-          sourceQuizId: String(q.sourceQuizId || '').slice(0, 120),
-          sourceTitle: String(q.sourceTitle || '').slice(0, 120),
-          text: String(q.text || '').slice(0, 2000),
-          choices: Array.isArray(q.choices) ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
-          correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
-          explanation: String(q.explanation || '').slice(0, 2000),
-        }));
-        const answers = qs.map((_, i) => (Number.isInteger(at.answers?.[i]) ? at.answers[i] : -1));
-        const score = Math.min(
-          qs.length,
-          Math.max(0, qs.reduce((n, q, i) => n + (answers[i] === q.correctIndex ? 1 : 0), 0))
+    try {
+      const srcUid = sourceAuth.currentUser?.uid;
+      if (srcUid) {
+        await withTimeout(
+          setDoc(doc(sourceDb, 'platform', 'migration'), buildPointerPayload(srcUid)),
+          3500
         );
-        await setDoc(atRef, {
-          id: at.id,
-          ownerId: targetUid,
-          title: String(at.title || 'اختبار').slice(0, 200),
-          settings: at.settings && typeof at.settings === 'object' ? at.settings : {},
-          questions: qs,
-          answers,
-          score,
-          total: qs.length,
-          durationSec: Math.max(0, Math.min(172800, Math.round(Number(at.durationSec) || 0))),
-          finishedAt: Number.isFinite(Number(at.finishedAt)) && Number(at.finishedAt) > 0 ? Math.round(Number(at.finishedAt)) : Date.now(),
-          createdAt: serverTimestamp(),
-        });
-        migratedAttemptsCount++;
+        platformPointerUpdated = true;
       }
+    } catch {
+      // Source DB may have exceeded quota or have older rules — link & localStorage still work 100%
     }
 
-    // Activate target database locally and persist active room so reload resumes seamlessly
-    activateCustomFirebaseConfig(targetConfig, migratedRoomId);
+    // Activate target database locally and mark previous DBs as already synced for this user
+    const priorTargetKey = firebaseTargetKey(activeFirebaseConfig);
+    activateCustomFirebaseConfig(targetConfig, migratedRoomId, priorChain as FirebaseAppConfig[]);
+    markSourceKeySynced(targetUid, priorTargetKey);
+
     if (migratedRoomId) {
       try {
         localStorage.setItem(`duoboard_active_room_${targetUid}`, migratedRoomId);
@@ -1255,7 +1778,8 @@ export async function runFirebaseMigration(params: {
 
     onProgress({
       step: 'done',
-      message: 'تم نقل البيانات وتجهيز قاعدة البيانات الجديدة بنجاح!',
+      percent: 100,
+      message: 'اكتمل نقل المنصة بالكامل وتفعيل قاعدة البيانات الجديدة بنسبة 100%!',
     });
 
     return {
@@ -1263,16 +1787,147 @@ export async function runFirebaseMigration(params: {
       targetUid,
       shareUrl,
       migratedRoomId,
+      migratedRoomsCount,
       roomCreatedAsSupervisor,
       roomRejoinedAsStudent,
       roomPendingForStudent,
       migratedQuestionsCount,
       migratedSlidesCount,
+      migratedLayersCount,
+      migratedBoardsCount,
+      migratedSharedQuizzesCount,
+      migratedCompetitionsCount,
       migratedSavedTestsCount,
       migratedMyQuizzesCount,
       migratedAttemptsCount,
+      platformPointerUpdated,
     };
   } catch (err) {
     throw classifyMigrationError(err, targetConfig.projectId);
   }
+}
+
+/**
+ * Automatically syncs a user's personal account data (profile, myQuizzes, savedTests, quizAttempts)
+ * from any previous Firebase databases in the migration chain (or IndexedDB snapshots) onto the
+ * newly activated database when that user arrives via auto-switch or migration link.
+ */
+export async function syncPersonalAccountFromPreviousDbs(params: {
+  targetUser: User;
+  interactiveAuthIfNeeded?: boolean;
+  onProgress?: (p: MigrationProgress) => void;
+}): Promise<{ synced: boolean; count: number; needsInteractiveSignIn: boolean }> {
+  const { targetUser, interactiveAuthIfNeeded = false, onProgress } = params;
+  const targetUid = targetUser.uid;
+  const previousConfigs = getPreviousFirebaseConfigs().filter(
+    (c) => !isSameFirebaseTarget(c, activeFirebaseConfig)
+  );
+  if (previousConfigs.length === 0) {
+    return { synced: false, count: 0, needsInteractiveSignIn: false };
+  }
+
+  const alreadySynced = getSyncedSourceKeys(targetUid);
+  const pendingConfigs = previousConfigs.filter(
+    (cfg) => !alreadySynced.includes(firebaseTargetKey(cfg))
+  );
+  if (pendingConfigs.length === 0) {
+    return { synced: false, count: 0, needsInteractiveSignIn: false };
+  }
+
+  let totalSyncedItems = 0;
+  let needsInteractiveSignIn = false;
+
+  for (let i = 0; i < pendingConfigs.length; i++) {
+    const srcCfg = pendingConfigs[i];
+    const srcKey = firebaseTargetKey(srcCfg);
+    try {
+      const srcApp = getOrInitFirebaseApp(srcCfg);
+      const srcAuth = getAuth(srcApp);
+      const srcDb = createFirestoreInstance(srcApp, srcCfg);
+
+      let srcUser = srcAuth.currentUser;
+      if (!srcUser && interactiveAuthIfNeeded) {
+        const provider = new GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
+        const cred = await signInWithPopup(srcAuth, provider);
+        srcUser = cred.user;
+      }
+
+      if (!srcUser) {
+        needsInteractiveSignIn = true;
+        continue;
+      }
+
+      onProgress?.({
+        step: 'collecting',
+        percent: 25,
+        message: 'جاري استيراد بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة...',
+        detail: srcCfg.projectId,
+      });
+
+      const srcData = await collectSourceData(
+        srcDb,
+        srcUser.uid,
+        null,
+        null,
+        false,
+        (p) => onProgress?.(p)
+      );
+
+      await migrateUserProfileToDb({
+        targetDb: sourceDb,
+        targetUser,
+        fallbackProfile: srcData.profile,
+      });
+
+      const counts = await writePersonalCollectionsToDb({
+        targetDb: sourceDb,
+        targetUid,
+        savedTests: srcData.savedTests,
+        savedQuestionsByTestId: srcData.savedQuestionsByTestId,
+        myQuizzes: srcData.myQuizzes,
+        quizAttempts: srcData.quizAttempts,
+      });
+
+      totalSyncedItems +=
+        counts.migratedSavedTestsCount +
+        counts.migratedMyQuizzesCount +
+        counts.migratedAttemptsCount;
+
+      markSourceKeySynced(targetUid, srcKey);
+    } catch {
+      // Could be quota exceeded on old DB; try fallback from local IndexedDB below
+    }
+  }
+
+  // Fallback: always push any local IndexedDB personal snapshots belonging to user onto the active DB
+  if (totalSyncedItems === 0) {
+    try {
+      const cachedSaved = await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
+      const cachedQuizzes = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
+      const cachedAttempts =
+        await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
+
+      const counts = await writePersonalCollectionsToDb({
+        targetDb: sourceDb,
+        targetUid,
+        savedTests: cachedSaved?.tests ?? [],
+        savedQuestionsByTestId: cachedSaved?.questionsByTestId ?? {},
+        myQuizzes: cachedQuizzes?.quizzes ?? [],
+        quizAttempts: cachedAttempts?.attempts ?? [],
+      });
+      totalSyncedItems +=
+        counts.migratedSavedTestsCount +
+        counts.migratedMyQuizzesCount +
+        counts.migratedAttemptsCount;
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return {
+    synced: totalSyncedItems > 0,
+    count: totalSyncedItems,
+    needsInteractiveSignIn,
+  };
 }

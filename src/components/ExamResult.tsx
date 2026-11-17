@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Loader2, RotateCcw, CheckCircle2, RefreshCw } from 'lucide-react';
+import { ArrowRight, RotateCcw, CheckCircle2, RefreshCw } from 'lucide-react';
 import type { ExamQuestion, ExamSettings } from '../types';
 import { buildAttempt, saveAttempt, scoreExam } from '../exam';
 import { deleteSessionSnapshot } from '../localDraftStore';
 import { ExamReview } from './ExamReview';
+import { DuoLoading } from './DuoLoading';
 
 interface Props {
   ownerId: string;
@@ -69,7 +70,12 @@ export const ExamResult: React.FC<Props> = ({
       <h2 className="text-lg font-black text-[#3C3C3C]">نتيجة الاختبار</h2>
 
       {state === 'saving' && (
-        <div className="flex items-center gap-2 text-xs font-extrabold text-[#777777]"><Loader2 className="w-4 h-4 animate-spin" /> جاري حفظ المحاولة...</div>
+        <DuoLoading
+          variant="inline"
+          title="جاري حفظ نتيجتك ومراجعة الأسئلة في حسابك..."
+          subtitle="تُحفظ الإجابات والزمن والإحصائيات بأمان في قاعدة البيانات"
+          accent="green"
+        />
       )}
       {state === 'saved' && (
         <div className="flex items-center gap-2 p-3 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-xs font-extrabold text-[#46A302]">

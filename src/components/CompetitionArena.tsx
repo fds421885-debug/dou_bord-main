@@ -81,6 +81,7 @@ import {
   playDuoSound,
 } from './DuoIcons';
 import { RoomQuizSyncBanner } from './RoomQuizBank';
+import { DuoLoading } from './DuoLoading';
 import {
   WhiteboardCanvas,
   WhiteboardPreview,
@@ -1415,10 +1416,12 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
   // ====================== Render ======================
   if (compsLoading) {
     return (
-      <div className="duo-card p-12 text-center flex flex-col items-center gap-3">
-        <Loader2 className="w-8 h-8 animate-spin text-[#A560E8]" />
-        <p className="text-sm font-black text-[#777777]">جاري تحميل وضع المنافسة...</p>
-      </div>
+      <DuoLoading
+        variant="card"
+        title="جاري تحميل وضع المنافسة..."
+        subtitle="يتم مزامنة الأسئلة ولوحة المتصدرين المباشرة"
+        accent="purple"
+      />
     );
   }
 
@@ -1480,12 +1483,12 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         </div>
 
         {loadingResults ? (
-          <div className="duo-card p-10 text-center flex flex-col items-center gap-3">
-            <Loader2 className="w-7 h-7 animate-spin text-[#58CC02]" />
-            <p className="text-sm font-black text-[#777777]">
-              جاري تجميع إجابات المتنافسين وصبوراتهم وحفظها في حسابك...
-            </p>
-          </div>
+          <DuoLoading
+            variant="card"
+            title="جاري تجميع إجابات المتنافسين وصبوراتهم وحفظها في حسابك..."
+            subtitle="يتم حفظ النتائج النهائية والأزمنة بالثواني في الأرشيف"
+            accent="gold"
+          />
         ) : (
           <>
             {/* Leaderboard */}
@@ -2691,6 +2694,15 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             </button>
           </div>
         </div>
+      )}
+
+      {creatingComp && (
+        <DuoLoading
+          variant="overlay"
+          title="جاري تجهيز المنافسة وبناء الأسئلة للجميع..."
+          subtitle="سيبدأ العد التنازلي خلال لحظات لجميع المتنافسين"
+          accent="purple"
+        />
       )}
     </div>
   );

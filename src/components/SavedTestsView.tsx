@@ -19,6 +19,7 @@ import {
 import type { SavedQuestion, SavedTest, UserProfile } from '../types';
 import { saveSavedTestsListSnapshot } from '../localDraftStore';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
+import { DuoLoading } from './DuoLoading';
 import { TestResultsView } from './TestResultsView';
 
 interface SavedTestsViewProps {
@@ -135,9 +136,12 @@ export const SavedTestsView: React.FC<SavedTestsViewProps> = ({ profile }) => {
       </div>
 
       {loading ? (
-        <div className="duo-card p-10 text-center text-sm font-bold text-[#777777]">
-          جاري تحميل الاختبارات المحفوظة...
-        </div>
+        <DuoLoading
+          variant="card"
+          title="جاري تحميل أرشيف اختباراتك المحفوظة..."
+          subtitle="يتم استرجاع جميع الجلسات والأسئلة من قاعدة البيانات"
+          accent="blue"
+        />
       ) : tests.length === 0 ? (
         <div className="duo-card p-10 flex flex-col items-center justify-center text-center gap-4">
           <DuoArtwork
@@ -245,6 +249,15 @@ export const SavedTestsView: React.FC<SavedTestsViewProps> = ({ profile }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {openingId && (
+        <DuoLoading
+          variant="overlay"
+          title="جاري فتح الاختبار واسترجاع جميع الصبورات..."
+          subtitle="يتم تحميل الأسئلة وإجابات الطلاب والرسوم الهندسية"
+          accent="blue"
+        />
       )}
     </div>
   );

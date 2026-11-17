@@ -35,6 +35,7 @@ import {
 } from '../firebase';
 import type { Room, SessionType, UserProfile } from '../types';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
+import { DuoLoading } from './DuoLoading';
 
 interface RoleHubProps {
   profile: UserProfile;
@@ -704,6 +705,23 @@ export const RoleHub: React.FC<RoleHubProps> = ({
           </div>
         </form>
       </div>
+
+      {busyRole && (
+        <DuoLoading
+          variant="overlay"
+          title={
+            busyRole === 'supervisor'
+              ? 'جاري إنشاء الغرفة وتجهيز السبورة...'
+              : 'جاري الاتصال بالغرفة وتسجيل دخولك...'
+          }
+          subtitle={
+            busyRole === 'supervisor'
+              ? 'يتم إعداد رمز الغرفة وغرفة الانتظار في قاعدة البيانات'
+              : 'يتم التحقق من الغرفة ومزامنة جلستك المباشرة'
+          }
+          accent={busyRole === 'supervisor' ? 'green' : 'blue'}
+        />
+      )}
     </div>
   );
 };

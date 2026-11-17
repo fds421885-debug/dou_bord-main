@@ -848,9 +848,96 @@
         "attempts",
         "updatedAt"
       ]
+    },
+    "PlatformPointer": {
+      "title": "PlatformPointer",
+      "description": "Authoritative platform-wide Firebase database pointer written after migration so all users switch automatically",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9\\-]+$"
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 200
+        },
+        "authDomain": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 200
+        },
+        "appId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        },
+        "storageBucket": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "messagingSenderId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "measurementId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "firestoreDatabaseId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "migratedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "migratedByName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "migratedRoomId": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "previousConfigs": {
+          "type": "array",
+          "description": "Bounded chain of prior Firebase configs so re-migration and personal account sync work seamlessly"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "apiKey",
+        "authDomain",
+        "appId",
+        "migratedBy",
+        "migratedByName",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
+    "/platform/{docId}": {
+      "schema": { "$ref": "#/entities/PlatformPointer" },
+      "description": "Platform-wide active database pointer for automatic migration failover"
+    },
     "/users/{userId}/private/{docId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Private user profile with email and four-part name"

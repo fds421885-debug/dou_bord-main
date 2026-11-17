@@ -301,7 +301,7 @@ export async function saveSavedTestsListSnapshot(
     await saveSessionSnapshot({
       key: 'saved_tests',
       ownerId,
-      tests: tests.slice(0, 30),
+      tests: tests.slice(0, 200),
       questionsByTestId: {
         ...prevMap,
         ...(extraQuestionsByTestId ?? {}),

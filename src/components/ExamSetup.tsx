@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ArrowRight, Play, Shuffle } from 'lucide-react';
 import type { ExamSettings, ExamQuestion, MyQuiz } from '../types';
 import { availableCount, buildExam, describeTiming, EXAM_MAX_QUESTIONS, validPool } from '../exam';
+import { DuoLoading } from './DuoLoading';
 
 interface Props {
   quizzes: MyQuiz[];
@@ -29,6 +30,7 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
   const [timing, setTiming] = useState<'none' | 'perQuestion' | 'total'>('none');
   const [perQ, setPerQ] = useState('60');
   const [totalMin, setTotalMin] = useState('10');
+  const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const quizIds = sourceMode === 'single' ? (singleId ? [singleId] : []) : mixIds;
@@ -68,7 +70,10 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
       setError('تعذر بناء الاختبار، تأكد أن النماذج المختارة فيها أسئلة جاهزة.');
       return;
     }
-    onStart(settings, questions);
+    setLaunching(true);
+    window.setTimeout(() => {
+      onStart(settings, questions);
+    }, 320);
   };
 
   return (
@@ -197,12 +202,21 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
         <button
           type="button"
           onClick={start}
-          disabled={avail === 0}
+          disabled={avail === 0 || launching}
           className="duo-btn flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-[#A560E8] hover:bg-[#B57BEE] border-2 border-[#8938D6] border-b-4 text-white text-base font-black cursor-pointer disabled:opacity-50"
         >
           <Play className="w-5 h-5" /> ابدأ الاختبار ({count} سؤال · {describeTiming({ timing, seconds })})
         </button>
       </div>
+
+      {launching && (
+        <DuoLoading
+          variant="overlay"
+          title="جاري تجهيز أسئلة الاختبار والمؤقت..."
+          subtitle={`سيتم تحميل ${count} سؤال بالرسومات والأشكال الهندسية`}
+          accent="purple"
+        />
+      )}
     </div>
   );
 };

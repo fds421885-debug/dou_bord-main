@@ -4,6 +4,7 @@ import { Copy, Check, Users, Play, Clock } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { Participant, Room, UserProfile } from '../types';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
+import { DuoLoading } from './DuoLoading';
 import { RoomQuizSyncBanner } from './RoomQuizBank';
 
 interface WaitingRoomProps {
@@ -205,6 +206,19 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
           )}
         </div>
       </div>
+
+      {starting && (
+        <DuoLoading
+          variant="overlay"
+          title={
+            room.mode === 'competition'
+              ? 'جاري فتح ساحة المنافسة للجميع...'
+              : 'جاري فتح السبورة وتشغيل الجلسة للجميع...'
+          }
+          subtitle="سيتم نقل جميع الطلاب المتصلين فوراً بالتزامن"
+          accent="green"
+        />
+      )}
     </div>
   );
 };

@@ -23,7 +23,9 @@ export const defaultFirebaseConfig: FirebaseAppConfig =
   defaultFirebaseConfigJson as FirebaseAppConfig;
 
 const CUSTOM_CONFIG_STORAGE_KEY = 'duoboard_custom_firebase_config_v1';
+const PREV_CONFIGS_STORAGE_KEY = 'duoboard_prev_firebase_configs_v1';
 const PENDING_REJOIN_ROOM_KEY = 'duoboard_pending_rejoin_room';
+const SYNCED_SOURCES_KEY_PREFIX = 'duoboard_synced_sources_v1_';
 
 function toBase64Url(jsonText: string): string {
   const bytes = new TextEncoder().encode(jsonText);
@@ -140,6 +142,75 @@ export function isSameFirebaseTarget(
   return a.projectId === b.projectId && dbA === dbB && a.apiKey === b.apiKey;
 }
 
+export function firebaseTargetKey(config: FirebaseAppConfig): string {
+  const dbId = (config.firestoreDatabaseId || '(default)').trim();
+  return `${config.projectId}::${dbId}`;
+}
+
+export function getPreviousFirebaseConfigs(): FirebaseAppConfig[] {
+  try {
+    const raw = localStorage.getItem(PREV_CONFIGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: FirebaseAppConfig[] = [];
+    for (const item of parsed) {
+      const cfg = sanitizeFirebaseConfig(item);
+      if (cfg && !out.some((x) => isSameFirebaseTarget(x, cfg))) {
+        out.push(cfg);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export function savePreviousFirebaseConfigs(
+  configs: FirebaseAppConfig[],
+  excludeCurrent?: FirebaseAppConfig
+): void {
+  try {
+    const deduped: FirebaseAppConfig[] = [];
+    for (const raw of configs) {
+      const cfg = sanitizeFirebaseConfig(raw);
+      if (!cfg) continue;
+      if (excludeCurrent && isSameFirebaseTarget(cfg, excludeCurrent)) continue;
+      if (!deduped.some((x) => isSameFirebaseTarget(x, cfg))) {
+        deduped.push(cfg);
+      }
+    }
+    localStorage.setItem(PREV_CONFIGS_STORAGE_KEY, JSON.stringify(deduped.slice(0, 8)));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function getSyncedSourceKeys(uid: string): string[] {
+  try {
+    const raw = localStorage.getItem(`${SYNCED_SOURCES_KEY_PREFIX}${uid}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function markSourceKeySynced(uid: string, sourceKey: string): void {
+  try {
+    const prev = getSyncedSourceKeys(uid);
+    if (!prev.includes(sourceKey)) {
+      localStorage.setItem(
+        `${SYNCED_SOURCES_KEY_PREFIX}${uid}`,
+        JSON.stringify([...prev, sourceKey].slice(-20))
+      );
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 function resolveInitialConfig(): {
   config: FirebaseAppConfig;
   isCustom: boolean;
@@ -159,6 +230,19 @@ function resolveInitialConfig(): {
       if (fbParam) {
         const decoded = decodeCompactFirebaseConfig(fbParam);
         if (decoded) {
+          // Record whatever DB the browser was previously using so personal data can sync across
+          const prevList = getPreviousFirebaseConfigs();
+          try {
+            const priorRaw = localStorage.getItem(CUSTOM_CONFIG_STORAGE_KEY);
+            const priorCfg = priorRaw ? sanitizeFirebaseConfig(JSON.parse(priorRaw)) : null;
+            const outgoing = priorCfg ?? defaultFirebaseConfig;
+            if (!isSameFirebaseTarget(outgoing, decoded)) {
+              savePreviousFirebaseConfigs([outgoing, defaultFirebaseConfig, ...prevList], decoded);
+            }
+          } catch {
+            savePreviousFirebaseConfigs([defaultFirebaseConfig, ...prevList], decoded);
+          }
+
           if (isSameFirebaseTarget(decoded, defaultFirebaseConfig)) {
             localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
           } else {
@@ -189,8 +273,11 @@ function resolveInitialConfig(): {
   return { config: defaultFirebaseConfig, isCustom: false };
 }
 
-export function getTargetFirebaseAppName(projectId: string): string {
-  return `duoboard_target_${projectId}`;
+export function getTargetFirebaseAppName(projectId: string, firestoreDatabaseId?: string): string {
+  const dbSeg = (firestoreDatabaseId || 'default')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `duoboard_target_${projectId}_${dbSeg || 'default'}`;
 }
 
 export function createFirestoreInstance(
@@ -212,7 +299,10 @@ export const activeProjectId: string = activeFirebaseConfig.projectId;
 const app = isCustomFirebaseConfig
   ? initializeApp(
       activeFirebaseConfig,
-      getTargetFirebaseAppName(activeFirebaseConfig.projectId)
+      getTargetFirebaseAppName(
+        activeFirebaseConfig.projectId,
+        activeFirebaseConfig.firestoreDatabaseId
+      )
     )
   : initializeApp(activeFirebaseConfig);
 
@@ -227,9 +317,15 @@ export const UPGRADE_FIRESTORE_URL = `https://console.firebase.google.com/projec
 
 export function activateCustomFirebaseConfig(
   config: FirebaseAppConfig,
-  roomId?: string | null
+  roomId?: string | null,
+  extraPreviousConfigs: FirebaseAppConfig[] = []
 ): void {
   try {
+    const existingPrev = getPreviousFirebaseConfigs();
+    savePreviousFirebaseConfigs(
+      [activeFirebaseConfig, defaultFirebaseConfig, ...extraPreviousConfigs, ...existingPrev],
+      config
+    );
     if (isSameFirebaseTarget(config, defaultFirebaseConfig)) {
       localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
     } else {
@@ -245,6 +341,8 @@ export function activateCustomFirebaseConfig(
 
 export function resetToDefaultFirebaseConfig(): void {
   try {
+    const existingPrev = getPreviousFirebaseConfigs();
+    savePreviousFirebaseConfigs([activeFirebaseConfig, ...existingPrev], defaultFirebaseConfig);
     localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
   } catch {
     // Ignore storage errors

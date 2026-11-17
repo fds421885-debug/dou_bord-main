@@ -386,6 +386,58 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPlatformPointer(data) {
+      return data.keys().hasAll([
+          'id', 'projectId', 'apiKey', 'authDomain', 'appId', 'migratedBy', 'migratedByName', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'projectId', 'apiKey', 'authDomain', 'storageBucket', 'messagingSenderId',
+          'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
+          'migratedRoomId', 'previousConfigs', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.projectId is string && data.projectId.size() >= 4 && data.projectId.size() <= 64
+        && data.projectId.matches('^[a-z0-9\\-]+$')
+        && data.apiKey is string && data.apiKey.size() >= 10 && data.apiKey.size() <= 200
+        && data.authDomain is string && data.authDomain.size() >= 4 && data.authDomain.size() <= 200
+        && data.appId is string && data.appId.size() >= 8 && data.appId.size() <= 200
+        && (!('storageBucket' in data) || (data.storageBucket is string && data.storageBucket.size() <= 200))
+        && (!('messagingSenderId' in data) || (data.messagingSenderId is string && data.messagingSenderId.size() <= 64))
+        && (!('measurementId' in data) || (data.measurementId is string && data.measurementId.size() <= 64))
+        && (!('firestoreDatabaseId' in data) || (data.firestoreDatabaseId is string && data.firestoreDatabaseId.size() <= 128))
+        && isValidId(data.migratedBy)
+        && data.migratedBy == request.auth.uid
+        && data.migratedByName is string && data.migratedByName.size() >= 1 && data.migratedByName.size() <= 120
+        && (!('migratedRoomId' in data) || (data.migratedRoomId is string && data.migratedRoomId.size() <= 16))
+        && (!('previousConfigs' in data) || (
+          data.previousConfigs is list
+          && data.previousConfigs.size() <= 10
+          && (data.previousConfigs.size() == 0 || data.previousConfigs[0] is map)
+        ))
+        && data.updatedAt is timestamp;
+    }
+
+    match /platform/{docId} {
+      allow get: if isValidId(docId) && isVerified();
+      allow list: if false;
+      allow create: if isValidId(docId) && isVerified()
+        && isValidPlatformPointer(incoming())
+        && incoming().id == docId
+        && incoming().migratedBy == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(docId) && isVerified()
+        && isValidPlatformPointer(incoming())
+        && incoming().id == existing().id
+        && incoming().migratedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'projectId', 'apiKey', 'authDomain', 'storageBucket', 'messagingSenderId',
+          'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
+          'migratedRoomId', 'previousConfigs', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
     match /users/{userId}/private/{docId} {
       allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
       allow create: if isValidId(userId) && isValidId(docId) && isOwner(userId)

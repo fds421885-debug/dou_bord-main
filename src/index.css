@@ -66,6 +66,11 @@
   transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.duo-progress-track {
+  background-color: #e5e5e5;
+  border-radius: 9999px;
+}
+
 .duo-progress-fill::after {
   content: '';
   position: absolute;
@@ -75,6 +80,18 @@
   height: 4px;
   border-radius: 9999px;
   background: rgba(255, 255, 255, 0.35);
+}
+
+@keyframes duoSlide {
+  0% {
+    transform: translateX(-110%);
+  }
+  50% {
+    transform: translateX(65%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
 }
 
 /* Custom crisp dot-grid whiteboard pattern */

@@ -45,6 +45,7 @@ import {
   DuoGemIcon,
 } from './DuoIcons';
 import { WhiteboardPreview, ZoomablePreviewStage } from './WhiteboardCanvas';
+import { DuoLoading } from './DuoLoading';
 
 interface TestResultsViewProps {
   profile: UserProfile;
@@ -530,9 +531,12 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
       </div>
 
       {loading ? (
-        <div className="duo-card p-12 text-center text-base font-extrabold text-[#777777]">
-          جاري تجميع الأسئلة وصبورات الطلاب وحفظها في حسابك...
-        </div>
+        <DuoLoading
+          variant="card"
+          title="جاري تجميع الأسئلة وصبورات الطلاب وحفظ الاختبار في حسابك..."
+          subtitle="يتم أرشفة جميع الحلول والرسومات والنتائج تلقائياً بأمان"
+          accent="gold"
+        />
       ) : (
         <>
           {/* Leaderboard */}

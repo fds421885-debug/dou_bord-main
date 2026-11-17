@@ -21,19 +21,30 @@ import {
   X,
 } from 'lucide-react';
 import {
+  activateCustomFirebaseConfig,
+  activeFirebaseConfig,
   activeProjectId,
   auth,
   clearPendingRejoinRoom,
   db,
+  firebaseTargetKey,
   getPendingRejoinRoom,
+  getPreviousFirebaseConfigs,
   getTimestampMillis,
   handleFirestoreError,
   isCustomFirebaseConfig,
   isQuadNameValid,
+  isSameFirebaseTarget,
   OperationType,
+  sanitizeFirebaseConfig,
   subscribeQuotaError,
   UPGRADE_FIRESTORE_URL,
 } from './firebase';
+import {
+  syncPersonalAccountFromPreviousDbs,
+  type MigrationProgress,
+  type PlatformMigrationPointer,
+} from './firebaseMigration';
 import {
   loadSessionSnapshot,
   mergeActiveRoomSnapshot,
@@ -51,6 +62,7 @@ import { SavedTestsView } from './components/SavedTestsView';
 import { MyQuizzesView } from './components/MyQuizzesView';
 import { DatabaseMigrationModal } from './components/DatabaseMigrationModal';
 import { DuoOwlEmblem } from './components/DuoIcons';
+import { DuoLoading } from './components/DuoLoading';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -162,12 +174,91 @@ export default function App() {
   const [quotaAlert, setQuotaAlert] = useState<boolean>(false);
   const [migrationModalOpen, setMigrationModalOpen] = useState<boolean>(false);
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
+  const [autoSwitchNotice, setAutoSwitchNotice] = useState<string | null>(null);
+  const [personalSyncProgress, setPersonalSyncProgress] =
+    useState<MigrationProgress | null>(null);
+  const [needsInteractiveSync, setNeedsInteractiveSync] = useState<boolean>(false);
+  const [syncSuccessNotice, setSyncSuccessNotice] = useState<string | null>(null);
 
   useEffect(() => {
     return subscribeQuotaError(() => {
       setQuotaAlert(true);
     });
   }, []);
+
+  // Watch platform/migration pointer safely (never crash on permission-denied on older source rules)
+  useEffect(() => {
+    if (!firebaseUser || !firebaseUser.emailVerified) return;
+    const unsub = onSnapshot(
+      doc(db, 'platform', 'migration'),
+      (snap) => {
+        if (!snap.exists()) return;
+        const ptr = snap.data() as PlatformMigrationPointer;
+        const ptrCfg = sanitizeFirebaseConfig(ptr);
+        if (!ptrCfg || isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
+
+        const targetKey = firebaseTargetKey(ptrCfg);
+        try {
+          if (sessionStorage.getItem('duoboard_auto_switched_to') === targetKey) {
+            return;
+          }
+          sessionStorage.setItem('duoboard_auto_switched_to', targetKey);
+        } catch {
+          // Ignore storage restrictions
+        }
+
+        setAutoSwitchNotice(ptrCfg.projectId);
+        window.setTimeout(() => {
+          activateCustomFirebaseConfig(
+            ptrCfg,
+            ptr.migratedRoomId || activeRoomId || null,
+            Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : []
+          );
+          if (ptr.migratedRoomId) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('fb');
+            url.searchParams.set('room', ptr.migratedRoomId);
+            window.location.href = url.toString();
+          } else {
+            window.location.reload();
+          }
+        }, 700);
+      },
+      () => {
+        // Silent fallback when older project rules don't expose /platform/migration
+      }
+    );
+    return () => unsub();
+  }, [firebaseUser?.uid, firebaseUser?.emailVerified]);
+
+  const handleInteractivePersonalSync = async () => {
+    if (!firebaseUser) return;
+    setPersonalSyncProgress({
+      step: 'signing_in',
+      percent: 12,
+      message: 'جاري تسجيل الدخول السريع لاستيراد بياناتك واختباراتك من القاعدة السابقة...',
+    });
+    try {
+      const res = await syncPersonalAccountFromPreviousDbs({
+        targetUser: firebaseUser,
+        interactiveAuthIfNeeded: true,
+        onProgress: (p) => setPersonalSyncProgress(p),
+      });
+      setNeedsInteractiveSync(res.needsInteractiveSignIn);
+      if (res.synced || res.count > 0) {
+        setSyncSuccessNotice(
+          `تم استيراد ${res.count} عنصر (اختبارات ومحاولات وبيانات الحساب) من القاعدة السابقة بنجاح!`
+        );
+        await loadUserProfile(firebaseUser);
+      } else {
+        setSyncSuccessNotice('حسابك محدّث بالفعل مع القاعدة السابقة.');
+      }
+    } catch {
+      // User closed popup or source DB unavailable
+    } finally {
+      setPersonalSyncProgress(null);
+    }
+  };
 
   const handleEnterRoom = (roomId: string) => {
     setActiveRoomId(roomId);
@@ -198,7 +289,37 @@ export default function App() {
 
       if (snap.exists()) {
         resolvedProfile = snap.data() as UserProfile;
-      } else if (isCustomFirebaseConfig || getPendingRejoinRoom()) {
+      }
+
+      // If arriving on a switched DB with previous DB configs in history, automatically import
+      // personal profile + myQuizzes + savedTests + quizAttempts onto the current DB.
+      if (user.emailVerified && getPreviousFirebaseConfigs().length > 0) {
+        try {
+          const syncRes = await syncPersonalAccountFromPreviousDbs({
+            targetUser: user,
+            interactiveAuthIfNeeded: false,
+            onProgress: (p) => setPersonalSyncProgress(p),
+          });
+          setNeedsInteractiveSync(syncRes.needsInteractiveSignIn);
+          if (syncRes.synced && syncRes.count > 0) {
+            setSyncSuccessNotice(
+              `تم استيراد ${syncRes.count} عنصر من بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة!`
+            );
+          }
+          if (!resolvedProfile) {
+            const refreshedSnap = await getDoc(profileRef);
+            if (refreshedSnap.exists()) {
+              resolvedProfile = refreshedSnap.data() as UserProfile;
+            }
+          }
+        } catch {
+          // Non-fatal; fallback below
+        } finally {
+          setPersonalSyncProgress(null);
+        }
+      }
+
+      if (!resolvedProfile && (isCustomFirebaseConfig || getPendingRejoinRoom())) {
         // When arriving on a newly switched Firebase project via migration/share link,
         // automatically restore the user's 4-part name from local IndexedDB snapshot if present.
         const cachedProfile =
@@ -403,10 +524,20 @@ export default function App() {
 
   if (!authReady || profileLoading) {
     return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-4">
-        <DuoOwlEmblem className="w-16 h-16 animate-bounce" />
-        <p className="text-base font-black text-[#777777]">جاري تجهيز السبورة التفاعلية...</p>
-      </div>
+      <DuoLoading
+        variant="fullscreen"
+        title={
+          personalSyncProgress
+            ? personalSyncProgress.message
+            : 'جاري تجهيز السبورة التفاعلية...'
+        }
+        subtitle={
+          personalSyncProgress?.detail ||
+          'يتم التحقق من جلستك والاتصال بقاعدة البيانات المعتمدة'
+        }
+        percent={personalSyncProgress?.percent}
+        accent="green"
+      />
     );
   }
 
@@ -483,6 +614,26 @@ export default function App() {
   if (!firebaseUser || !profile) {
     return (
       <AppErrorBoundary onOpenMigration={() => setMigrationModalOpen(true)}>
+        {firebaseUser && needsInteractiveSync && (
+          <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-4 py-3">
+            <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
+                <Database className="w-5 h-5 shrink-0" />
+                <span>
+                  أهلاً بك في القاعدة الجديدة! يمكنك استيراد حسابك واختباراتك من القاعدة السابقة بضغطة واحدة.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleInteractivePersonalSync()}
+                className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>استيراد حسابي واختباراتي الآن</span>
+              </button>
+            </div>
+          </div>
+        )}
         <AuthGate
           firebaseUser={firebaseUser}
           profile={profile}
@@ -495,6 +646,15 @@ export default function App() {
           }}
           onOpenMigration={() => setMigrationModalOpen(true)}
         />
+        {personalSyncProgress && (
+          <DuoLoading
+            variant="overlay"
+            title={personalSyncProgress.message}
+            subtitle={personalSyncProgress.detail || 'يرجى الانتظار لحين اكتمال المزامنة...'}
+            percent={personalSyncProgress.percent}
+            accent="purple"
+          />
+        )}
         {migrationModal}
       </AppErrorBoundary>
     );
@@ -642,6 +802,54 @@ export default function App() {
           </div>
         )}
 
+        {/* Auto-import Personal Data Banner when user arrives on a switched DB with unsynced source DBs */}
+        {needsInteractiveSync && !activeRoomId && (
+          <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-3 sm:px-6 py-3">
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
+                <Database className="w-5 h-5 shrink-0" />
+                <span>
+                  تم نقل المنصة إلى قاعدة بيانات جديدة! اضغط لاستيراد اختباراتك المحفوظة ونماذج «اختباراتي» من القاعدة السابقة لحسابك فوراً.
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleInteractivePersonalSync()}
+                  className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs sm:text-sm font-black cursor-pointer"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>استيراد بياناتي واختباراتي الآن</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNeedsInteractiveSync(false)}
+                  className="p-1.5 rounded-lg text-[#1899D6] hover:bg-white/70 cursor-pointer"
+                  title="إخفاء"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {syncSuccessNotice && !activeRoomId && (
+          <div className="bg-[#D7FFB8] border-b-2 border-[#58CC02] px-3 sm:px-6 py-2.5">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm font-black text-[#46A302]">
+              <span>✅ {syncSuccessNotice}</span>
+              <button
+                type="button"
+                onClick={() => setSyncSuccessNotice(null)}
+                className="p-1 rounded-lg hover:bg-white/50 cursor-pointer"
+                title="إغلاق"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Pending Student Rejoin Banner if student opened migration link before supervisor completed room transfer */}
         {pendingRoomNotice && !activeRoomId && (
           <div className="bg-[#FFF4CC] border-b-2 border-[#FFC800] px-3 sm:px-6 py-3">
@@ -667,8 +875,13 @@ export default function App() {
         <main className="flex-1">
           {activeRoomId ? (
             !room ? (
-              <div className="max-w-3xl mx-auto px-4 py-16 text-center">
-                <p className="text-base font-black text-[#777777]">جاري الاتصال بالغرفة...</p>
+              <div className="max-w-3xl mx-auto px-4 py-12">
+                <DuoLoading
+                  variant="card"
+                  title="جاري الاتصال بالغرفة..."
+                  subtitle="يتم الآن مزامنة الأسئلة والشرائح والصبورات مع القاعدة الحالية"
+                  accent="blue"
+                />
               </div>
             ) : room.status === 'waiting' ? (
               <WaitingRoom
@@ -716,6 +929,24 @@ export default function App() {
           )}
         </main>
       </div>
+      {autoSwitchNotice && (
+        <DuoLoading
+          variant="overlay"
+          title="تم اعتماد قاعدة بيانات جديدة للمنصة!"
+          subtitle={`جاري تحويلك تلقائياً إلى المشروع (${autoSwitchNotice}) لاستكمال العمل...`}
+          percent={100}
+          accent="blue"
+        />
+      )}
+      {personalSyncProgress && (
+        <DuoLoading
+          variant="overlay"
+          title={personalSyncProgress.message}
+          subtitle={personalSyncProgress.detail || 'يرجى الانتظار لحين اكتمال المزامنة...'}
+          percent={personalSyncProgress.percent}
+          accent="purple"
+        />
+      )}
       {migrationModal}
     </AppErrorBoundary>
   );

@@ -18,6 +18,7 @@ import { MathText } from '../mathText';
 import { applySnippet, MathToolbar } from './MathToolbar';
 import { QuizChartEditor } from './QuizChartEditor';
 import { QuizFigureEditor } from './QuizFigureEditor';
+import { DuoLoading } from './DuoLoading';
 import {
   cleanQuestions,
   createMyQuiz,
@@ -485,6 +486,14 @@ export const QuizEditor: React.FC<Props> = ({
           رجوع
         </button>
       </div>
+      {saving && (
+        <DuoLoading
+          variant="overlay"
+          title="جاري حفظ الاختبار والأشكال الهندسية..."
+          subtitle="يتم مزامنة الأسئلة والرسومات مع قاعدة البيانات بأمان"
+          accent="green"
+        />
+      )}
     </div>
   );
 };

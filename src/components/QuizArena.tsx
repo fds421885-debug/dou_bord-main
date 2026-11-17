@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   collection,
   deleteDoc,
@@ -266,6 +266,15 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const explainUploadIntentRef = useRef<'append' | 'replaceAll' | 'replaceFile'>('replaceAll');
   const explainReplaceTargetGroupRef = useRef<SlideFileGroup | null>(null);
   const lastExplainEditAtRef = useRef<number>(0);
+  const lastStudentEditAtRef = useRef<number>(0);
+  const explainWriteInFlightRef = useRef<boolean>(false);
+  const pendingExplainSaveRef = useRef<{ slideId: string | null; strokes: Stroke[] } | null>(null);
+  const boardWriteInFlightRef = useRef<boolean>(false);
+  const pendingBoardSaveRef = useRef<{
+    questionId: string;
+    strokes: Stroke[];
+    submitted: boolean;
+  } | null>(null);
   const hydratedDraftKeyRef = useRef<string | null>(null);
   const lastInheritedQuestionIdRef = useRef<string | null>(null);
   const fallbackStartMapRef = useRef<Record<string, number>>({});
@@ -621,12 +630,23 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   );
 
   useEffect(() => {
+    lastStudentEditAtRef.current = 0;
+    pendingBoardSaveRef.current = null;
+  }, [currentQuestion?.id]);
+
+  useEffect(() => {
     if (!currentQuestion) {
       setLocalStrokes([]);
       return;
     }
     if (myBoard) {
-      setLocalStrokes(myBoard.strokes || []);
+      const remoteStrokes = myBoard.strokes || [];
+      if (
+        (remoteStrokes.length === 0 && !boardWriteInFlightRef.current && !pendingBoardSaveRef.current) ||
+        Date.now() - lastStudentEditAtRef.current > 1000
+      ) {
+        setLocalStrokes(remoteStrokes);
+      }
     } else {
       setLocalStrokes([]);
       if (!isSupervisor) {
@@ -647,7 +667,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         };
       }
     }
-  }, [currentQuestion?.id, myBoard?.studentId, isSupervisor, room.id, profile.uid, profile.fullNameQuad]);
+  }, [currentQuestion?.id, myBoard?.studentId, myBoard?.strokes, isSupervisor, room.id, profile.uid, profile.fullNameQuad]);
 
   // Sound feedback when question resolves
   const prevQStatusRef = useRef<string | null>(null);
@@ -1161,8 +1181,87 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     }
   };
 
+  // Serialized writer for Explain Mode layers so fast strokes never race or drop
+  const flushExplainSaveQueue = useCallback(async () => {
+    if (explainWriteInFlightRef.current) return;
+    const task = pendingExplainSaveRef.current;
+    if (!task) return;
+
+    pendingExplainSaveRef.current = null;
+    explainWriteInFlightRef.current = true;
+
+    const { slideId, strokes } = task;
+    if (slideId) {
+      const layerPath = `rooms/${room.id}/slides/${slideId}/layers/${profile.uid}`;
+      const layerRef = doc(db, 'rooms', room.id, 'slides', slideId, 'layers', profile.uid);
+      try {
+        await updateDoc(layerRef, {
+          strokes,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('NOT_FOUND') || msg.includes('No document to update')) {
+          try {
+            await setDoc(layerRef, {
+              id: profile.uid,
+              roomId: room.id,
+              slideId,
+              authorId: profile.uid,
+              authorName: profile.fullNameQuad,
+              strokes,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (innerErr) {
+            handleFirestoreError(innerErr, OperationType.WRITE, layerPath);
+          }
+        } else {
+          handleFirestoreError(err, OperationType.WRITE, layerPath);
+        }
+      } finally {
+        explainWriteInFlightRef.current = false;
+        if (pendingExplainSaveRef.current) {
+          void flushExplainSaveQueue();
+        }
+      }
+      return;
+    }
+
+    const layerPath = `rooms/${room.id}/explainLayers/${profile.uid}`;
+    const layerRef = doc(db, 'rooms', room.id, 'explainLayers', profile.uid);
+    try {
+      await updateDoc(layerRef, {
+        strokes,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('NOT_FOUND') || msg.includes('No document to update')) {
+        try {
+          await setDoc(layerRef, {
+            id: profile.uid,
+            roomId: room.id,
+            authorId: profile.uid,
+            authorName: profile.fullNameQuad,
+            strokes,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (innerErr) {
+          handleFirestoreError(innerErr, OperationType.WRITE, layerPath);
+        }
+      } else {
+        handleFirestoreError(err, OperationType.WRITE, layerPath);
+      }
+    } finally {
+      explainWriteInFlightRef.current = false;
+      if (pendingExplainSaveRef.current) {
+        void flushExplainSaveQueue();
+      }
+    }
+  }, [room.id, profile.uid, profile.fullNameQuad]);
+
   // Collaborative per-user layer sync in Explain Mode (works for blank board OR active PDF/image slide)
-  const handleExplainLayerStrokesChange = async (nextStrokes: Stroke[]) => {
+  const handleExplainLayerStrokesChange = (nextStrokes: Stroke[]) => {
     const isBlocked = !isSupervisor && explainBlockedIds.includes(profile.uid);
     const canDraw =
       isSupervisor ||
@@ -1174,61 +1273,14 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     if (!canDraw) return;
 
     lastExplainEditAtRef.current = Date.now();
-
     if (activeExplainSlide) {
       setLocalSlideExplainStrokes(nextStrokes);
-      const slideId = activeExplainSlide.id;
-      const layerPath = `rooms/${room.id}/slides/${slideId}/layers/${profile.uid}`;
-      const layerRef = doc(db, 'rooms', room.id, 'slides', slideId, 'layers', profile.uid);
-      const existingMine = explainSlideLayers.find((l) => l.authorId === profile.uid);
-
-      try {
-        if (!existingMine) {
-          await setDoc(layerRef, {
-            id: profile.uid,
-            roomId: room.id,
-            slideId,
-            authorId: profile.uid,
-            authorName: profile.fullNameQuad,
-            strokes: nextStrokes,
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          await updateDoc(layerRef, {
-            strokes: nextStrokes,
-            updatedAt: serverTimestamp(),
-          });
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, layerPath);
-      }
-      return;
+      pendingExplainSaveRef.current = { slideId: activeExplainSlide.id, strokes: nextStrokes };
+    } else {
+      setLocalExplainStrokes(nextStrokes);
+      pendingExplainSaveRef.current = { slideId: null, strokes: nextStrokes };
     }
-
-    setLocalExplainStrokes(nextStrokes);
-    const layerPath = `rooms/${room.id}/explainLayers/${profile.uid}`;
-    const layerRef = doc(db, 'rooms', room.id, 'explainLayers', profile.uid);
-    const existingMine = explainLayers.find((l) => l.id === profile.uid);
-
-    try {
-      if (!existingMine) {
-        await setDoc(layerRef, {
-          id: profile.uid,
-          roomId: room.id,
-          authorId: profile.uid,
-          authorName: profile.fullNameQuad,
-          strokes: nextStrokes,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(layerRef, {
-          strokes: nextStrokes,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, layerPath);
-    }
+    void flushExplainSaveQueue();
   };
 
   // Supervisor: direct Eraser tool sweep erases ANY student's strokes on contact
@@ -1659,57 +1711,93 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     }
   };
 
-  // Student: save board strokes live
-  const syncStudentBoard = async (strokes: Stroke[], submitted: boolean) => {
-    if (!currentQuestion || isSupervisor) return;
+  // Serialized student board writer so fast strokes never race or lose the final segment
+  const flushStudentBoardQueue = useCallback(async () => {
+    if (boardWriteInFlightRef.current) return;
+    const task = pendingBoardSaveRef.current;
+    if (!task) return;
+
+    pendingBoardSaveRef.current = null;
+    boardWriteInFlightRef.current = true;
+
+    const { questionId, strokes, submitted } = task;
     const boardRef = doc(
       db,
       'rooms',
       room.id,
       'questions',
-      currentQuestion.id,
+      questionId,
       'boards',
       profile.uid
     );
-    const bPath = `rooms/${room.id}/questions/${currentQuestion.id}/boards/${profile.uid}`;
+    const bPath = `rooms/${room.id}/questions/${questionId}/boards/${profile.uid}`;
 
     try {
-      if (!myBoard) {
-        await setDoc(boardRef, {
-          studentId: profile.uid,
-          studentName: profile.fullNameQuad,
-          roomId: room.id,
-          questionId: currentQuestion.id,
-          strokes,
-          submitted,
-          verdict: 'pending',
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(boardRef, {
-          strokes,
-          submitted,
-          updatedAt: serverTimestamp(),
-        });
-      }
+      await updateDoc(boardRef, {
+        strokes,
+        submitted,
+        updatedAt: serverTimestamp(),
+      });
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, bPath);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('NOT_FOUND') || msg.includes('No document to update')) {
+        try {
+          await setDoc(boardRef, {
+            studentId: profile.uid,
+            studentName: profile.fullNameQuad,
+            roomId: room.id,
+            questionId,
+            strokes,
+            submitted,
+            verdict: 'pending',
+            updatedAt: serverTimestamp(),
+          });
+        } catch (innerErr) {
+          handleFirestoreError(innerErr, OperationType.WRITE, bPath);
+        }
+      } else {
+        handleFirestoreError(err, OperationType.WRITE, bPath);
+      }
+    } finally {
+      boardWriteInFlightRef.current = false;
+      if (pendingBoardSaveRef.current) {
+        void flushStudentBoardQueue();
+      }
     }
-  };
+  }, [room.id, profile.uid, profile.fullNameQuad]);
 
   const handleStrokesChange = (next: Stroke[]) => {
     if (isTimeUp) return;
+    lastStudentEditAtRef.current = Date.now();
     setLocalStrokes(next);
     if (!currentQuestion || currentQuestion.status !== 'solving') return;
     if (myBoard?.submitted || myBoard?.verdict === 'wrong') return;
-    void syncStudentBoard(next, false);
+    pendingBoardSaveRef.current = {
+      questionId: currentQuestion.id,
+      strokes: next,
+      submitted: false,
+    };
+    void flushStudentBoardQueue();
   };
 
   const handleStudentSubmit = async () => {
     if (!currentQuestion || submittingBoard || isSupervisor || isTimeUp) return;
     setSubmittingBoard(true);
     try {
-      await syncStudentBoard(localStrokes, true);
+      lastStudentEditAtRef.current = Date.now();
+      pendingBoardSaveRef.current = null;
+      // Wait briefly if a live stroke write is mid-flight before final submission
+      let waitLoops = 0;
+      while (boardWriteInFlightRef.current && waitLoops < 20) {
+        await new Promise((r) => setTimeout(r, 40));
+        waitLoops++;
+      }
+      pendingBoardSaveRef.current = {
+        questionId: currentQuestion.id,
+        strokes: localStrokes,
+        submitted: true,
+      };
+      await flushStudentBoardQueue();
       playDuoSound('pop');
     } finally {
       setSubmittingBoard(false);
@@ -2629,7 +2717,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
             strokes={activeExplainMineStrokes}
             backgroundImage={activeExplainSlide?.imageData || undefined}
             overlayStrokeLayers={otherExplainOverlayLayers}
-            onStrokesChange={(next) => void handleExplainLayerStrokesChange(next)}
+            onStrokesChange={handleExplainLayerStrokesChange}
             onEraserSweep={
               isSupervisor
                 ? (eraserStroke) => void handleSupervisorEraserSweep(eraserStroke)
@@ -2641,7 +2729,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                 ? 'أوقف المشرف الكتابة عنك مؤقتاً — يمكنك المشاهدة والتكبير فقط'
                 : 'وضع المشاهدة المباشرة — يمكنك التكبير أو التحريك لمتابعة الشرح'
             }
-            syncIntervalMs={600}
+            syncIntervalMs={240}
             heightClass="h-[320px] sm:h-[460px] md:h-[560px]"
           />
         </div>
@@ -4112,6 +4200,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                 ? 'h-[310px] sm:h-[460px] md:h-[560px]'
                 : undefined
             }
+            syncIntervalMs={240}
             disabled={studentLockedInfo.locked}
             lockTitle={studentLockedInfo.title}
             lockSubtitle={studentLockedInfo.subtitle}

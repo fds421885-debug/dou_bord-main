@@ -37,6 +37,42 @@ const PEN_SIZES = [
   { label: 'عريض', size: 22 },
 ];
 
+function drawStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke,
+  transparentBg: boolean
+) {
+  const pts = stroke.pts;
+  if (!pts || pts.length < 2) return;
+
+  ctx.beginPath();
+  if (stroke.isEraser && transparentBg) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.strokeStyle = 'rgba(0,0,0,1)';
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = stroke.isEraser ? '#FFFFFF' : stroke.color;
+  }
+  ctx.lineWidth = stroke.isEraser ? Math.max(stroke.width * 2.4, 24) : stroke.width;
+
+  ctx.moveTo(pts[0], pts[1]);
+  if (pts.length === 2) {
+    ctx.lineTo(pts[0] + 0.1, pts[1] + 0.1);
+  } else {
+    for (let i = 2; i < pts.length; i += 2) {
+      const prevX = pts[i - 2];
+      const prevY = pts[i - 1];
+      const currX = pts[i];
+      const currY = pts[i + 1];
+      const midX = (prevX + currX) / 2;
+      const midY = (prevY + currY) / 2;
+      ctx.quadraticCurveTo(prevX, prevY, midX, midY);
+    }
+    ctx.lineTo(pts[pts.length - 2], pts[pts.length - 1]);
+  }
+  ctx.stroke();
+}
+
 export function renderStrokesToCanvas(
   ctx: CanvasRenderingContext2D,
   strokes: Stroke[],
@@ -59,35 +95,7 @@ export function renderStrokesToCanvas(
   ctx.lineJoin = 'round';
 
   for (const stroke of strokes) {
-    const pts = stroke.pts;
-    if (!pts || pts.length < 2) continue;
-
-    ctx.beginPath();
-    if (stroke.isEraser && transparentBg) {
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.strokeStyle = 'rgba(0,0,0,1)';
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = stroke.isEraser ? '#FFFFFF' : stroke.color;
-    }
-    ctx.lineWidth = stroke.isEraser ? Math.max(stroke.width * 2.4, 24) : stroke.width;
-
-    ctx.moveTo(pts[0], pts[1]);
-    if (pts.length === 2) {
-      ctx.lineTo(pts[0] + 0.1, pts[1] + 0.1);
-    } else {
-      for (let i = 2; i < pts.length; i += 2) {
-        const prevX = pts[i - 2];
-        const prevY = pts[i - 1];
-        const currX = pts[i];
-        const currY = pts[i + 1];
-        const midX = (prevX + currX) / 2;
-        const midY = (prevY + currY) / 2;
-        ctx.quadraticCurveTo(prevX, prevY, midX, midY);
-      }
-      ctx.lineTo(pts[pts.length - 2], pts[pts.length - 1]);
-    }
-    ctx.stroke();
+    drawStroke(ctx, stroke, transparentBg);
   }
   ctx.restore();
 }
@@ -286,8 +294,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   lockSubtitle = 'بانتظار المشرف لإدراج السؤال',
   heightClass = 'h-[250px] sm:h-[380px] md:h-[490px] lg:h-[540px]',
 }) => {
+  const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const tempOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
   const [tool, setTool] = useState<'pen' | 'eraser' | 'pan'>('pen');
@@ -324,29 +334,90 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     origY: 0,
   });
   const activeStrokeRef = useRef<Stroke | null>(null);
+  const erasedPtCursorRef = useRef<number>(0);
   const localStrokesRef = useRef<Stroke[]>(strokes);
   const lastSyncRef = useRef<number>(0);
+  const rafIdRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    if (!isDrawingRef.current) {
-      localStrokesRef.current = strokes;
-    }
-  }, [strokes]);
+  const redrawCommitted = useCallback(() => {
+    const committed = committedCanvasRef.current;
+    if (!committed) return;
+    const ctx = committed.getContext('2d');
+    if (!ctx) return;
+    renderStrokesToCanvas(ctx, localStrokesRef.current, BOARD_WIDTH, BOARD_HEIGHT, true);
+  }, []);
 
-  const redraw = useCallback(() => {
+  const redrawActive = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const combined = activeStrokeRef.current
-      ? [...localStrokesRef.current, activeStrokeRef.current]
-      : localStrokesRef.current;
-    renderStrokesToCanvas(ctx, combined, BOARD_WIDTH, BOARD_HEIGHT, true);
+
+    ctx.clearRect(0, 0, BOARD_WIDTH, BOARD_HEIGHT);
+    const active = activeStrokeRef.current;
+    if (!active) return;
+
+    if (active.isEraser) {
+      // Carve newly added eraser points incrementally onto committedCanvasRef in O(delta)
+      const committed = committedCanvasRef.current;
+      const cCtx = committed?.getContext('2d');
+      const pts = active.pts;
+      if (cCtx && pts.length >= 2) {
+        const startIdx = Math.max(0, erasedPtCursorRef.current - 2);
+        const deltaPts = pts.slice(startIdx);
+        if (deltaPts.length >= 2) {
+          cCtx.save();
+          cCtx.lineCap = 'round';
+          cCtx.lineJoin = 'round';
+          drawStroke(cCtx, { ...active, pts: deltaPts }, true);
+          cCtx.restore();
+        }
+        erasedPtCursorRef.current = pts.length;
+      }
+      // Show subtle eraser ring indicator on active canvas
+      const lx = pts[pts.length - 2];
+      const ly = pts[pts.length - 1];
+      if (lx !== undefined && ly !== undefined) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lx, ly, Math.max(active.width * 1.2, 12), 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(24, 153, 214, 0.55)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+      return;
+    }
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    drawStroke(ctx, active, true);
+    ctx.restore();
+  }, []);
+
+  const scheduleActiveRedraw = useCallback(() => {
+    if (rafIdRef.current !== null) return;
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      redrawActive();
+    });
+  }, [redrawActive]);
+
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
-    redraw();
-  }, [strokes, redraw]);
+    if (!isDrawingRef.current) {
+      localStrokesRef.current = strokes;
+      redrawCommitted();
+    }
+  }, [strokes, redrawCommitted]);
 
   useEffect(() => {
     const overlayCanvas = overlayCanvasRef.current;
@@ -356,9 +427,13 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     ctx.clearRect(0, 0, BOARD_WIDTH, BOARD_HEIGHT);
     if (overlayStrokeLayers.length === 0) return;
 
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = BOARD_WIDTH;
-    tempCanvas.height = BOARD_HEIGHT;
+    if (!tempOverlayCanvasRef.current) {
+      const tc = document.createElement('canvas');
+      tc.width = BOARD_WIDTH;
+      tc.height = BOARD_HEIGHT;
+      tempOverlayCanvasRef.current = tc;
+    }
+    const tempCanvas = tempOverlayCanvasRef.current;
     const tempCtx = tempCanvas.getContext('2d');
     if (!tempCtx) return;
 
@@ -389,8 +464,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     if (pointersRef.current.size === 2) {
       isDrawingRef.current = false;
       activeStrokeRef.current = null;
+      erasedPtCursorRef.current = 0;
       isPanningRef.current = false;
-      redraw();
+      redrawCommitted();
+      redrawActive();
 
       const pts = Array.from(pointersRef.current.values()) as Array<{ x: number; y: number }>;
       const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
@@ -438,13 +515,15 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     e.currentTarget.setPointerCapture(e.pointerId);
 
     isDrawingRef.current = true;
+    erasedPtCursorRef.current = 0;
+    lastSyncRef.current = Date.now();
     activeStrokeRef.current = {
       color,
       width: penSize,
       isEraser: tool === 'eraser',
       pts: [pt.x, pt.y],
     };
-    redraw();
+    redrawActive();
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -481,23 +560,36 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     }
 
     if (!isDrawingRef.current || !activeStrokeRef.current || disabled || viewOnly) return;
-    const pt = getBoardPoint(e.clientX, e.clientY);
-    if (!pt) return;
+
+    const nativeEvt = e.nativeEvent as PointerEvent;
+    const coalesced =
+      typeof nativeEvt.getCoalescedEvents === 'function'
+        ? nativeEvt.getCoalescedEvents()
+        : null;
+    const eventsToProcess = coalesced && coalesced.length > 0 ? coalesced : [nativeEvt];
 
     const pts = activeStrokeRef.current.pts;
-    const lastX = pts[pts.length - 2];
-    const lastY = pts[pts.length - 1];
-    const dist = Math.hypot(pt.x - lastX, pt.y - lastY);
-    if (dist < 3) return;
+    let appended = false;
 
-    // Cap per-stroke points so documents stay lightweight
-    if (pts.length < 700) {
-      pts.push(pt.x, pt.y);
-      redraw();
+    for (const ce of eventsToProcess) {
+      if (pts.length >= 700) break;
+      const pt = getBoardPoint(ce.clientX, ce.clientY);
+      if (!pt) continue;
+      const lastX = pts[pts.length - 2];
+      const lastY = pts[pts.length - 1];
+      const dist = Math.hypot(pt.x - lastX, pt.y - lastY);
+      if (dist >= 1.8) {
+        pts.push(pt.x, pt.y);
+        appended = true;
+      }
+    }
+
+    if (appended) {
+      scheduleActiveRedraw();
     }
 
     const now = Date.now();
-    if (now - lastSyncRef.current > syncIntervalMs) {
+    if (now - lastSyncRef.current >= syncIntervalMs && pts.length >= 2) {
       lastSyncRef.current = now;
       const strokeCopy = { ...activeStrokeRef.current, pts: [...pts] };
       if (strokeCopy.isEraser && onEraserSweep) {
@@ -520,14 +612,20 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     }
     if (!isDrawingRef.current || !activeStrokeRef.current) return;
     isDrawingRef.current = false;
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     const finished = activeStrokeRef.current;
     activeStrokeRef.current = null;
+    erasedPtCursorRef.current = 0;
     if (finished.isEraser && onEraserSweep) {
       onEraserSweep(finished);
     }
     const next = [...localStrokesRef.current, finished].slice(-380);
     localStrokesRef.current = next;
-    redraw();
+    redrawCommitted();
+    redrawActive();
     onStrokesChange(next);
   };
 
@@ -542,14 +640,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     if (disabled || localStrokesRef.current.length === 0) return;
     const next = localStrokesRef.current.slice(0, -1);
     localStrokesRef.current = next;
-    redraw();
+    redrawCommitted();
+    redrawActive();
     onStrokesChange(next);
   };
 
   const handleClear = () => {
     if (disabled || localStrokesRef.current.length === 0) return;
     localStrokesRef.current = [];
-    redraw();
+    redrawCommitted();
+    redrawActive();
     onStrokesChange([]);
   };
 
@@ -835,6 +935,12 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             )}
             <canvas
               ref={overlayCanvasRef}
+              width={BOARD_WIDTH}
+              height={BOARD_HEIGHT}
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
+            <canvas
+              ref={committedCanvasRef}
               width={BOARD_WIDTH}
               height={BOARD_HEIGHT}
               className="absolute inset-0 w-full h-full pointer-events-none"

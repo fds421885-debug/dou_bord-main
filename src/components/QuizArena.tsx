@@ -802,7 +802,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               `ملف (${i + 1}/${validPdfs.length}): ${file.name} — صفحة ${current} من ${total} (محلياً لدى المشرف فقط)...`
             );
           },
-          30
+          100
         );
         if (pages.length > 0) {
           addedDocs.push({

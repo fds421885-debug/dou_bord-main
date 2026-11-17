@@ -19,7 +19,7 @@ function canvasToBoundedJpeg(canvas: HTMLCanvasElement, maxLength = 440000): str
 export async function renderPdfToSlideImages(
   file: File,
   onProgress?: (current: number, total: number) => void,
-  maxPages = 25
+  maxPages = 100
 ): Promise<string[]> {
   const buffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
@@ -57,6 +57,7 @@ export async function renderPdfToSlideImages(
     }).promise;
 
     pages.push(canvasToBoundedJpeg(canvas));
+    page.cleanup();
   }
 
   return pages;

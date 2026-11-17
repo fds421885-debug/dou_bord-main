@@ -30,7 +30,7 @@ import type {
 } from './types';
 
 export const MAX_ROOM_SLIDES = 100;
-export const MAX_PAGES_PER_PDF = 25;
+export const MAX_PAGES_PER_PDF = 100;
 
 export interface SlideFileGroup {
   fileId: string;

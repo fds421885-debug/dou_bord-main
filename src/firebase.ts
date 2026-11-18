@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import {
   clearStaleRoomAndSessionKeys,
+  clearSwitchRequiresLogin,
   CONSOLIDATED_FROM_SESSION_KEY,
   CURRENT_DB_EPOCH,
   CUSTOM_CONFIG_STORAGE_KEY,
@@ -16,8 +17,10 @@ import {
   firebaseTargetKey,
   getInitialServerPlatformStatus,
   getPreviousFirebaseConfigs,
+  hasSwitchRequiresLogin,
   isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  markSwitchRequiresLogin,
   MASTER_PROGRAMMER_EMAIL,
   MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
@@ -33,13 +36,16 @@ import {
 } from './firebaseConfigBootstrap';
 
 export {
+  clearSwitchRequiresLogin,
   CURRENT_DB_EPOCH,
   defaultFirebaseConfig,
   firebaseTargetKey,
   getInitialServerPlatformStatus,
   getPreviousFirebaseConfigs,
+  hasSwitchRequiresLogin,
   isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  markSwitchRequiresLogin,
   MASTER_PROGRAMMER_EMAIL,
   MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
@@ -212,6 +218,7 @@ function resolveInitialConfig(): {
           } catch {
             // Ignore sessionStorage restrictions
           }
+          markSwitchRequiresLogin(defaultFirebaseConfig);
 
           return {
             config: defaultFirebaseConfig,

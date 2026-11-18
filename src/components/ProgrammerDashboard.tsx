@@ -32,6 +32,7 @@ import {
   buildCleanPrimaryUrl,
   defaultFirebaseConfig,
   isSameFirebaseTarget,
+  markSwitchRequiresLogin,
   resetToDefaultFirebaseConfig,
   type FirebaseAppConfig,
 } from '../firebase';
@@ -109,6 +110,12 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
 
   // Banners
   const [actionBusy, setActionBusy] = useState(false);
+  const [directSwitchProgress, setDirectSwitchProgress] = useState<{
+    percent: number;
+    title: string;
+    subtitle: string;
+    detail?: string;
+  } | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
@@ -236,6 +243,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
         currentRoom,
         isSupervisorInCurrentRoom,
         cleanupOldDatabase,
+        poolState,
         onProgress: (p) => setMigrationProgress(p),
       });
 
@@ -280,6 +288,12 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
     setErrorNotice(null);
     setStatusNotice(null);
     setActionBusy(true);
+    setDirectSwitchProgress({
+      percent: 20,
+      title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
+      subtitle: `جاري اعتماد القاعدة #${entry.order} (${entry.config.projectId}) لجميع المستخدمين...`,
+      detail: 'تحديث الخادم والروابط المعتمدة',
+    });
     try {
       try {
         sessionStorage.setItem(
@@ -298,6 +312,14 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
       onPoolStateUpdated(res.state);
       playDuoSound('correct');
 
+      setDirectSwitchProgress({
+        percent: 62,
+        title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
+        subtitle: 'يتم الآن تسجيل الخروج من القاعدة السابقة وتجهيز القاعدة المعتمدة الجديدة',
+        detail: entry.config.projectId,
+      });
+
+      markSwitchRequiresLogin(entry.config);
       await signOut(auth).catch(() => {});
       if (isSameFirebaseTarget(entry.config, defaultFirebaseConfig)) {
         resetToDefaultFirebaseConfig();
@@ -308,6 +330,14 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           poolState.databases.map((d) => d.config as FirebaseAppConfig)
         );
       }
+
+      setDirectSwitchProgress({
+        percent: 100,
+        title: 'تم تحديث القاعدة المعتمدة للجميع!',
+        subtitle: 'جاري الانتقال الآن لتسجيل الدخول على القاعدة الجديدة...',
+        detail: entry.config.projectId,
+      });
+
       window.setTimeout(() => {
         try {
           sessionStorage.removeItem('duoboard_self_migrated_target');
@@ -315,9 +345,10 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           // Ignore
         }
         window.location.replace(buildCleanPrimaryUrl());
-      }, 450);
+      }, 480);
     } catch (err) {
       setErrorNotice(err instanceof Error ? err.message : 'تعذر التبديل الفوري للقاعدة.');
+      setDirectSwitchProgress(null);
       setActionBusy(false);
     }
   };
@@ -1097,6 +1128,17 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {directSwitchProgress && (
+        <DuoLoading
+          variant="overlay"
+          title={directSwitchProgress.title}
+          subtitle={directSwitchProgress.subtitle}
+          detail={directSwitchProgress.detail}
+          percent={directSwitchProgress.percent}
+          accent="blue"
+        />
       )}
     </div>
   );

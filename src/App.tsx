@@ -29,6 +29,7 @@ import {
   auth,
   buildCleanPrimaryUrl,
   clearPendingRejoinRoom,
+  clearSwitchRequiresLogin,
   consumeConsolidatedProjectNotice,
   CURRENT_DB_EPOCH,
   db,
@@ -40,11 +41,13 @@ import {
   getTimestampMillis,
   googleProvider,
   handleFirestoreError,
+  hasSwitchRequiresLogin,
   isCustomFirebaseConfig,
   isMasterProgrammerIdentity,
   isQuadNameValid,
   isSameFirebaseTarget,
   justConsolidatedFrom,
+  markSwitchRequiresLogin,
   OperationType,
   resetToDefaultFirebaseConfig,
   resolveLatestFirestoreMigrationRest,
@@ -193,7 +196,14 @@ export default function App() {
   const [programmerLoading, setProgrammerLoading] = useState<boolean>(false);
   const [programmerError, setProgrammerError] = useState<string | null>(null);
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
-  const [autoSwitchNotice, setAutoSwitchNotice] = useState<string | null>(null);
+  const [autoSwitchNotice, setAutoSwitchNotice] = useState<{
+    targetProjectId: string;
+    reason: 'programmer' | 'quota';
+    percent: number;
+    title: string;
+    subtitle: string;
+    detail?: string;
+  } | null>(null);
   const [personalSyncProgress, setPersonalSyncProgress] =
     useState<MigrationProgress | null>(null);
   const [needsInteractiveSync, setNeedsInteractiveSync] = useState<boolean>(false);
@@ -205,9 +215,11 @@ export default function App() {
   useEffect(() => {
     if (!justConsolidatedFrom) return;
     let cancelled = false;
+    markSwitchRequiresLogin(defaultFirebaseConfig);
     const timer = window.setTimeout(async () => {
       if (cancelled) return;
       try {
+        await signOut(auth).catch(() => {});
         if ('caches' in window) {
           const keys = await window.caches.keys();
           await Promise.all(keys.map((k) => window.caches.delete(k)));
@@ -233,6 +245,7 @@ export default function App() {
   firebaseUserRef.current = firebaseUser;
   const switchingInProgressRef = useRef(false);
   const failoverInProgressRef = useRef(false);
+  const lastSeenPoolTagRef = useRef<string>('');
 
   const applyRemotePlatformPointer = useCallback(
     (incoming: {
@@ -241,6 +254,7 @@ export default function App() {
       migratedRoomId?: string | null;
       previousConfigs?: FirebaseAppConfig[];
       revision?: string | number;
+      reason?: 'programmer' | 'quota';
     }) => {
       if (justConsolidatedFrom || switchingInProgressRef.current) return;
       const ptrCfg = sanitizeFirebaseConfig(incoming.config);
@@ -275,7 +289,24 @@ export default function App() {
       }
 
       switchingInProgressRef.current = true;
-      setAutoSwitchNotice(wantsDefault ? defaultFirebaseConfig.projectId : ptrCfg.projectId);
+      const reason = incoming.reason === 'quota' ? 'quota' : 'programmer';
+      const destCfg = wantsDefault ? defaultFirebaseConfig : ptrCfg;
+      const destProject = destCfg.projectId;
+
+      setAutoSwitchNotice({
+        targetProjectId: destProject,
+        reason,
+        percent: 24,
+        title:
+          reason === 'quota'
+            ? 'جاري التحميل — التحويل لقاعدة بديلة...'
+            : 'جاري التحميل، الرجاء الانتظار قليلاً...',
+        subtitle:
+          reason === 'quota'
+            ? 'انتهت سعة القاعدة الحالية — يتم الآن نقلك تلقائياً إلى القاعدة الاحتياطية وتجهيز تسجيل الدخول'
+            : 'قام المبرمج بتحديث قاعدة البيانات المعتمدة — جاري نقلك تلقائياً لتسجيل الدخول واستكمال العمل',
+        detail: `القاعدة المعتمدة: ${destProject}`,
+      });
 
       const currentUserPresent = Boolean(firebaseUserRef.current);
       const currentRoomPresent = activeRoomIdRef.current;
@@ -285,6 +316,17 @@ export default function App() {
           (currentUserPresent && incoming.migratedRoomId ? incoming.migratedRoomId : null);
 
       window.setTimeout(async () => {
+        setAutoSwitchNotice((prev) =>
+          prev
+            ? {
+                ...prev,
+                percent: 62,
+                subtitle: 'يتم الآن تحديث إعدادات الاتصال وفصل الجلسة السابقة...',
+              }
+            : null
+        );
+
+        markSwitchRequiresLogin(destCfg);
         try {
           await signOut(auth);
         } catch {
@@ -293,24 +335,40 @@ export default function App() {
 
         if (wantsDefault) {
           resetToDefaultFirebaseConfig();
-          window.location.replace(buildCleanPrimaryUrl());
-          return;
+        } else {
+          activateCustomFirebaseConfig(
+            ptrCfg,
+            roomToKeep,
+            Array.isArray(incoming.previousConfigs) ? incoming.previousConfigs : []
+          );
         }
 
-        activateCustomFirebaseConfig(
-          ptrCfg,
-          roomToKeep,
-          Array.isArray(incoming.previousConfigs) ? incoming.previousConfigs : []
+        setAutoSwitchNotice((prev) =>
+          prev
+            ? {
+                ...prev,
+                percent: 100,
+                title: 'اكتمل التجهيز! جاري الانتقال الآن...',
+                subtitle: 'سيتم فتح شاشة تسجيل الدخول على القاعدة الجديدة الآن',
+              }
+            : null
         );
-        const url = new URL(window.location.href);
-        url.searchParams.delete('fb');
-        if (roomToKeep) {
-          url.searchParams.set('room', roomToKeep);
-        } else {
-          url.searchParams.delete('room');
-        }
-        window.location.replace(url.toString());
-      }, 450);
+
+        window.setTimeout(() => {
+          if (wantsDefault) {
+            window.location.replace(buildCleanPrimaryUrl());
+            return;
+          }
+          const url = new URL(window.location.href);
+          url.searchParams.delete('fb');
+          if (roomToKeep) {
+            url.searchParams.set('room', roomToKeep);
+          } else {
+            url.searchParams.delete('room');
+          }
+          window.location.replace(url.toString());
+        }, 280);
+      }, 320);
     },
     []
   );
@@ -318,13 +376,25 @@ export default function App() {
   const triggerAutoFailover = useCallback(async () => {
     if (failoverInProgressRef.current || switchingInProgressRef.current) return;
     failoverInProgressRef.current = true;
+    setAutoSwitchNotice({
+      targetProjectId: activeProjectId,
+      reason: 'quota',
+      percent: 15,
+      title: 'جاري التحميل — التحويل لقاعدة بديلة...',
+      subtitle: 'وصلت القاعدة الحالية للحد اليومي — جاري التبديل تلقائياً لقاعدة احتياطية...',
+      detail: 'البحث عن القاعدة المتاحة التالية',
+    });
     try {
       const res = await triggerAutomaticQuotaFailover({
         failedProjectId: activeFirebaseConfig.projectId,
         failedFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId,
       });
-      if (!res) return;
+      if (!res) {
+        setAutoSwitchNotice(null);
+        return;
+      }
       if (res.allExhausted) {
+        setAutoSwitchNotice(null);
         setAllExhausted(true);
         return;
       }
@@ -336,7 +406,10 @@ export default function App() {
           migratedRoomId: res.pointer.migratedRoomId,
           previousConfigs: res.pointer.previousConfigs,
           revision: res.pointer.revision || res.pointer.updatedAt || Date.now(),
+          reason: 'quota',
         });
+      } else {
+        setAutoSwitchNotice(null);
       }
     } finally {
       window.setTimeout(() => {
@@ -437,11 +510,23 @@ export default function App() {
 
     const handleServerPayload = (
       ptr: ServerPlatformPointer | null | undefined,
-      payloadAllExhausted?: boolean
+      payloadAllExhausted?: boolean,
+      poolUpdatedAt?: number,
+      payloadType?: string
     ) => {
       if (disposed) return;
       const exhaustedNow = Boolean(payloadAllExhausted ?? ptr?.allExhausted);
       setAllExhausted(exhaustedNow);
+
+      const poolTag = `${ptr?.revision || 0}::${poolUpdatedAt || ptr?.updatedAt || 0}::${ptr?.totalDatabases || 0}`;
+      if (poolTag !== lastSeenPoolTagRef.current) {
+        const hadPrevTag = Boolean(lastSeenPoolTagRef.current);
+        lastSeenPoolTagRef.current = poolTag;
+        if ((hadPrevTag || payloadType === 'update') && firebaseUserRef.current) {
+          void refreshProgrammerState(firebaseUserRef.current);
+        }
+      }
+
       if (exhaustedNow) return;
       if (!ptr || !ptr.config) return;
       applyRemotePlatformPointer({
@@ -489,8 +574,9 @@ export default function App() {
           const data = (await resp.json()) as {
             pointer?: ServerPlatformPointer | null;
             allExhausted?: boolean;
+            poolUpdatedAt?: number;
           };
-          handleServerPayload(data?.pointer, data?.allExhausted);
+          handleServerPayload(data?.pointer, data?.allExhausted, data?.poolUpdatedAt);
           return;
         }
       } catch {
@@ -507,8 +593,9 @@ export default function App() {
             type?: string;
             pointer?: ServerPlatformPointer | null;
             allExhausted?: boolean;
+            poolUpdatedAt?: number;
           };
-          handleServerPayload(msg?.pointer, msg?.allExhausted);
+          handleServerPayload(msg?.pointer, msg?.allExhausted, msg?.poolUpdatedAt, msg?.type);
         } catch {
           // Ignore malformed SSE payload
         }
@@ -540,17 +627,17 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisibilityOrFocus);
       window.clearInterval(pollTimer);
     };
-  }, [applyRemotePlatformPointer]);
+  }, [applyRemotePlatformPointer, refreshProgrammerState]);
 
-  // Also watch Firestore platform/migration pointer as static-host fallback (both pre-login and post-login)
+  // Watch Firestore platform/migration AND platform/pool live so ALL users switch & ALL programmers stay synced
   useEffect(() => {
     if (justConsolidatedFrom) return;
-    const unsub = onSnapshot(
+    const unsubMigration = onSnapshot(
       doc(db, 'platform', 'migration'),
       (snap) => {
         if (!snap.exists()) return;
         const ptr = snap.data() as PlatformMigrationPointer;
-        if (ptr.migrationEpoch && ptr.migrationEpoch !== CURRENT_DB_EPOCH) return;
+        if (ptr.migrationEpoch !== CURRENT_DB_EPOCH) return;
         const ptrCfg = sanitizeFirebaseConfig(ptr);
         if (!ptrCfg) return;
         applyRemotePlatformPointer({
@@ -565,8 +652,31 @@ export default function App() {
         // Silent fallback when unauthenticated on older rules or quota-limited DB
       }
     );
-    return () => unsub();
-  }, [applyRemotePlatformPointer, firebaseUser?.uid, firebaseUser?.emailVerified]);
+
+    let unsubPool: (() => void) | null = null;
+    if (firebaseUser?.emailVerified) {
+      unsubPool = onSnapshot(
+        doc(db, 'platform', 'pool'),
+        (snap) => {
+          if (!snap.exists()) return;
+          void refreshProgrammerState(firebaseUser);
+        },
+        () => {
+          // Silent fallback if pool doc absent or restricted
+        }
+      );
+    }
+
+    return () => {
+      unsubMigration();
+      unsubPool?.();
+    };
+  }, [
+    applyRemotePlatformPointer,
+    firebaseUser?.uid,
+    firebaseUser?.emailVerified,
+    refreshProgrammerState,
+  ]);
 
   const handleInteractivePersonalSync = async () => {
     if (!firebaseUser) return;
@@ -656,7 +766,10 @@ export default function App() {
         }
       }
 
-      if (!resolvedProfile && (isCustomFirebaseConfig || getPendingRejoinRoom())) {
+      if (
+        !resolvedProfile &&
+        (isCustomFirebaseConfig || getPendingRejoinRoom() || getPreviousFirebaseConfigs().length > 0)
+      ) {
         // When arriving on a newly switched Firebase project via migration/share link,
         // automatically restore the user's 4-part name from local IndexedDB snapshot if present.
         const cachedProfile =
@@ -802,11 +915,12 @@ export default function App() {
     }
   };
 
-  // Auth listener & room session restore on refresh
+  // Auth listener & room session restore on refresh (enforces fresh sign-in right after DB switch)
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
       if (!user) {
+        clearSwitchRequiresLogin();
+        setFirebaseUser(null);
         setProfile(null);
         setProfileLoadError(null);
         setActiveRoomId(null);
@@ -816,6 +930,16 @@ export default function App() {
         return;
       }
 
+      if (hasSwitchRequiresLogin(activeFirebaseConfig)) {
+        clearSwitchRequiresLogin();
+        setAuthReady(false);
+        setProfile(null);
+        setActiveRoomId(null);
+        await signOut(auth).catch(() => {});
+        return;
+      }
+
+      setFirebaseUser(user);
       await loadUserProfile(user);
     });
     return () => unsub();
@@ -987,10 +1111,11 @@ export default function App() {
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
-            title="عادت المنصة للعمل!"
-            subtitle="جاري تجهيز الاتصال الجديد وإدخالك تلقائياً..."
-            percent={100}
-            accent="green"
+            title={autoSwitchNotice.title}
+            subtitle={autoSwitchNotice.subtitle}
+            detail={autoSwitchNotice.detail}
+            percent={autoSwitchNotice.percent}
+            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'green'}
           />
         )}
       </AppErrorBoundary>
@@ -1139,10 +1264,11 @@ export default function App() {
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
-            title="جاري التحميل، الرجاء الانتظار قليلاً..."
-            subtitle="تم تحديث قاعدة البيانات المعتمدة من المبرمج — جاري نقلك تلقائياً واستكمال العمل"
-            percent={100}
-            accent="blue"
+            title={autoSwitchNotice.title}
+            subtitle={autoSwitchNotice.subtitle}
+            detail={autoSwitchNotice.detail}
+            percent={autoSwitchNotice.percent}
+            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
           />
         )}
       </>
@@ -1218,10 +1344,11 @@ export default function App() {
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
-            title="جاري التحميل، الرجاء الانتظار قليلاً..."
-            subtitle="تم تحديث قاعدة البيانات المعتمدة من المبرمج — جاري نقلك تلقائياً"
-            percent={100}
-            accent="blue"
+            title={autoSwitchNotice.title}
+            subtitle={autoSwitchNotice.subtitle}
+            detail={autoSwitchNotice.detail}
+            percent={autoSwitchNotice.percent}
+            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
           />
         )}
       </AppErrorBoundary>
@@ -1575,10 +1702,11 @@ export default function App() {
       {autoSwitchNotice && (
         <DuoLoading
           variant="overlay"
-          title="جاري التحميل، الرجاء الانتظار قليلاً..."
-          subtitle="قام المبرمج بتحديث قاعدة البيانات المعتمدة — جاري نقلك تلقائياً لاستكمال العمل"
-          percent={100}
-          accent="blue"
+          title={autoSwitchNotice.title}
+          subtitle={autoSwitchNotice.subtitle}
+          detail={autoSwitchNotice.detail}
+          percent={autoSwitchNotice.percent}
+          accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
         />
       )}
       {personalSyncProgress && (

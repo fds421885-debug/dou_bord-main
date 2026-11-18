@@ -73,7 +73,15 @@ export const SYNCED_SOURCES_KEY_PREFIX = 'duoboard_synced_sources_v1_';
 export const ACTIVE_ROOM_STORAGE_PREFIX = 'duoboard_active_room_';
 export const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
 export const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
-export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18';
+export const SWITCH_REQUIRE_LOGIN_KEY = 'duoboard_switched_require_login_v1';
+export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18_v2';
+
+export interface BootProgress {
+  percent: number;
+  title: string;
+  subtitle: string;
+  detail?: string;
+}
 
 let initialServerStatus: InitialServerPlatformStatus = {
   serverSynced: false,
@@ -381,7 +389,7 @@ export async function resolveLatestFirestoreMigrationRest(
     for (const res of results) {
       if (res.status !== 'ok') continue;
       const ptr = res.pointer;
-      if (ptr.migrationEpoch && ptr.migrationEpoch !== CURRENT_DB_EPOCH) continue;
+      if (ptr.migrationEpoch !== CURRENT_DB_EPOCH) continue;
 
       if (!allCollectedConfigs.some((x) => isSameFirebaseTarget(x, ptr.config))) {
         allCollectedConfigs.push(ptr.config);
@@ -468,14 +476,47 @@ function persistResolvedTargetConfig(params: {
   return switched;
 }
 
+export function markSwitchRequiresLogin(config: FirebaseAppConfig): void {
+  try {
+    sessionStorage.setItem(SWITCH_REQUIRE_LOGIN_KEY, firebaseTargetKey(config));
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+}
+
+export function hasSwitchRequiresLogin(config: FirebaseAppConfig): boolean {
+  try {
+    return sessionStorage.getItem(SWITCH_REQUIRE_LOGIN_KEY) === firebaseTargetKey(config);
+  } catch {
+    return false;
+  }
+}
+
+export function clearSwitchRequiresLogin(): void {
+  try {
+    sessionStorage.removeItem(SWITCH_REQUIRE_LOGIN_KEY);
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+}
+
 /**
  * Fetches the authoritative active Firebase pointer BEFORE firebase.ts initializes,
  * checking BOTH the Express server (/api/platform-db) AND Firestore /platform/migration REST chain
  * so BOTH AI Studio server deployments and static hosts (GitHub Pages / Netlify)
  * always route every visitor directly to the programmer's currently active database.
  */
-export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformStatus> {
+export async function syncPlatformDbBeforeBoot(
+  onProgress?: (progress: BootProgress) => void
+): Promise<InitialServerPlatformStatus> {
   if (typeof window === 'undefined') return initialServerStatus;
+
+  onProgress?.({
+    percent: 18,
+    title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
+    subtitle: 'يتم الآن الاتصال بالمنصة للتحقق من قاعدة البيانات المعتمدة من المبرمج',
+    detail: 'جاري فحص حالة القواعد النشطة',
+  });
 
   let serverPtr: ServerPlatformPointer | null = null;
   let serverAllExhausted = false;
@@ -484,6 +525,17 @@ export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformS
   let serverActiveOrder = 1;
   let serverTotalDbs = 1;
   let backendAvailable = false;
+  let completedChecks = 0;
+
+  const advanceCheckProgress = () => {
+    completedChecks += 1;
+    onProgress?.({
+      percent: completedChecks === 1 ? 52 : 80,
+      title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
+      subtitle: 'يتم التحقق من آخر قاعدة بيانات اعتمدها المبرمج لمزامنة الجميع عليها',
+      detail: completedChecks === 1 ? 'تم التحقق من المصدر الأول...' : 'اكتمل فحص قاعدة البيانات المعتمدة',
+    });
+  };
 
   const tryServerPromise = (async () => {
     try {
@@ -518,10 +570,16 @@ export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformS
       }
     } catch {
       // Static host (GitHub Pages / Netlify) or offline
+    } finally {
+      advanceCheckProgress();
     }
   })();
 
-  const tryFirestoreRestPromise = resolveLatestFirestoreMigrationRest().catch(() => null);
+  const tryFirestoreRestPromise = resolveLatestFirestoreMigrationRest()
+    .catch(() => null)
+    .finally(() => {
+      advanceCheckProgress();
+    });
 
   const [, restPtr] = await Promise.all([tryServerPromise, tryFirestoreRestPromise]);
 
@@ -545,16 +603,17 @@ export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformS
   if (serverPtr && (serverPtr as ServerPlatformPointer).config) {
     const sPtr = serverPtr as ServerPlatformPointer;
     const sCfg = sanitizeFirebaseConfig(sPtr.config);
-    const serverUpdatedAt = Number(sPtr.updatedAt || 0);
-    // Prefer server pointer when server was explicitly switched/rotated (revision > 1) or is newer than REST
-    const restIsExplicitlyNewerCustom =
-      restPtr &&
+    // If local server container hasn't been touched yet (revision <= 1 on primary_default)
+    // while Firestore holds a CURRENT_DB_EPOCH migration pointer to a custom DB, trust Firestore REST
+    // regardless of container clock drift.
+    const restHasActiveCustomOverride =
+      Boolean(restPtr) &&
+      restPtr!.migrationEpoch === CURRENT_DB_EPOCH &&
       serverRevision <= 1 &&
       isSameFirebaseTarget(sCfg || defaultFirebaseConfig, defaultFirebaseConfig) &&
-      !isSameFirebaseTarget(restPtr.config, defaultFirebaseConfig) &&
-      restPtr.updatedAtMs > serverUpdatedAt;
+      !isSameFirebaseTarget(restPtr!.config, defaultFirebaseConfig);
 
-    if (restIsExplicitlyNewerCustom && restPtr) {
+    if (restHasActiveCustomOverride && restPtr) {
       chosenTarget = restPtr.config;
       chosenResetToDefault = restPtr.resetToDefault;
       chosenExtras = restPtr.previousConfigs;
@@ -578,6 +637,27 @@ export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformS
       targetCfg: chosenTarget,
       resetToDefault: chosenResetToDefault,
       extras: chosenExtras,
+    });
+    if (switchedOnBoot) {
+      let isSelfInitiated = false;
+      try {
+        isSelfInitiated =
+          sessionStorage.getItem('duoboard_self_migrated_target') ===
+          firebaseTargetKey(chosenTarget);
+      } catch {
+        // Ignore sessionStorage restrictions
+      }
+      if (!isSelfInitiated) {
+        markSwitchRequiresLogin(chosenTarget);
+      }
+    }
+  }
+
+  if (!switchedOnBoot) {
+    onProgress?.({
+      percent: 100,
+      title: 'تم التحقق من القاعدة المعتمدة بنجاح!',
+      subtitle: 'جاري فتح السبورة التفاعلية الآن...',
     });
   }
 

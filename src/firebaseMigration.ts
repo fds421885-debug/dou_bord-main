@@ -1372,6 +1372,7 @@ export async function runFirebaseMigration(params: {
   currentRoom: Room | null;
   isSupervisorInCurrentRoom: boolean;
   cleanupOldDatabase?: boolean;
+  poolState?: PlatformProgrammerState | null;
   onProgress: (p: MigrationProgress) => void;
 }): Promise<MigrationResult> {
   const {
@@ -1380,6 +1381,7 @@ export async function runFirebaseMigration(params: {
     currentRoom,
     isSupervisorInCurrentRoom,
     cleanupOldDatabase = true,
+    poolState = null,
     onProgress,
   } = params;
 
@@ -2301,29 +2303,46 @@ export async function runFirebaseMigration(params: {
       // Non-fatal if target project uses older rules
     }
 
-    // Mirror pool metadata onto targetDb & current local cache if available
+    // Mirror pool metadata onto targetDb & current local cache so all programmers stay synced on targetDb
     try {
+      const cloudPool = await readCloudPoolDoc(sourceDb).catch(() => null);
       const localPool = loadLocalServerlessPool();
-      if (localPool) {
-        const syncedPool = ensurePoolDefaults({
-          ...localPool,
-          revision: localPool.revision + 1,
-          updatedAt: Date.now(),
+      const basePool = poolState || cloudPool || localPool || ensurePoolDefaults(null);
+      const dbsWithTarget = [...basePool.databases];
+      if (!dbsWithTarget.some((d) => isSameFirebaseTarget(d.config, targetConfig))) {
+        dbsWithTarget.push({
+          id: `db_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          order: dbsWithTarget.length + 1,
+          label: targetConfig.projectId,
+          config: targetConfig,
+          exhaustedAt: null,
+          exhaustedUntil: null,
+          addedByEmail: targetUser.email || undefined,
+          addedAt: Date.now(),
         });
-        const matchedTarget = syncedPool.databases.find((d) =>
-          isSameFirebaseTarget(d.config, targetConfig)
-        );
-        if (matchedTarget) {
-          syncedPool.activeDatabaseId = matchedTarget.id;
-          syncedPool.allExhausted = false;
-          matchedTarget.exhaustedAt = null;
-          matchedTarget.exhaustedUntil = null;
-        }
-        saveLocalServerlessPool(syncedPool);
-        await writeFirestorePoolDoc(targetDb, syncedPool, targetUid, resolvedQuadName || 'مبرمج المنصة').catch(
-          () => undefined
-        );
       }
+      const syncedPool = ensurePoolDefaults({
+        ...basePool,
+        databases: dbsWithTarget,
+        revision: basePool.revision + 1,
+        updatedAt: Date.now(),
+      });
+      const matchedTarget = syncedPool.databases.find((d) =>
+        isSameFirebaseTarget(d.config, targetConfig)
+      );
+      if (matchedTarget) {
+        syncedPool.activeDatabaseId = matchedTarget.id;
+        syncedPool.allExhausted = false;
+        matchedTarget.exhaustedAt = null;
+        matchedTarget.exhaustedUntil = null;
+      }
+      saveLocalServerlessPool(syncedPool);
+      await writeFirestorePoolDoc(
+        targetDb,
+        syncedPool,
+        targetUid,
+        resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+      ).catch(() => undefined);
     } catch {
       // Non-fatal pool mirror
     }
@@ -2980,7 +2999,7 @@ async function writeFirestoreMigrationPointerDoc(
   }
 }
 
-async function readCloudPoolDoc(targetDb: Firestore): Promise<PlatformProgrammerState | null> {
+export async function readCloudPoolDoc(targetDb: Firestore = sourceDb): Promise<PlatformProgrammerState | null> {
   try {
     const snap = await getDoc(doc(targetDb, 'platform', 'pool'));
     if (!snap.exists()) return null;
@@ -3230,6 +3249,7 @@ async function callProgrammerEndpoint<T>(
         fullNameQuad,
         tokenProjectId: activeFirebaseConfig.projectId,
         tokenApiKey: activeFirebaseConfig.apiKey,
+        tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
       }),
     });
   };
@@ -3280,14 +3300,46 @@ export async function fetchProgrammerSession(
   mode?: 'server' | 'serverless';
 }> {
   try {
-    const serverRes = await callProgrammerEndpoint<{
+    let serverRes = await callProgrammerEndpoint<{
       isProgrammer: boolean;
       isMaster: boolean;
       state?: PlatformProgrammerState;
     }>('/api/programmer/session', user, fullNameQuad);
+
+    const cloudPool = await readCloudPoolDoc(sourceDb).catch(() => null);
+    if (cloudPool && serverRes.state) {
+      const cloudRicher =
+        cloudPool.revision > serverRes.state.revision ||
+        cloudPool.databases.length > serverRes.state.databases.length ||
+        cloudPool.programmers.length > serverRes.state.programmers.length;
+
+      if (cloudRicher) {
+        try {
+          const hydrated = await callProgrammerEndpoint<{
+            isProgrammer: boolean;
+            isMaster: boolean;
+            state?: PlatformProgrammerState;
+          }>('/api/programmer/hydrate', user, fullNameQuad, {
+            poolConfig: activeFirebaseConfig,
+          });
+          if (hydrated.state) {
+            serverRes = hydrated;
+          }
+        } catch {
+          // Keep serverRes if hydrate unavailable
+        }
+      }
+    }
+
     if (serverRes.state) {
       saveLocalServerlessPool(serverRes.state);
-      if (serverRes.isMaster) {
+      const serverNewerThanCloud =
+        !cloudPool ||
+        serverRes.state.revision > cloudPool.revision ||
+        serverRes.state.databases.length > cloudPool.databases.length ||
+        serverRes.state.programmers.length > cloudPool.programmers.length;
+
+      if (serverRes.isMaster && serverNewerThanCloud) {
         void writeFirestorePoolDoc(
           sourceDb,
           serverRes.state,
@@ -3295,7 +3347,36 @@ export async function fetchProgrammerSession(
           fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
         );
       }
+    } else if (!serverRes.isProgrammer && cloudPool) {
+      // Check if user was promoted in cloudPool even before server hydrated
+      const cloudRole = await isIdentityProgrammerServerless(cloudPool, {
+        email: user.email,
+        fullNameQuad,
+      });
+      if (cloudRole.isProgrammer) {
+        try {
+          const hydrated = await callProgrammerEndpoint<{
+            isProgrammer: boolean;
+            isMaster: boolean;
+            state?: PlatformProgrammerState;
+          }>('/api/programmer/hydrate', user, fullNameQuad, {
+            poolConfig: activeFirebaseConfig,
+          });
+          if (hydrated.isProgrammer) {
+            if (hydrated.state) saveLocalServerlessPool(hydrated.state);
+            return { ...hydrated, mode: 'server' };
+          }
+        } catch {
+          return {
+            isProgrammer: true,
+            isMaster: cloudRole.isMaster,
+            state: cloudPool,
+            mode: 'serverless',
+          };
+        }
+      }
     }
+
     return { ...serverRes, mode: 'server' };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;

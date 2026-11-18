@@ -36,6 +36,7 @@ interface ProgrammerMember {
 
 interface PlatformState {
   revision: number;
+  migrationEpoch?: string;
   databases: PoolDatabaseEntry[];
   activeDatabaseId: string;
   allExhausted: boolean;
@@ -66,7 +67,7 @@ const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.js
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
-const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18';
+const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18_v2';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
 const QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -248,20 +249,17 @@ function createInitialState(): PlatformState {
       addedAt: now,
     },
   ];
-  let activeDatabaseId = 'primary_default';
-  let migratedRoomId: string | null = null;
   const previousConfigs: SanitizedFirebaseConfig[] = [];
 
-  // Seamlessly adopt any legacy .duoboard-platform-db.json custom pointer
+  // Preserve any legacy config as a backup entry in pool while starting everyone on primary DB for the new epoch
   try {
     if (fs.existsSync(LEGACY_POINTER_FILE_PATH)) {
       const raw = fs.readFileSync(LEGACY_POINTER_FILE_PATH, 'utf8');
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       const legacyCfg = sanitizeConfig(parsed?.config);
-      if (legacyCfg && !isSameConfig(legacyCfg, defaultAppletConfig) && !parsed?.resetToDefault) {
-        const legacyId = 'db_2';
+      if (legacyCfg && !isSameConfig(legacyCfg, defaultAppletConfig)) {
         databases.push({
-          id: legacyId,
+          id: 'db_2',
           order: 2,
           label: `قاعدة مضافة (#2) - ${legacyCfg.projectId}`,
           config: legacyCfg,
@@ -271,11 +269,7 @@ function createInitialState(): PlatformState {
             typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
           addedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : now,
         });
-        activeDatabaseId = legacyId;
-        previousConfigs.push(defaultAppletConfig);
-      }
-      if (typeof parsed?.migratedRoomId === 'string') {
-        migratedRoomId = parsed.migratedRoomId;
+        previousConfigs.push(legacyCfg);
       }
     }
   } catch {
@@ -284,8 +278,9 @@ function createInitialState(): PlatformState {
 
   return {
     revision: 1,
+    migrationEpoch: CURRENT_DB_EPOCH,
     databases,
-    activeDatabaseId,
+    activeDatabaseId: 'primary_default',
     allExhausted: false,
     programmers: [
       {
@@ -296,7 +291,7 @@ function createInitialState(): PlatformState {
         promotedAt: now,
       },
     ],
-    migratedRoomId,
+    migratedRoomId: null,
     previousConfigs,
     updatedAt: now,
   };
@@ -370,10 +365,32 @@ function loadPlatformState(): PlatformState {
       return createInitialState();
     }
     const normalizedDbs = renumberDatabases(databases);
-    const activeExists = normalizedDbs.some((d) => d.id === parsed.activeDatabaseId);
-    const activeDatabaseId = activeExists
+    if (!normalizedDbs.some((d) => isSameConfig(d.config, defaultAppletConfig))) {
+      normalizedDbs.unshift({
+        id: 'primary_default',
+        order: 1,
+        label: 'القاعدة الأساسية (#1)',
+        config: defaultAppletConfig,
+        exhaustedAt: null,
+        exhaustedUntil: null,
+        addedAt: Date.now(),
+      });
+    }
+    const renumberedDbs = renumberDatabases(normalizedDbs);
+    const epochChanged = parsed.migrationEpoch !== CURRENT_DB_EPOCH;
+    const primaryEntry =
+      renumberedDbs.find((d) => isSameConfig(d.config, defaultAppletConfig)) || renumberedDbs[0];
+    if (epochChanged && primaryEntry) {
+      primaryEntry.exhaustedAt = null;
+      primaryEntry.exhaustedUntil = null;
+    }
+
+    const activeExists = renumberedDbs.some((d) => d.id === parsed.activeDatabaseId);
+    const activeDatabaseId = epochChanged
+      ? primaryEntry.id
+      : activeExists
       ? (parsed.activeDatabaseId as string)
-      : normalizedDbs[0].id;
+      : primaryEntry.id;
 
     const rawProgs = Array.isArray(parsed.programmers) ? parsed.programmers : [];
     const programmers = ensureMasterProgrammerPresent(
@@ -395,20 +412,34 @@ function loadPlatformState(): PlatformState {
       .filter((x): x is SanitizedFirebaseConfig => Boolean(x))
       .slice(0, 12);
 
-    return {
-      revision: typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1,
-      databases: normalizedDbs,
+    const loadedState: PlatformState = {
+      revision: epochChanged
+        ? (typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1) + 1
+        : typeof parsed.revision === 'number' && parsed.revision >= 1
+        ? parsed.revision
+        : 1,
+      migrationEpoch: CURRENT_DB_EPOCH,
+      databases: renumberedDbs,
       activeDatabaseId,
-      allExhausted: Boolean(parsed.allExhausted),
+      allExhausted: epochChanged ? false : Boolean(parsed.allExhausted),
       programmers,
-      migratedRoomId:
-        typeof parsed.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(parsed.migratedRoomId)
-          ? parsed.migratedRoomId.toUpperCase()
-          : null,
+      migratedRoomId: epochChanged
+        ? null
+        : typeof parsed.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(parsed.migratedRoomId)
+        ? parsed.migratedRoomId.toUpperCase()
+        : null,
       previousConfigs,
       updatedByEmail: typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
-      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
+      updatedAt: epochChanged
+        ? Date.now()
+        : typeof parsed.updatedAt === 'number'
+        ? parsed.updatedAt
+        : Date.now(),
     };
+    if (epochChanged) {
+      savePlatformState(loadedState);
+    }
+    return loadedState;
   } catch {
     return createInitialState();
   }
@@ -470,6 +501,7 @@ function buildPublicPayload(state: PlatformState): {
   activeDatabaseId: string;
   activeOrder: number;
   totalDatabases: number;
+  poolUpdatedAt: number;
 } {
   const activeEntry =
     state.databases.find((d) => d.id === state.activeDatabaseId) || state.databases[0];
@@ -494,11 +526,144 @@ function buildPublicPayload(state: PlatformState): {
     activeDatabaseId: activeEntry.id,
     activeOrder: activeEntry.order,
     totalDatabases: state.databases.length,
+    poolUpdatedAt: state.updatedAt,
   };
 }
 
 let platformState: PlatformState = loadPlatformState();
 const sseClients = new Set<Response>();
+let cloudHydrationAttempted = false;
+
+interface FirestoreRestVal {
+  stringValue?: string;
+  integerValue?: string;
+  booleanValue?: boolean;
+  timestampValue?: string;
+  arrayValue?: { values?: FirestoreRestVal[] };
+  mapValue?: { fields?: Record<string, FirestoreRestVal> };
+}
+
+async function tryHydrateServerFromFirestorePool(
+  idToken: string,
+  targetCfg: SanitizedFirebaseConfig
+): Promise<boolean> {
+  try {
+    const dbName = encodeURIComponent((targetCfg.firestoreDatabaseId || '(default)').trim());
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      targetCfg.projectId
+    )}/databases/${dbName}/documents/platform/pool?key=${encodeURIComponent(targetCfg.apiKey)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${idToken}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const json = (await resp.json()) as { fields?: Record<string, FirestoreRestVal> };
+    const fields = json?.fields;
+    if (!fields) return false;
+
+    const remoteRevision = Number(fields.revision?.integerValue || 1);
+    const remoteDbsRaw = fields.databases?.arrayValue?.values || [];
+    const remoteProgsRaw = fields.programmers?.arrayValue?.values || [];
+    const remoteActiveId = fields.activeDatabaseId?.stringValue || '';
+    const remoteExhaustedIds = (fields.exhaustedDatabaseIds?.arrayValue?.values || [])
+      .map((v) => v.stringValue || '')
+      .filter(Boolean);
+
+    const parsedDbs: PoolDatabaseEntry[] = [];
+    for (const item of remoteDbsRaw) {
+      const mf = item.mapValue?.fields;
+      if (!mf) continue;
+      const cf = mf.config?.mapValue?.fields;
+      if (!cf) continue;
+      const cfg = sanitizeConfig({
+        apiKey: cf.apiKey?.stringValue,
+        authDomain: cf.authDomain?.stringValue,
+        projectId: cf.projectId?.stringValue,
+        appId: cf.appId?.stringValue,
+        storageBucket: cf.storageBucket?.stringValue,
+        messagingSenderId: cf.messagingSenderId?.stringValue,
+        measurementId: cf.measurementId?.stringValue,
+        firestoreDatabaseId: cf.firestoreDatabaseId?.stringValue,
+      });
+      if (!cfg) continue;
+      const dbId = mf.id?.stringValue || `db_${parsedDbs.length + 1}`;
+      const isExh = remoteExhaustedIds.includes(dbId);
+      parsedDbs.push({
+        id: dbId,
+        order: Number(mf.order?.integerValue || parsedDbs.length + 1),
+        label: (mf.label?.stringValue || cfg.projectId).slice(0, 80),
+        config: cfg,
+        exhaustedAt: isExh ? Date.now() : null,
+        exhaustedUntil: isExh ? Date.now() + QUOTA_COOLDOWN_MS : null,
+        addedAt: Number(mf.addedAt?.integerValue || Date.now()),
+      });
+    }
+
+    const parsedProgs: ProgrammerMember[] = [];
+    for (const item of remoteProgsRaw) {
+      const mf = item.mapValue?.fields;
+      if (!mf) continue;
+      const name = (mf.fullNameQuad?.stringValue || '').trim();
+      const masked = (mf.emailMasked?.stringValue || '').trim();
+      const emailRaw = (mf.email?.stringValue || '').trim().toLowerCase();
+      parsedProgs.push({
+        id: mf.id?.stringValue || `prog_${parsedProgs.length + 1}`,
+        fullNameQuad: name,
+        ...(emailRaw ? { email: emailRaw } : masked && !masked.includes('***') ? { email: masked } : {}),
+        isMaster: Boolean(mf.isMaster?.booleanValue),
+        promotedAt: Number(mf.promotedAt?.integerValue || Date.now()),
+      });
+    }
+
+    const remoteIsNewerOrRicher =
+      remoteRevision > platformState.revision ||
+      parsedDbs.length > platformState.databases.length ||
+      parsedProgs.length > platformState.programmers.length;
+
+    if (!remoteIsNewerOrRicher) return false;
+
+    const mergedDbs = [...platformState.databases];
+    for (const rd of parsedDbs) {
+      if (!mergedDbs.some((d) => isSameConfig(d.config, rd.config))) {
+        mergedDbs.push(rd);
+      }
+    }
+    platformState.databases = renumberDatabases(mergedDbs);
+
+    const mergedProgs = [...platformState.programmers];
+    for (const rp of parsedProgs) {
+      const rpNorm = normalizeArabicName(rp.fullNameQuad);
+      const exists = mergedProgs.some(
+        (m) =>
+          (rp.email && m.email && m.email.toLowerCase() === rp.email.toLowerCase()) ||
+          (rpNorm && normalizeArabicName(m.fullNameQuad) === rpNorm)
+      );
+      if (!exists && (rp.fullNameQuad || rp.email)) {
+        mergedProgs.push(rp);
+      }
+    }
+    platformState.programmers = ensureMasterProgrammerPresent(mergedProgs);
+
+    if (remoteRevision > platformState.revision && remoteActiveId) {
+      const matched = platformState.databases.find((d) => d.id === remoteActiveId);
+      if (matched) {
+        platformState.activeDatabaseId = matched.id;
+        platformState.allExhausted = Boolean(fields.allExhausted?.booleanValue);
+      }
+    }
+    platformState.revision = Math.max(platformState.revision, remoteRevision) + 1;
+    platformState.migrationEpoch = CURRENT_DB_EPOCH;
+    platformState.updatedAt = Date.now();
+    savePlatformState(platformState);
+    broadcastState();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function refreshExpiredCooldowns(): boolean {
   const now = Date.now();
@@ -810,10 +975,29 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, ...buildPublicPayload(platformState) });
   });
 
-  // Programmer session check & full state retrieval
+  // Programmer session check & full state retrieval (also auto-hydrates fresh server instances from cloud pool)
   app.post('/api/programmer/session', async (req: Request, res: Response) => {
     refreshExpiredCooldowns();
     const body = (req.body || {}) as Record<string, unknown>;
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+    if (bearer && (!cloudHydrationAttempted || platformState.revision <= 1)) {
+      cloudHydrationAttempted = true;
+      const reqProj = typeof body.tokenProjectId === 'string' ? body.tokenProjectId.trim() : '';
+      const reqKey = typeof body.tokenApiKey === 'string' ? body.tokenApiKey.trim() : '';
+      const reqDbId =
+        typeof body.tokenFirestoreDatabaseId === 'string'
+          ? body.tokenFirestoreDatabaseId.trim()
+          : '';
+      const targetCfg =
+        (reqProj &&
+          reqKey &&
+          sanitizeConfig({ projectId: reqProj, apiKey: reqKey, appId: '1:1:web:1', firestoreDatabaseId: reqDbId })) ||
+        defaultAppletConfig;
+      await tryHydrateServerFromFirestorePool(bearer, targetCfg);
+    }
+
     const authRes = await authenticateRequest(req, body);
     if (!authRes.ok) {
       res.status(authRes.status).json({ error: authRes.error });
@@ -828,6 +1012,39 @@ async function startServer(): Promise<void> {
     res.json({
       isProgrammer: true,
       isMaster: authRes.isMaster,
+      state: platformState,
+    });
+  });
+
+  // Programmer: Explicitly hydrate server state from Firestore /platform/pool when switching servers
+  app.post('/api/programmer/hydrate', async (req: Request, res: Response) => {
+    refreshExpiredCooldowns();
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok) {
+      res.status(authRes.status).json({ error: authRes.error });
+      return;
+    }
+    if (bearer) {
+      const cfg =
+        sanitizeConfig(body.poolConfig) ||
+        platformState.databases.find((d) => d.id === platformState.activeDatabaseId)?.config ||
+        defaultAppletConfig;
+      await tryHydrateServerFromFirestorePool(bearer, cfg);
+    }
+    const postAuthRole = isIdentityProgrammer(platformState, {
+      email: authRes.email,
+      fullNameQuad: authRes.name,
+    });
+    if (!postAuthRole.isProgrammer) {
+      res.json({ isProgrammer: false, isMaster: false });
+      return;
+    }
+    res.json({
+      isProgrammer: true,
+      isMaster: postAuthRole.isMaster,
       state: platformState,
     });
   });
@@ -871,18 +1088,16 @@ async function startServer(): Promise<void> {
     };
 
     platformState.databases = renumberDatabases([...platformState.databases, newEntry]);
+    platformState.revision += 1;
+    platformState.updatedAt = now;
+    platformState.updatedByEmail = authRes.email;
     // If the entire platform was in maintenance (allExhausted), immediately bring it back on this new DB!
     if (platformState.allExhausted) {
       platformState.activeDatabaseId = newEntry.id;
       platformState.allExhausted = false;
-      platformState.revision += 1;
-      platformState.updatedAt = now;
-      platformState.updatedByEmail = authRes.email;
-      savePlatformState(platformState);
-      broadcastState();
-    } else {
-      savePlatformState(platformState);
     }
+    savePlatformState(platformState);
+    broadcastState();
 
     res.json({ ok: true, added: newEntry, state: platformState });
   });
@@ -922,6 +1137,7 @@ async function startServer(): Promise<void> {
     }
 
     platformState.databases = renumberDatabases(reordered);
+    platformState.revision += 1;
     platformState.updatedAt = Date.now();
     platformState.updatedByEmail = authRes.email;
     savePlatformState(platformState);
@@ -1013,8 +1229,8 @@ async function startServer(): Promise<void> {
     if (platformState.allExhausted && recoveredId) {
       platformState.activeDatabaseId = recoveredId;
       platformState.allExhausted = false;
-      platformState.revision += 1;
     }
+    platformState.revision += 1;
     platformState.updatedAt = now;
     platformState.updatedByEmail = authRes.email;
     savePlatformState(platformState);
@@ -1109,8 +1325,10 @@ async function startServer(): Promise<void> {
     };
 
     platformState.programmers = [...platformState.programmers, member];
+    platformState.revision += 1;
     platformState.updatedAt = Date.now();
     savePlatformState(platformState);
+    broadcastState();
 
     res.json({ ok: true, member, state: platformState });
   });
@@ -1140,8 +1358,10 @@ async function startServer(): Promise<void> {
     }
 
     platformState.programmers = platformState.programmers.filter((m) => m.id !== memberId);
+    platformState.revision += 1;
     platformState.updatedAt = Date.now();
     savePlatformState(platformState);
+    broadcastState();
 
     res.json({ ok: true, state: platformState });
   });

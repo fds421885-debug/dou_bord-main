@@ -67,7 +67,7 @@ const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.js
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
-const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18_v2';
+const CURRENT_DB_EPOCH = 'consolidated_qdrat_9829b_2026_11_18';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
 const QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -152,7 +152,7 @@ function loadDefaultAppletConfig(): SanitizedFirebaseConfig {
   return {
     apiKey: '',
     authDomain: '',
-    projectId: 'omran-ffbad',
+    projectId: 'qdrat-9829b',
     appId: '',
   };
 }
@@ -364,20 +364,33 @@ function loadPlatformState(): PlatformState {
     if (databases.length === 0) {
       return createInitialState();
     }
-    const normalizedDbs = renumberDatabases(databases);
-    if (!normalizedDbs.some((d) => isSameConfig(d.config, defaultAppletConfig))) {
-      normalizedDbs.unshift({
+    const epochChanged = parsed.migrationEpoch !== CURRENT_DB_EPOCH;
+    const rawPrimaryMatch = databases.find((d) => isSameConfig(d.config, defaultAppletConfig));
+    let mergedList = databases.map((d) =>
+      d.id === 'primary_default' && !isSameConfig(d.config, defaultAppletConfig)
+        ? {
+            ...d,
+            id: `db_prev_${d.config.projectId}`,
+            label: d.label.includes('الأساسية') ? `القاعدة السابقة — ${d.config.projectId}` : d.label,
+          }
+        : d
+    );
+    if (!rawPrimaryMatch) {
+      mergedList.unshift({
         id: 'primary_default',
         order: 1,
-        label: 'القاعدة الأساسية (#1)',
+        label: `القاعدة الأساسية (#1) — ${defaultAppletConfig.projectId}`,
         config: defaultAppletConfig,
         exhaustedAt: null,
         exhaustedUntil: null,
         addedAt: Date.now(),
       });
+    } else if (rawPrimaryMatch.id !== 'primary_default') {
+      rawPrimaryMatch.id = 'primary_default';
+      mergedList = [rawPrimaryMatch, ...mergedList.filter((d) => d !== rawPrimaryMatch)];
     }
-    const renumberedDbs = renumberDatabases(normalizedDbs);
-    const epochChanged = parsed.migrationEpoch !== CURRENT_DB_EPOCH;
+
+    const renumberedDbs = renumberDatabases(mergedList);
     const primaryEntry =
       renumberedDbs.find((d) => isSameConfig(d.config, defaultAppletConfig)) || renumberedDbs[0];
     if (epochChanged && primaryEntry) {
@@ -386,11 +399,12 @@ function loadPlatformState(): PlatformState {
     }
 
     const activeExists = renumberedDbs.some((d) => d.id === parsed.activeDatabaseId);
-    const activeDatabaseId = epochChanged
-      ? primaryEntry.id
-      : activeExists
-      ? (parsed.activeDatabaseId as string)
-      : primaryEntry.id;
+    const activeDatabaseId =
+      epochChanged || !rawPrimaryMatch
+        ? primaryEntry.id
+        : activeExists
+        ? (parsed.activeDatabaseId as string)
+        : primaryEntry.id;
 
     const rawProgs = Array.isArray(parsed.programmers) ? parsed.programmers : [];
     const programmers = ensureMasterProgrammerPresent(
@@ -407,13 +421,22 @@ function loadPlatformState(): PlatformState {
     );
 
     const prevRaw = Array.isArray(parsed.previousConfigs) ? parsed.previousConfigs : [];
-    const previousConfigs = prevRaw
-      .map(sanitizeConfig)
-      .filter((x): x is SanitizedFirebaseConfig => Boolean(x))
+    const previousConfigs = [
+      ...prevRaw.map(sanitizeConfig).filter((x): x is SanitizedFirebaseConfig => Boolean(x)),
+      ...renumberedDbs
+        .filter((d) => !isSameConfig(d.config, defaultAppletConfig))
+        .map((d) => d.config),
+    ]
+      .filter(
+        (c, idx, arr) =>
+          !isSameConfig(c, defaultAppletConfig) &&
+          arr.findIndex((x) => isSameConfig(x, c)) === idx
+      )
       .slice(0, 12);
 
+    const forceReset = epochChanged || !rawPrimaryMatch;
     const loadedState: PlatformState = {
-      revision: epochChanged
+      revision: forceReset
         ? (typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1) + 1
         : typeof parsed.revision === 'number' && parsed.revision >= 1
         ? parsed.revision
@@ -421,22 +444,22 @@ function loadPlatformState(): PlatformState {
       migrationEpoch: CURRENT_DB_EPOCH,
       databases: renumberedDbs,
       activeDatabaseId,
-      allExhausted: epochChanged ? false : Boolean(parsed.allExhausted),
+      allExhausted: forceReset ? false : Boolean(parsed.allExhausted),
       programmers,
-      migratedRoomId: epochChanged
+      migratedRoomId: forceReset
         ? null
         : typeof parsed.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(parsed.migratedRoomId)
         ? parsed.migratedRoomId.toUpperCase()
         : null,
       previousConfigs,
       updatedByEmail: typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
-      updatedAt: epochChanged
+      updatedAt: forceReset
         ? Date.now()
         : typeof parsed.updatedAt === 'number'
         ? parsed.updatedAt
         : Date.now(),
     };
-    if (epochChanged) {
+    if (forceReset) {
       savePlatformState(loadedState);
     }
     return loadedState;
@@ -508,7 +531,7 @@ function buildPublicPayload(state: PlatformState): {
   const pointer: PublicPlatformPointer = {
     id: 'migration',
     config: activeEntry.config,
-    resetToDefault: isSameConfig(activeEntry.config, defaultAppletConfig),
+    resetToDefault: false,
     migratedRoomId: state.migratedRoomId ?? null,
     migrationEpoch: CURRENT_DB_EPOCH,
     previousConfigs: buildPreviousConfigsList(state, activeEntry),

@@ -261,12 +261,10 @@ export default function App() {
       if (!ptrCfg) return;
 
       const targetKey = firebaseTargetKey(ptrCfg);
-      const wantsDefault =
-        Boolean(incoming.resetToDefault) || isSameFirebaseTarget(ptrCfg, defaultFirebaseConfig);
+      const wantsDefault = isSameFirebaseTarget(ptrCfg, defaultFirebaseConfig);
 
       // Already on requested DB
-      if (wantsDefault && !isCustomFirebaseConfig) return;
-      if (!wantsDefault && isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
+      if (isSameFirebaseTarget(ptrCfg, activeFirebaseConfig)) return;
 
       // Do not interrupt the initiating programmer tab while migration is finishing
       try {

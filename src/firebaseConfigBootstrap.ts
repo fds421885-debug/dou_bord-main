@@ -74,7 +74,7 @@ export const ACTIVE_ROOM_STORAGE_PREFIX = 'duoboard_active_room_';
 export const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
 export const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
 export const SWITCH_REQUIRE_LOGIN_KEY = 'duoboard_switched_require_login_v1';
-export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18_v2';
+export const CURRENT_DB_EPOCH = 'consolidated_qdrat_9829b_2026_11_18';
 
 export interface BootProgress {
   percent: number;
@@ -434,10 +434,17 @@ function persistResolvedTargetConfig(params: {
 }): boolean {
   const { targetCfg, resetToDefault, extras = [] } = params;
   const currentLocal = getCurrentStoredFirebaseConfig();
+  let previousEpoch: string | null = null;
+  try {
+    previousEpoch = localStorage.getItem(DB_EPOCH_STORAGE_KEY);
+  } catch {
+    previousEpoch = null;
+  }
+  const epochChanged = Boolean(previousEpoch && previousEpoch !== CURRENT_DB_EPOCH);
   let switched = false;
 
   if (resetToDefault || isSameFirebaseTarget(targetCfg, defaultFirebaseConfig)) {
-    if (!isSameFirebaseTarget(currentLocal, defaultFirebaseConfig)) {
+    if (!isSameFirebaseTarget(currentLocal, defaultFirebaseConfig) || epochChanged) {
       switched = true;
       savePreviousFirebaseConfigs(
         [currentLocal, ...extras, ...getPreviousFirebaseConfigs()],
@@ -455,7 +462,7 @@ function persistResolvedTargetConfig(params: {
     return switched;
   }
 
-  if (!isSameFirebaseTarget(targetCfg, currentLocal)) {
+  if (!isSameFirebaseTarget(targetCfg, currentLocal) || epochChanged) {
     switched = true;
     savePreviousFirebaseConfigs(
       [currentLocal, defaultFirebaseConfig, ...extras, ...getPreviousFirebaseConfigs()],

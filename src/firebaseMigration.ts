@@ -2695,24 +2695,48 @@ async function callProgrammerEndpoint<T>(
   fullNameQuad: string,
   payload: Record<string, unknown> = {}
 ): Promise<T> {
-  const idToken = await user.getIdToken();
-  const resp = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-      'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
-    },
-    body: JSON.stringify({
-      ...payload,
-      fullNameQuad,
-      tokenProjectId: activeFirebaseConfig.projectId,
-      tokenApiKey: activeFirebaseConfig.apiKey,
-    }),
-  });
-  const data = (await resp.json()) as T & { error?: string };
+  const sendWithToken = async (forceRefresh: boolean) => {
+    const idToken = await user.getIdToken(forceRefresh);
+    return fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+        'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
+      },
+      body: JSON.stringify({
+        ...payload,
+        fullNameQuad,
+        tokenProjectId: activeFirebaseConfig.projectId,
+        tokenApiKey: activeFirebaseConfig.apiKey,
+      }),
+    });
+  };
+
+  let resp = await sendWithToken(false);
+  if (resp.status === 401 || resp.status === 403) {
+    resp = await sendWithToken(true);
+  }
+
+  const rawText = await resp.text();
+  let data: (T & { error?: string }) | null = null;
+  try {
+    data = rawText ? (JSON.parse(rawText) as T & { error?: string }) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!data || typeof data !== 'object') {
+    if (!resp.ok || rawText.trim().startsWith('<')) {
+      throw new Error(
+        'خادم إدارة القواعد غير متاح على هذا الرابط (تأكد من تشغيل التطبيق عبر الخادم الكامل).'
+      );
+    }
+    throw new Error('استجابة غير متوقعة من خادم إدارة القواعد');
+  }
+
   if (!resp.ok) {
-    throw new Error(data?.error || 'فشل تنفيذ طلب المبرمج');
+    throw new Error(data.error || `فشل تنفيذ طلب المبرمج (${resp.status})`);
   }
   return data;
 }

@@ -187,6 +187,7 @@ export default function App() {
   const [programmerState, setProgrammerState] =
     useState<PlatformProgrammerState | null>(null);
   const [programmerLoading, setProgrammerLoading] = useState<boolean>(false);
+  const [programmerError, setProgrammerError] = useState<string | null>(null);
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
   const [autoSwitchNotice, setAutoSwitchNotice] = useState<string | null>(null);
   const [personalSyncProgress, setPersonalSyncProgress] =
@@ -379,6 +380,7 @@ export default function App() {
       }
 
       setProgrammerLoading(true);
+      setProgrammerError(null);
       try {
         const res = await fetchProgrammerSession(targetUser, candidateName);
         setIsProgrammer(res.isProgrammer || quickMaster);
@@ -387,8 +389,12 @@ export default function App() {
           setProgrammerState(res.state);
           setAllExhausted(Boolean(res.state.allExhausted));
         }
-      } catch {
-        // Keep quickMaster detection if offline/static
+      } catch (err) {
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'تعذر الاتصال بخادم إدارة القواعد حالياً.';
+        setProgrammerError(msg);
       } finally {
         setProgrammerLoading(false);
       }
@@ -1013,7 +1019,7 @@ export default function App() {
                   refreshProgrammerState(firebaseUser, profile?.fullNameQuad || firebaseUser.displayName)
                 }
               />
-            ) : (
+            ) : programmerLoading || !programmerError ? (
               <div className="max-w-3xl mx-auto px-4 py-12">
                 <DuoLoading
                   variant="card"
@@ -1021,6 +1027,32 @@ export default function App() {
                   subtitle="يتم جلب قائمة قواعد البيانات والصلاحيات"
                   accent="purple"
                 />
+              </div>
+            ) : (
+              <div className="max-w-xl mx-auto px-4 py-12 text-center">
+                <div className="duo-card p-6 flex flex-col items-center gap-4">
+                  <AlertCircle className="w-10 h-10 text-[#EA2B2B]" />
+                  <p className="text-sm font-black text-[#3C3C3C]">
+                    تعذر الاتصال بخادم إدارة القواعد حالياً.
+                  </p>
+                  {programmerError && (
+                    <p className="text-xs font-bold text-[#777777] dir-ltr break-words max-w-full">
+                      {programmerError}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void refreshProgrammerState(
+                        firebaseUser,
+                        profile?.fullNameQuad || firebaseUser.displayName
+                      )
+                    }
+                    className="duo-btn px-5 py-2.5 rounded-xl bg-[#A560E8] border-2 border-b-4 border-[#8938D6] text-white text-sm font-black cursor-pointer"
+                  >
+                    إعادة المحاولة
+                  </button>
+                </div>
               </div>
             )}
           </main>
@@ -1480,6 +1512,11 @@ export default function App() {
                   <p className="text-sm font-black text-[#3C3C3C]">
                     تعذر الاتصال بخادم إدارة القواعد حالياً. تأكد من تشغيل الخادم ثم أعد المحاولة.
                   </p>
+                  {programmerError && (
+                    <p className="text-xs font-bold text-[#777777] dir-ltr break-words max-w-full">
+                      {programmerError}
+                    </p>
+                  )}
                   <button
                     type="button"
                     onClick={() => void refreshProgrammerState(firebaseUser, profile.fullNameQuad)}

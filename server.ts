@@ -191,13 +191,15 @@ async function verifyFirebaseIdToken(
       ? claims.sub
       : undefined;
 
-  if (aud !== expectedProjectId || !emailVerified || exp * 1000 < Date.now() - 60_000) {
+  // Do NOT compare exp against container Date.now() because container clock can drift ahead of real UTC time;
+  // rely on Google Identity Toolkit accounts:lookup for authoritative signature & expiry verification.
+  if (aud !== expectedProjectId || !emailVerified || exp < 1_700_000_000) {
     return { ok: false };
   }
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
+    const timer = setTimeout(() => controller.abort(), 4500);
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
       {
@@ -567,14 +569,23 @@ async function authenticateRequest(
     platformState.databases.find((d) => d.id === platformState.activeDatabaseId) ||
     platformState.databases[0];
 
+  const claims = decodeJwtPayload(bearer);
+  const jwtAud = typeof claims?.aud === 'string' ? claims.aud.trim() : '';
+  const matchedPoolEntry = jwtAud
+    ? platformState.databases.find((d) => d.config.projectId === jwtAud) ||
+      (defaultAppletConfig.projectId === jwtAud ? { config: defaultAppletConfig } : undefined)
+    : undefined;
+
   const tokenProjectId =
-    typeof body.tokenProjectId === 'string' && body.tokenProjectId.trim()
+    matchedPoolEntry?.config.projectId ||
+    (typeof body.tokenProjectId === 'string' && body.tokenProjectId.trim()
       ? body.tokenProjectId.trim()
-      : activeEntry.config.projectId;
+      : activeEntry.config.projectId);
   const tokenApiKey =
-    typeof body.tokenApiKey === 'string' && body.tokenApiKey.trim()
+    matchedPoolEntry?.config.apiKey ||
+    (typeof body.tokenApiKey === 'string' && body.tokenApiKey.trim()
       ? body.tokenApiKey.trim()
-      : activeEntry.config.apiKey;
+      : activeEntry.config.apiKey);
 
   if (!isAllowedFirebaseCredentials(tokenProjectId, tokenApiKey)) {
     return { ok: false, status: 403, error: 'Unrecognized Firebase project credentials' };

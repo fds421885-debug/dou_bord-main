@@ -1,17 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { signInWithPopup, signOut, type User } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
-import { LogIn, UserCheck, AlertCircle, LogOut, Database } from 'lucide-react';
+import { LogIn, UserCheck, AlertCircle, LogOut } from 'lucide-react';
 import {
-  activeProjectId,
   auth,
   db,
   googleProvider,
   handleFirestoreError,
-  isCustomFirebaseConfig,
   isQuadNameValid,
   OperationType,
-  UPGRADE_FIRESTORE_URL,
 } from '../firebase';
 import { saveSessionSnapshot } from '../localDraftStore';
 import type { UserProfile } from '../types';
@@ -21,7 +18,7 @@ interface AuthGateProps {
   firebaseUser: User | null;
   profile: UserProfile | null;
   onProfileSaved: (profile: UserProfile) => void;
-  onOpenMigration?: () => void;
+  onQuotaDetected?: () => void;
 }
 
 function formatAuthOrFirestoreError(err: unknown, user?: User | null): string {
@@ -29,7 +26,7 @@ function formatAuthOrFirestoreError(err: unknown, user?: User | null): string {
   const lower = raw.toLowerCase();
 
   if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
-    return `تم تجاوز الحصة اليومية المجانية لقاعدة البيانات (Firestore Quota exceeded). تتجدد الحصة تلقائياً في اليوم التالي، أو يمكنك الترقية من: ${UPGRADE_FIRESTORE_URL}`;
+    return 'تم الوصول للحد الأقصى مؤقتاً، جاري التبديل تلقائياً لقاعدة بيانات بديلة...';
   }
   if (lower.includes('auth/unauthorized-domain')) {
     return 'هذا النطاق (مثل Netlify) غير مضاف في النطاقات المصرح بها (Authorized domains) في إعدادات Firebase Authentication.';
@@ -56,7 +53,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   firebaseUser,
   profile,
   onProfileSaved,
-  onOpenMigration,
+  onQuotaDetected,
 }) => {
   const [quadName, setQuadName] = useState(profile?.fullNameQuad ?? '');
   const [loading, setLoading] = useState(false);
@@ -150,6 +147,10 @@ export const AuthGate: React.FC<AuthGateProps> = ({
       } catch (wrapped) {
         console.error(wrapped);
       }
+      const rawErr = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+      if (rawErr.includes('quota exceeded') || rawErr.includes('resource-exhausted')) {
+        onQuotaDetected?.();
+      }
       setErrorMsg(formatAuthOrFirestoreError(err, firebaseUser));
     } finally {
       setLoading(false);
@@ -210,37 +211,11 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </div>
 
                 {errorMsg && (
-                  <div className="flex flex-col gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
-                    <div className="flex items-start gap-2.5">
-                      <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                      <span>{errorMsg}</span>
-                    </div>
-                    {onOpenMigration && (
-                      <button
-                        type="button"
-                        onClick={onOpenMigration}
-                        className="duo-btn self-start flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-[#1899D6] border-b-4 text-white text-xs font-black cursor-pointer"
-                      >
-                        <Database className="w-4 h-4" />
-                        <span>انقل إلى قاعدة بيانات أخرى</span>
-                      </button>
-                    )}
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
+                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                    <span>{errorMsg}</span>
                   </div>
                 )}
-
-                <div
-                  className={`flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl border-2 text-xs font-black ${
-                    isCustomFirebaseConfig
-                      ? 'bg-[#F0F9FF] border-[#1CB0F6] text-[#1899D6]'
-                      : 'bg-[#F7F7F7] border-[#E5E5E5] text-[#777777]'
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <Database className="w-4 h-4 shrink-0" />
-                    <span>قاعدة تسجيل الدخول المعتمدة:</span>
-                  </span>
-                  <span className="font-latin font-black">{activeProjectId}</span>
-                </div>
 
                 <button
                   type="button"
@@ -251,17 +226,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <LogIn className="w-5 h-5" />
                   <span>{loading ? 'جاري تسجيل الدخول...' : 'الدخول عبر حساب Google'}</span>
                 </button>
-
-                {onOpenMigration && (
-                  <button
-                    type="button"
-                    onClick={onOpenMigration}
-                    className="duo-btn w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#1899D6] hover:border-[#1CB0F6] cursor-pointer"
-                  >
-                    <Database className="w-4 h-4" />
-                    <span>نقل وربط قاعدة بيانات جديدة</span>
-                  </button>
-                )}
               </div>
             ) : (
               <form onSubmit={handleSaveQuadName} className="flex flex-col gap-5">
@@ -296,21 +260,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </div>
 
                 {errorMsg && (
-                  <div className="flex flex-col gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
-                    <div className="flex items-start gap-2.5">
-                      <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                      <span>{errorMsg}</span>
-                    </div>
-                    {onOpenMigration && (
-                      <button
-                        type="button"
-                        onClick={onOpenMigration}
-                        className="duo-btn self-start flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-[#1899D6] border-b-4 text-white text-xs font-black cursor-pointer"
-                      >
-                        <Database className="w-4 h-4" />
-                        <span>انقل إلى قاعدة بيانات أخرى</span>
-                      </button>
-                    )}
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
+                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                    <span>{errorMsg}</span>
                   </div>
                 )}
 
@@ -322,17 +274,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <UserCheck className="w-5 h-5" />
                   <span>{loading ? 'جاري الحفظ...' : 'حفظ الاسم والمتابعة'}</span>
                 </button>
-
-                {onOpenMigration && (
-                  <button
-                    type="button"
-                    onClick={onOpenMigration}
-                    className="duo-btn w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#1899D6] hover:border-[#1CB0F6] cursor-pointer"
-                  >
-                    <Database className="w-4 h-4" />
-                    <span>نقل إلى قاعدة بيانات أخرى</span>
-                  </button>
-                )}
               </form>
             )}
           </div>

@@ -14,13 +14,17 @@ import {
   DB_EPOCH_STORAGE_KEY,
   defaultFirebaseConfig,
   firebaseTargetKey,
+  getInitialServerPlatformStatus,
   getPreviousFirebaseConfigs,
+  isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  normalizeArabicName,
   PENDING_REJOIN_ROOM_KEY,
   sanitizeFirebaseConfig,
   savePreviousFirebaseConfigs,
   SYNCED_SOURCES_KEY_PREFIX,
   type FirebaseAppConfig,
+  type InitialServerPlatformStatus,
   type ServerPlatformPointer,
 } from './firebaseConfigBootstrap';
 
@@ -28,11 +32,15 @@ export {
   CURRENT_DB_EPOCH,
   defaultFirebaseConfig,
   firebaseTargetKey,
+  getInitialServerPlatformStatus,
   getPreviousFirebaseConfigs,
+  isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  normalizeArabicName,
   sanitizeFirebaseConfig,
   savePreviousFirebaseConfigs,
   type FirebaseAppConfig,
+  type InitialServerPlatformStatus,
   type ServerPlatformPointer,
 };
 

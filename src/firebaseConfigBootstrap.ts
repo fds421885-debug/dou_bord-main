@@ -18,12 +18,51 @@ export interface ServerPlatformPointer {
   migratedRoomId?: string | null;
   migrationEpoch?: string;
   previousConfigs?: FirebaseAppConfig[];
+  activeDatabaseId?: string;
+  activeOrder?: number;
+  totalDatabases?: number;
+  allExhausted?: boolean;
+  revision?: number;
   updatedByEmail?: string;
   updatedAt?: number;
 }
 
+export interface InitialServerPlatformStatus {
+  serverSynced: boolean;
+  allExhausted: boolean;
+  revision: number;
+  activeDatabaseId: string;
+  activeOrder: number;
+  totalDatabases: number;
+}
+
 export const defaultFirebaseConfig: FirebaseAppConfig =
   defaultFirebaseConfigJson as FirebaseAppConfig;
+
+export const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
+export const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
+
+export function normalizeArabicName(input: string | undefined | null): string {
+  if (!input) return '';
+  return input
+    .trim()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+export function isMasterProgrammerIdentity(identity: {
+  email?: string | null;
+  fullNameQuad?: string | null;
+}): boolean {
+  const emailLower = (identity.email || '').trim().toLowerCase();
+  if (emailLower && emailLower === MASTER_PROGRAMMER_EMAIL) return true;
+  const norm = normalizeArabicName(identity.fullNameQuad);
+  return Boolean(norm && norm === normalizeArabicName(MASTER_PROGRAMMER_NAME));
+}
 
 export const CUSTOM_CONFIG_STORAGE_KEY = 'duoboard_custom_firebase_config_v1';
 export const PREV_CONFIGS_STORAGE_KEY = 'duoboard_prev_firebase_configs_v1';
@@ -33,6 +72,19 @@ export const ACTIVE_ROOM_STORAGE_PREFIX = 'duoboard_active_room_';
 export const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
 export const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
 export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18';
+
+let initialServerStatus: InitialServerPlatformStatus = {
+  serverSynced: false,
+  allExhausted: false,
+  revision: 0,
+  activeDatabaseId: 'primary_default',
+  activeOrder: 1,
+  totalDatabases: 1,
+};
+
+export function getInitialServerPlatformStatus(): InitialServerPlatformStatus {
+  return initialServerStatus;
+}
 
 export function sanitizeFirebaseConfig(
   raw: unknown
@@ -135,7 +187,7 @@ export function savePreviousFirebaseConfigs(
         deduped.push(cfg);
       }
     }
-    localStorage.setItem(PREV_CONFIGS_STORAGE_KEY, JSON.stringify(deduped.slice(0, 8)));
+    localStorage.setItem(PREV_CONFIGS_STORAGE_KEY, JSON.stringify(deduped.slice(0, 12)));
   } catch {
     // Ignore storage errors
   }
@@ -177,54 +229,78 @@ function getCurrentStoredFirebaseConfig(): FirebaseAppConfig {
 
 /**
  * Fetches the authoritative server-stored Firebase pointer BEFORE firebase.ts initializes,
- * so any device opening the site connects directly to the active migrated database for login & data.
+ * so ANY visitor opening the platform waits briefly, gets the exact active DB in the pool,
+ * and logs in + enters rooms directly on that DB.
  */
-export async function syncPlatformDbBeforeBoot(): Promise<void> {
-  if (typeof window === 'undefined') return;
-
-  try {
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('fb')) {
-      return;
-    }
-  } catch {
-    // Ignore URL errors
-  }
+export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformStatus> {
+  if (typeof window === 'undefined') return initialServerStatus;
 
   try {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 900);
-    const resp = await fetch('/api/platform-db', {
+    const timer = window.setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
       cache: 'no-store',
       signal: controller.signal,
     });
     window.clearTimeout(timer);
-    if (!resp.ok) return;
+    if (!resp.ok) return initialServerStatus;
 
-    const payload = (await resp.json()) as { pointer?: ServerPlatformPointer | null };
+    const payload = (await resp.json()) as {
+      pointer?: ServerPlatformPointer | null;
+      revision?: number;
+      allExhausted?: boolean;
+      activeDatabaseId?: string;
+      activeOrder?: number;
+      totalDatabases?: number;
+    };
     const ptr = payload?.pointer;
-    if (!ptr || !ptr.config) return;
+    if (!ptr || !ptr.config) return initialServerStatus;
+
+    initialServerStatus = {
+      serverSynced: true,
+      allExhausted: Boolean(payload.allExhausted ?? ptr.allExhausted),
+      revision: Number(payload.revision ?? ptr.revision ?? 1),
+      activeDatabaseId: String(payload.activeDatabaseId || ptr.activeDatabaseId || 'primary_default'),
+      activeOrder: Number(payload.activeOrder ?? ptr.activeOrder ?? 1),
+      totalDatabases: Number(payload.totalDatabases ?? ptr.totalDatabases ?? 1),
+    };
+
+    // Server is authoritative over legacy ?fb= query links
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('fb')) {
+        url.searchParams.delete('fb');
+        window.history.replaceState({}, '', url.toString());
+      }
+    } catch {
+      // Ignore URL errors
+    }
 
     const targetCfg = sanitizeFirebaseConfig(ptr.config);
-    if (!targetCfg) return;
+    if (!targetCfg) return initialServerStatus;
 
     const currentLocal = getCurrentStoredFirebaseConfig();
+    const extras = Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : [];
 
     if (ptr.resetToDefault || isSameFirebaseTarget(targetCfg, defaultFirebaseConfig)) {
       if (!isSameFirebaseTarget(currentLocal, defaultFirebaseConfig)) {
         savePreviousFirebaseConfigs(
-          [currentLocal, ...getPreviousFirebaseConfigs()],
+          [currentLocal, ...extras, ...getPreviousFirebaseConfigs()],
           defaultFirebaseConfig
         );
         localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
         clearStaleRoomAndSessionKeys();
+      } else if (extras.length > 0) {
+        savePreviousFirebaseConfigs(
+          [...extras, ...getPreviousFirebaseConfigs()],
+          defaultFirebaseConfig
+        );
       }
       localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
-      return;
+      return initialServerStatus;
     }
 
     if (!isSameFirebaseTarget(targetCfg, currentLocal)) {
-      const extras = Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : [];
       savePreviousFirebaseConfigs(
         [currentLocal, defaultFirebaseConfig, ...extras, ...getPreviousFirebaseConfigs()],
         targetCfg
@@ -232,8 +308,18 @@ export async function syncPlatformDbBeforeBoot(): Promise<void> {
       localStorage.setItem(CUSTOM_CONFIG_STORAGE_KEY, JSON.stringify(targetCfg));
       localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
       clearStaleRoomAndSessionKeys();
+    } else {
+      localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+      if (extras.length > 0) {
+        savePreviousFirebaseConfigs(
+          [...extras, ...getPreviousFirebaseConfigs()],
+          targetCfg
+        );
+      }
     }
   } catch {
     // Static host or offline — gracefully rely on localStorage + Firestore platform/migration
   }
+
+  return initialServerStatus;
 }

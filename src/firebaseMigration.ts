@@ -34,6 +34,7 @@ import {
   markSourceKeySynced,
   sanitizeFirebaseConfig,
   type FirebaseAppConfig,
+  type ServerPlatformPointer,
 } from './firebase';
 import {
   loadAllQuizDrafts,
@@ -55,6 +56,9 @@ import type {
   InteractiveSlide,
   MyQuiz,
   Participant,
+  PlatformProgrammerState,
+  PoolDatabaseEntry,
+  ProgrammerMember,
   Question,
   QuizAttempt,
   Room,
@@ -2549,3 +2553,250 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
     needsInteractiveSignIn,
   };
 }
+
+/**
+ * Restores a supervisor's active room & cached questions/slides from IndexedDB
+ * onto the newly rotated database when auto-failover happens mid-session.
+ */
+export async function restoreActiveSupervisorRoomFromSnapshot(params: {
+  targetUser: User;
+  resolvedQuadName: string;
+  roomId: string;
+}): Promise<boolean> {
+  const { targetUser, resolvedQuadName, roomId } = params;
+  try {
+    const cachedRoom = await loadSessionSnapshot<StoredRoomSnapshot>('active_room');
+    if (!cachedRoom || cachedRoom.room?.id !== roomId || cachedRoom.myRole !== 'supervisor') {
+      return false;
+    }
+    const roomRef = doc(sourceDb, 'rooms', roomId);
+    const existing = await getDoc(roomRef);
+    if (existing.exists()) return true;
+
+    const srcRoom = cachedRoom.room;
+    const supervisorDisplay =
+      resolvedQuadName && resolvedQuadName.length >= 5
+        ? resolvedQuadName
+        : srcRoom.supervisorName || 'مشرف المنصة';
+
+    await setDoc(roomRef, {
+      id: srcRoom.id,
+      title: (srcRoom.title || 'جلسة مستعادة').slice(0, 120),
+      supervisorId: targetUser.uid,
+      supervisorName: supervisorDisplay.slice(0, 120),
+      status: srcRoom.status === 'active' ? 'active' : 'waiting',
+      sessionType: srcRoom.sessionType || 'quiz',
+      mode: srcRoom.mode === 'competition' ? 'competition' : 'quiz',
+      explainPresenterId: targetUser.uid,
+      explainPresenterName: supervisorDisplay.slice(0, 120),
+      interactiveEditor:
+        srcRoom.sessionType === 'interactive' && srcRoom.interactiveEditor === 'all'
+          ? 'all'
+          : 'supervisor',
+      interactiveEditorName:
+        srcRoom.sessionType === 'interactive' && srcRoom.interactiveEditor === 'all'
+          ? 'الجميع'
+          : supervisorDisplay.slice(0, 120),
+      currentSlideIndex: Math.min(100, Math.max(0, srcRoom.currentSlideIndex ?? 0)),
+      slideCount: Math.min(100, Math.max(cachedRoom.slides.length, srcRoom.slideCount ?? 0)),
+      currentQuestionId: srcRoom.currentQuestionId || '',
+      questionCount: Math.min(200, Math.max(cachedRoom.questions.length, srcRoom.questionCount ?? 0)),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    for (const slide of cachedRoom.slides) {
+      if (!slide.imageData || slide.imageData.length > 480000) continue;
+      await setDoc(doc(sourceDb, 'rooms', srcRoom.id, 'slides', slide.id), {
+        id: slide.id,
+        roomId: srcRoom.id,
+        pageIndex: Math.min(100, Math.max(1, slide.pageIndex)),
+        imageData: slide.imageData,
+        ...(slide.fileId ? { fileId: slide.fileId } : {}),
+        ...(slide.fileName ? { fileName: slide.fileName.slice(0, 160) } : {}),
+        ...(typeof slide.filePageIndex === 'number'
+          ? { filePageIndex: Math.min(100, Math.max(1, slide.filePageIndex)) }
+          : {}),
+        createdAt: serverTimestamp(),
+      });
+    }
+
+    for (const q of cachedRoom.questions) {
+      const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
+      const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
+      const sanitizedChoices =
+        Array.isArray(q.choices) && q.choices.length > 0
+          ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
+          : null;
+      await setDoc(doc(sourceDb, 'rooms', srcRoom.id, 'questions', q.id), {
+        id: q.id,
+        roomId: srcRoom.id,
+        orderIndex: Math.min(200, Math.max(1, q.orderIndex)),
+        text: (q.text || '').slice(0, 2000),
+        imageData: q.imageData && q.imageData.length <= 480000 ? q.imageData : '',
+        ...(sanitizedChoices ? { choices: sanitizedChoices } : {}),
+        ...(sanitizedChart ? { chart: sanitizedChart } : {}),
+        ...(sanitizedFigure ? { figure: sanitizedFigure } : {}),
+        ...(q.sourceQuizTitle
+          ? { sourceQuizTitle: String(q.sourceQuizTitle).slice(0, 120) }
+          : {}),
+        status: 'solving',
+        attemptsUsed: 0,
+        wrongStudentIds: [],
+        winnerId: '',
+        winnerName: '',
+        timerSeconds: Math.min(3600, Math.max(0, q.timerSeconds ?? 0)),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function triggerAutomaticQuotaFailover(params: {
+  failedProjectId: string;
+  failedFirestoreDatabaseId?: string;
+}): Promise<{
+  rotated: boolean;
+  allExhausted: boolean;
+  pointer?: ServerPlatformPointer | null;
+} | null> {
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 4000);
+    const resp = await fetch('/api/platform-db/failover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        failedProjectId: params.failedProjectId,
+        failedFirestoreDatabaseId: params.failedFirestoreDatabaseId || '',
+      }),
+      signal: controller.signal,
+    });
+    window.clearTimeout(timer);
+    if (!resp.ok) return null;
+    return (await resp.json()) as {
+      rotated: boolean;
+      allExhausted: boolean;
+      pointer?: ServerPlatformPointer | null;
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function callProgrammerEndpoint<T>(
+  endpoint: string,
+  user: User,
+  fullNameQuad: string,
+  payload: Record<string, unknown> = {}
+): Promise<T> {
+  const idToken = await user.getIdToken();
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+      'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
+    },
+    body: JSON.stringify({
+      ...payload,
+      fullNameQuad,
+      tokenProjectId: activeFirebaseConfig.projectId,
+      tokenApiKey: activeFirebaseConfig.apiKey,
+    }),
+  });
+  const data = (await resp.json()) as T & { error?: string };
+  if (!resp.ok) {
+    throw new Error(data?.error || 'فشل تنفيذ طلب المبرمج');
+  }
+  return data;
+}
+
+export async function fetchProgrammerSession(
+  user: User,
+  fullNameQuad: string
+): Promise<{ isProgrammer: boolean; isMaster: boolean; state?: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/session', user, fullNameQuad);
+}
+
+export async function addDatabaseToPool(
+  user: User,
+  fullNameQuad: string,
+  config: FirebaseAppConfig,
+  label: string
+): Promise<{ ok: boolean; added: PoolDatabaseEntry; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/databases/add', user, fullNameQuad, {
+    config,
+    label,
+  });
+}
+
+export async function reorderDatabasePool(
+  user: User,
+  fullNameQuad: string,
+  orderedIds: string[]
+): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/databases/reorder', user, fullNameQuad, {
+    orderedIds,
+  });
+}
+
+export async function activateDatabaseFromPool(
+  user: User,
+  fullNameQuad: string,
+  databaseId: string,
+  migratedRoomId?: string | null
+): Promise<{ ok: boolean; state: PlatformProgrammerState; pointer: ServerPlatformPointer }> {
+  return callProgrammerEndpoint('/api/programmer/databases/activate', user, fullNameQuad, {
+    databaseId,
+    migratedRoomId: migratedRoomId || null,
+  });
+}
+
+export async function reactivatePoolDatabase(
+  user: User,
+  fullNameQuad: string,
+  databaseId: string | 'ALL'
+): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/databases/reactivate', user, fullNameQuad, {
+    databaseId,
+  });
+}
+
+export async function removeDatabaseFromPool(
+  user: User,
+  fullNameQuad: string,
+  databaseId: string
+): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/databases/remove', user, fullNameQuad, {
+    databaseId,
+  });
+}
+
+export async function promoteProgrammerMember(
+  user: User,
+  fullNameQuad: string,
+  targetFullNameQuad: string,
+  targetEmail: string
+): Promise<{ ok: boolean; member: ProgrammerMember; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/members/add', user, fullNameQuad, {
+    fullNameQuad: targetFullNameQuad,
+    email: targetEmail,
+  });
+}
+
+export async function removeProgrammerMember(
+  user: User,
+  fullNameQuad: string,
+  memberId: string
+): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
+  return callProgrammerEndpoint('/api/programmer/members/remove', user, fullNameQuad, {
+    memberId,
+  });
+}
+

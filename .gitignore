@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 .duoboard-platform-db.json
+.duoboard-platform-state.json

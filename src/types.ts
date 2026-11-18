@@ -433,3 +433,46 @@ export interface CompetitionQuestion {
   updatedAt?: unknown;
 }
 
+/* ===================== إدارة المبرمجين ومسبح قواعد البيانات ===================== */
+
+export interface PoolFirebaseConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId: string;
+  measurementId?: string;
+  firestoreDatabaseId?: string;
+}
+
+export interface PoolDatabaseEntry {
+  id: string;
+  order: number;
+  label: string;
+  config: PoolFirebaseConfig;
+  exhaustedAt: number | null;
+  exhaustedUntil: number | null;
+  addedByEmail?: string;
+  addedAt: number;
+}
+
+export interface ProgrammerMember {
+  id: string;
+  fullNameQuad: string;
+  email?: string;
+  isMaster?: boolean;
+  promotedBy?: string;
+  promotedAt: number;
+}
+
+export interface PlatformProgrammerState {
+  revision: number;
+  databases: PoolDatabaseEntry[];
+  activeDatabaseId: string;
+  allExhausted: boolean;
+  programmers: ProgrammerMember[];
+  migratedRoomId?: string | null;
+  updatedByEmail?: string;
+  updatedAt: number;
+}

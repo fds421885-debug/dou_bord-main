@@ -74,7 +74,7 @@ export const ACTIVE_ROOM_STORAGE_PREFIX = 'duoboard_active_room_';
 export const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
 export const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
 export const SWITCH_REQUIRE_LOGIN_KEY = 'duoboard_switched_require_login_v1';
-export const CURRENT_DB_EPOCH = 'consolidated_qdrat_9829b_2026_11_18';
+export const CURRENT_DB_EPOCH = 'consolidated_huiiii_50983_2026_11_18';
 
 export interface BootProgress {
   percent: number;

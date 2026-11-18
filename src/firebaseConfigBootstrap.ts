@@ -29,6 +29,8 @@ export interface ServerPlatformPointer {
 
 export interface InitialServerPlatformStatus {
   serverSynced: boolean;
+  backendAvailable: boolean;
+  switchedOnBoot: boolean;
   allExhausted: boolean;
   revision: number;
   activeDatabaseId: string;
@@ -75,6 +77,8 @@ export const CURRENT_DB_EPOCH = 'consolidated_primary_2026_11_18';
 
 let initialServerStatus: InitialServerPlatformStatus = {
   serverSynced: false,
+  backendAvailable: false,
+  switchedOnBoot: false,
   allExhausted: false,
   revision: 0,
   activeDatabaseId: 'primary_default',
@@ -227,45 +231,302 @@ function getCurrentStoredFirebaseConfig(): FirebaseAppConfig {
   return defaultFirebaseConfig;
 }
 
+export interface ResolvedRemotePointer {
+  config: FirebaseAppConfig;
+  resetToDefault: boolean;
+  migratedRoomId?: string | null;
+  migrationEpoch?: string;
+  previousConfigs: FirebaseAppConfig[];
+  updatedAtMs: number;
+}
+
+type RestFieldValue = {
+  stringValue?: string;
+  timestampValue?: string;
+  arrayValue?: { values?: Array<{ mapValue?: { fields?: Record<string, RestFieldValue> } }> };
+  mapValue?: { fields?: Record<string, RestFieldValue> };
+};
+
+function readRestString(
+  fields: Record<string, RestFieldValue> | undefined,
+  key: string
+): string {
+  const val = fields?.[key]?.stringValue;
+  return typeof val === 'string' ? val.trim() : '';
+}
+
+function parseConfigFromRestFields(
+  fields: Record<string, RestFieldValue> | undefined
+): FirebaseAppConfig | null {
+  if (!fields) return null;
+  return sanitizeFirebaseConfig({
+    apiKey: readRestString(fields, 'apiKey'),
+    authDomain: readRestString(fields, 'authDomain'),
+    projectId: readRestString(fields, 'projectId'),
+    appId: readRestString(fields, 'appId'),
+    storageBucket: readRestString(fields, 'storageBucket'),
+    messagingSenderId: readRestString(fields, 'messagingSenderId'),
+    measurementId: readRestString(fields, 'measurementId'),
+    firestoreDatabaseId: readRestString(fields, 'firestoreDatabaseId'),
+  });
+}
+
+async function fetchFirestoreMigrationPointerRest(
+  sourceCfg: FirebaseAppConfig,
+  timeoutMs = 2600
+): Promise<
+  | { status: 'ok'; pointer: ResolvedRemotePointer }
+  | { status: 'quota' }
+  | { status: 'missing' }
+> {
+  const dbName = encodeURIComponent((sourceCfg.firestoreDatabaseId || '(default)').trim());
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    sourceCfg.projectId
+  )}/databases/${dbName}/documents/platform/migration?key=${encodeURIComponent(sourceCfg.apiKey)}`;
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    window.clearTimeout(timer);
+    if (resp.status === 429) {
+      return { status: 'quota' };
+    }
+    if (!resp.ok) {
+      return { status: 'missing' };
+    }
+    const docJson = (await resp.json()) as {
+      fields?: Record<string, RestFieldValue>;
+      updateTime?: string;
+    };
+    const fields = docJson?.fields;
+    const cfg = parseConfigFromRestFields(fields);
+    if (!cfg) return { status: 'missing' };
+
+    const epoch = readRestString(fields, 'migrationEpoch');
+    const migratedRoomId = readRestString(fields, 'migratedRoomId') || null;
+    const updatedTsStr =
+      fields?.updatedAt?.timestampValue ||
+      (typeof docJson.updateTime === 'string' ? docJson.updateTime : '');
+    const parsedTs = updatedTsStr ? Date.parse(updatedTsStr) : 0;
+    const updatedAtMs = Number.isFinite(parsedTs) && parsedTs > 0 ? parsedTs : 1;
+
+    const prevRaw = fields?.previousConfigs?.arrayValue?.values ?? [];
+    const previousConfigs: FirebaseAppConfig[] = [];
+    for (const item of prevRaw) {
+      const pCfg = parseConfigFromRestFields(item?.mapValue?.fields);
+      if (pCfg && !previousConfigs.some((x) => isSameFirebaseTarget(x, pCfg))) {
+        previousConfigs.push(pCfg);
+      }
+    }
+
+    return {
+      status: 'ok',
+      pointer: {
+        config: cfg,
+        resetToDefault: isSameFirebaseTarget(cfg, defaultFirebaseConfig),
+        migratedRoomId,
+        migrationEpoch: epoch || undefined,
+        previousConfigs,
+        updatedAtMs,
+      },
+    };
+  } catch {
+    window.clearTimeout(timer);
+    return { status: 'missing' };
+  }
+}
+
 /**
- * Fetches the authoritative server-stored Firebase pointer BEFORE firebase.ts initializes,
- * so ANY visitor opening the platform waits briefly, gets the exact active DB in the pool,
- * and logs in + enters rooms directly on that DB.
+ * Walks Firestore /platform/migration via public unauthenticated REST API across
+ * defaultFirebaseConfig -> current DB -> any forwarded target DBs (up to 8 hops),
+ * returning the newest active database pointer configured by the programmer.
+ */
+export async function resolveLatestFirestoreMigrationRest(
+  extraSeeds: FirebaseAppConfig[] = []
+): Promise<ResolvedRemotePointer | null> {
+  if (typeof window === 'undefined') return null;
+
+  const initialSeeds: FirebaseAppConfig[] = [];
+  const addSeed = (cfg: FirebaseAppConfig | null | undefined) => {
+    if (!cfg) return;
+    if (!initialSeeds.some((x) => isSameFirebaseTarget(x, cfg))) {
+      initialSeeds.push(cfg);
+    }
+  };
+  addSeed(defaultFirebaseConfig);
+  addSeed(getCurrentStoredFirebaseConfig());
+  for (const prev of getPreviousFirebaseConfigs()) addSeed(prev);
+  for (const extra of extraSeeds) addSeed(extra);
+
+  const visited = new Set<string>();
+  let frontier: FirebaseAppConfig[] = [...initialSeeds];
+  let best: ResolvedRemotePointer | null = null;
+  let allCollectedConfigs: FirebaseAppConfig[] = [...initialSeeds];
+
+  for (let hop = 0; hop < 6 && frontier.length > 0; hop++) {
+    const batch = frontier.filter((c) => {
+      const k = firebaseTargetKey(c);
+      if (visited.has(k)) return false;
+      visited.add(k);
+      return true;
+    });
+    if (batch.length === 0) break;
+
+    const results = await Promise.all(
+      batch.map((cfg) => fetchFirestoreMigrationPointerRest(cfg, hop === 0 ? 2800 : 2200))
+    );
+
+    const nextFrontier: FirebaseAppConfig[] = [];
+    for (const res of results) {
+      if (res.status !== 'ok') continue;
+      const ptr = res.pointer;
+      if (ptr.migrationEpoch && ptr.migrationEpoch !== CURRENT_DB_EPOCH) continue;
+
+      if (!allCollectedConfigs.some((x) => isSameFirebaseTarget(x, ptr.config))) {
+        allCollectedConfigs.push(ptr.config);
+      }
+      for (const prev of ptr.previousConfigs) {
+        if (!allCollectedConfigs.some((x) => isSameFirebaseTarget(x, prev))) {
+          allCollectedConfigs.push(prev);
+        }
+      }
+
+      if (!best || ptr.updatedAtMs >= best.updatedAtMs) {
+        best = ptr;
+      }
+
+      const targetKey = firebaseTargetKey(ptr.config);
+      if (
+        !visited.has(targetKey) &&
+        !nextFrontier.some((x) => isSameFirebaseTarget(x, ptr.config))
+      ) {
+        nextFrontier.push(ptr.config);
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  if (!best) return null;
+
+  return {
+    ...best,
+    previousConfigs: allCollectedConfigs.filter(
+      (c, idx, arr) =>
+        !isSameFirebaseTarget(c, best!.config) &&
+        arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
+    ),
+  };
+}
+
+function persistResolvedTargetConfig(params: {
+  targetCfg: FirebaseAppConfig;
+  resetToDefault?: boolean;
+  extras?: FirebaseAppConfig[];
+}): boolean {
+  const { targetCfg, resetToDefault, extras = [] } = params;
+  const currentLocal = getCurrentStoredFirebaseConfig();
+  let switched = false;
+
+  if (resetToDefault || isSameFirebaseTarget(targetCfg, defaultFirebaseConfig)) {
+    if (!isSameFirebaseTarget(currentLocal, defaultFirebaseConfig)) {
+      switched = true;
+      savePreviousFirebaseConfigs(
+        [currentLocal, ...extras, ...getPreviousFirebaseConfigs()],
+        defaultFirebaseConfig
+      );
+      localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
+      clearStaleRoomAndSessionKeys();
+    } else if (extras.length > 0) {
+      savePreviousFirebaseConfigs(
+        [...extras, ...getPreviousFirebaseConfigs()],
+        defaultFirebaseConfig
+      );
+    }
+    localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+    return switched;
+  }
+
+  if (!isSameFirebaseTarget(targetCfg, currentLocal)) {
+    switched = true;
+    savePreviousFirebaseConfigs(
+      [currentLocal, defaultFirebaseConfig, ...extras, ...getPreviousFirebaseConfigs()],
+      targetCfg
+    );
+    localStorage.setItem(CUSTOM_CONFIG_STORAGE_KEY, JSON.stringify(targetCfg));
+    localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+    clearStaleRoomAndSessionKeys();
+  } else {
+    localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
+    if (extras.length > 0) {
+      savePreviousFirebaseConfigs(
+        [...extras, ...getPreviousFirebaseConfigs()],
+        targetCfg
+      );
+    }
+  }
+  return switched;
+}
+
+/**
+ * Fetches the authoritative active Firebase pointer BEFORE firebase.ts initializes,
+ * checking BOTH the Express server (/api/platform-db) AND Firestore /platform/migration REST chain
+ * so BOTH AI Studio server deployments and static hosts (GitHub Pages / Netlify)
+ * always route every visitor directly to the programmer's currently active database.
  */
 export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformStatus> {
   if (typeof window === 'undefined') return initialServerStatus;
 
-  try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    window.clearTimeout(timer);
-    if (!resp.ok) return initialServerStatus;
+  let serverPtr: ServerPlatformPointer | null = null;
+  let serverAllExhausted = false;
+  let serverRevision = 0;
+  let serverActiveId = 'primary_default';
+  let serverActiveOrder = 1;
+  let serverTotalDbs = 1;
+  let backendAvailable = false;
 
-    const payload = (await resp.json()) as {
-      pointer?: ServerPlatformPointer | null;
-      revision?: number;
-      allExhausted?: boolean;
-      activeDatabaseId?: string;
-      activeOrder?: number;
-      totalDatabases?: number;
-    };
-    const ptr = payload?.pointer;
-    if (!ptr || !ptr.config) return initialServerStatus;
+  const tryServerPromise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 3200);
+      const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      window.clearTimeout(timer);
+      if (!resp.ok) return;
+      const contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) return;
+      const payload = (await resp.json()) as {
+        pointer?: ServerPlatformPointer | null;
+        revision?: number;
+        allExhausted?: boolean;
+        activeDatabaseId?: string;
+        activeOrder?: number;
+        totalDatabases?: number;
+      };
+      if (payload?.pointer?.config) {
+        backendAvailable = true;
+        serverPtr = payload.pointer;
+        serverAllExhausted = Boolean(payload.allExhausted ?? payload.pointer.allExhausted);
+        serverRevision = Number(payload.revision ?? payload.pointer.revision ?? 1);
+        serverActiveId = String(
+          payload.activeDatabaseId || payload.pointer.activeDatabaseId || 'primary_default'
+        );
+        serverActiveOrder = Number(payload.activeOrder ?? payload.pointer.activeOrder ?? 1);
+        serverTotalDbs = Number(payload.totalDatabases ?? payload.pointer.totalDatabases ?? 1);
+      }
+    } catch {
+      // Static host (GitHub Pages / Netlify) or offline
+    }
+  })();
 
-    initialServerStatus = {
-      serverSynced: true,
-      allExhausted: Boolean(payload.allExhausted ?? ptr.allExhausted),
-      revision: Number(payload.revision ?? ptr.revision ?? 1),
-      activeDatabaseId: String(payload.activeDatabaseId || ptr.activeDatabaseId || 'primary_default'),
-      activeOrder: Number(payload.activeOrder ?? ptr.activeOrder ?? 1),
-      totalDatabases: Number(payload.totalDatabases ?? ptr.totalDatabases ?? 1),
-    };
+  const tryFirestoreRestPromise = resolveLatestFirestoreMigrationRest().catch(() => null);
 
-    // Server is authoritative over legacy ?fb= query links
+  const [, restPtr] = await Promise.all([tryServerPromise, tryFirestoreRestPromise]);
+
+  // Clear legacy ?fb= URL params when authoritative resolution ran
+  if (backendAvailable || restPtr) {
     try {
       const url = new URL(window.location.href);
       if (url.searchParams.has('fb')) {
@@ -275,51 +536,61 @@ export async function syncPlatformDbBeforeBoot(): Promise<InitialServerPlatformS
     } catch {
       // Ignore URL errors
     }
-
-    const targetCfg = sanitizeFirebaseConfig(ptr.config);
-    if (!targetCfg) return initialServerStatus;
-
-    const currentLocal = getCurrentStoredFirebaseConfig();
-    const extras = Array.isArray(ptr.previousConfigs) ? ptr.previousConfigs : [];
-
-    if (ptr.resetToDefault || isSameFirebaseTarget(targetCfg, defaultFirebaseConfig)) {
-      if (!isSameFirebaseTarget(currentLocal, defaultFirebaseConfig)) {
-        savePreviousFirebaseConfigs(
-          [currentLocal, ...extras, ...getPreviousFirebaseConfigs()],
-          defaultFirebaseConfig
-        );
-        localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
-        clearStaleRoomAndSessionKeys();
-      } else if (extras.length > 0) {
-        savePreviousFirebaseConfigs(
-          [...extras, ...getPreviousFirebaseConfigs()],
-          defaultFirebaseConfig
-        );
-      }
-      localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
-      return initialServerStatus;
-    }
-
-    if (!isSameFirebaseTarget(targetCfg, currentLocal)) {
-      savePreviousFirebaseConfigs(
-        [currentLocal, defaultFirebaseConfig, ...extras, ...getPreviousFirebaseConfigs()],
-        targetCfg
-      );
-      localStorage.setItem(CUSTOM_CONFIG_STORAGE_KEY, JSON.stringify(targetCfg));
-      localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
-      clearStaleRoomAndSessionKeys();
-    } else {
-      localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
-      if (extras.length > 0) {
-        savePreviousFirebaseConfigs(
-          [...extras, ...getPreviousFirebaseConfigs()],
-          targetCfg
-        );
-      }
-    }
-  } catch {
-    // Static host or offline — gracefully rely on localStorage + Firestore platform/migration
   }
+
+  let chosenTarget: FirebaseAppConfig | null = null;
+  let chosenResetToDefault = false;
+  let chosenExtras: FirebaseAppConfig[] = [];
+
+  if (serverPtr && (serverPtr as ServerPlatformPointer).config) {
+    const sPtr = serverPtr as ServerPlatformPointer;
+    const sCfg = sanitizeFirebaseConfig(sPtr.config);
+    const serverUpdatedAt = Number(sPtr.updatedAt || 0);
+    // Prefer server pointer when server was explicitly switched/rotated (revision > 1) or is newer than REST
+    const restIsExplicitlyNewerCustom =
+      restPtr &&
+      serverRevision <= 1 &&
+      isSameFirebaseTarget(sCfg || defaultFirebaseConfig, defaultFirebaseConfig) &&
+      !isSameFirebaseTarget(restPtr.config, defaultFirebaseConfig) &&
+      restPtr.updatedAtMs > serverUpdatedAt;
+
+    if (restIsExplicitlyNewerCustom && restPtr) {
+      chosenTarget = restPtr.config;
+      chosenResetToDefault = restPtr.resetToDefault;
+      chosenExtras = restPtr.previousConfigs;
+    } else if (sCfg) {
+      chosenTarget = sCfg;
+      chosenResetToDefault = Boolean(sPtr.resetToDefault);
+      chosenExtras = [
+        ...(Array.isArray(sPtr.previousConfigs) ? sPtr.previousConfigs : []),
+        ...(restPtr?.previousConfigs ?? []),
+      ];
+    }
+  } else if (restPtr) {
+    chosenTarget = restPtr.config;
+    chosenResetToDefault = restPtr.resetToDefault;
+    chosenExtras = restPtr.previousConfigs;
+  }
+
+  let switchedOnBoot = false;
+  if (chosenTarget) {
+    switchedOnBoot = persistResolvedTargetConfig({
+      targetCfg: chosenTarget,
+      resetToDefault: chosenResetToDefault,
+      extras: chosenExtras,
+    });
+  }
+
+  initialServerStatus = {
+    serverSynced: backendAvailable || Boolean(restPtr),
+    backendAvailable,
+    switchedOnBoot,
+    allExhausted: backendAvailable ? serverAllExhausted : false,
+    revision: serverRevision,
+    activeDatabaseId: serverActiveId,
+    activeOrder: serverActiveOrder,
+    totalDatabases: serverTotalDbs,
+  };
 
   return initialServerStatus;
 }

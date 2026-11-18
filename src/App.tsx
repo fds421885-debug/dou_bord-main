@@ -47,6 +47,7 @@ import {
   justConsolidatedFrom,
   OperationType,
   resetToDefaultFirebaseConfig,
+  resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
   subscribeQuotaError,
   type FirebaseAppConfig,
@@ -186,6 +187,9 @@ export default function App() {
   const [isMasterProgrammer, setIsMasterProgrammer] = useState<boolean>(false);
   const [programmerState, setProgrammerState] =
     useState<PlatformProgrammerState | null>(null);
+  const [programmerMode, setProgrammerMode] = useState<'server' | 'serverless'>(() =>
+    getInitialServerPlatformStatus().backendAvailable ? 'server' : 'serverless'
+  );
   const [programmerLoading, setProgrammerLoading] = useState<boolean>(false);
   const [programmerError, setProgrammerError] = useState<string | null>(null);
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
@@ -385,6 +389,7 @@ export default function App() {
         const res = await fetchProgrammerSession(targetUser, candidateName);
         setIsProgrammer(res.isProgrammer || quickMaster);
         setIsMasterProgrammer(res.isMaster || quickMaster);
+        if (res.mode) setProgrammerMode(res.mode);
         if (res.state) {
           setProgrammerState(res.state);
           setAllExhausted(Boolean(res.state.allExhausted));
@@ -448,7 +453,28 @@ export default function App() {
       });
     };
 
-    const checkServerPointer = async () => {
+    let lastStaticRestCheckAt = 0;
+    const checkStaticFirestoreChain = async (force = false) => {
+      if (disposed) return;
+      const now = Date.now();
+      if (!force && now - lastStaticRestCheckAt < 14_000) return;
+      lastStaticRestCheckAt = now;
+      try {
+        const restPtr = await resolveLatestFirestoreMigrationRest();
+        if (!restPtr || disposed) return;
+        applyRemotePlatformPointer({
+          config: restPtr.config,
+          resetToDefault: restPtr.resetToDefault,
+          migratedRoomId: restPtr.migratedRoomId,
+          previousConfigs: restPtr.previousConfigs,
+          revision: restPtr.updatedAtMs || restPtr.migrationEpoch || CURRENT_DB_EPOCH,
+        });
+      } catch {
+        // Ignore transient network errors
+      }
+    };
+
+    const checkServerPointer = async (forceRestFallback = false) => {
       if (disposed) return;
       try {
         const controller = new AbortController();
@@ -458,15 +484,19 @@ export default function App() {
           signal: controller.signal,
         });
         window.clearTimeout(timer);
-        if (!resp.ok) return;
-        const data = (await resp.json()) as {
-          pointer?: ServerPlatformPointer | null;
-          allExhausted?: boolean;
-        };
-        handleServerPayload(data?.pointer, data?.allExhausted);
+        const contentType = resp.headers.get('content-type') || '';
+        if (resp.ok && contentType.includes('application/json')) {
+          const data = (await resp.json()) as {
+            pointer?: ServerPlatformPointer | null;
+            allExhausted?: boolean;
+          };
+          handleServerPayload(data?.pointer, data?.allExhausted);
+          return;
+        }
       } catch {
-        // Static hosting or temporary offline — handled gracefully
+        // Static host (GitHub Pages / Netlify) — check Firestore REST migration chain below
       }
+      await checkStaticFirestoreChain(forceRestFallback);
     };
 
     try {
@@ -484,7 +514,7 @@ export default function App() {
         }
       };
       es.onerror = () => {
-        // Browser auto-reconnects; fallback poll also active
+        // Browser auto-reconnects or fallback polling handles static hosting
       };
     } catch {
       // EventSource unsupported or static host
@@ -492,14 +522,14 @@ export default function App() {
 
     const onVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
-        void checkServerPointer();
+        void checkServerPointer(true);
       }
     };
     window.addEventListener('focus', onVisibilityOrFocus);
     document.addEventListener('visibilitychange', onVisibilityOrFocus);
     const pollTimer = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void checkServerPointer();
+        void checkServerPointer(false);
       }
     }, 4_500);
 
@@ -1010,6 +1040,7 @@ export default function App() {
                 currentRoom={room}
                 isSupervisorInCurrentRoom={isSupervisor}
                 isMaster={isMasterProgrammer}
+                backendMode={programmerMode}
                 poolState={programmerState}
                 onPoolStateUpdated={(next) => {
                   setProgrammerState(next);
@@ -1108,8 +1139,8 @@ export default function App() {
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
-            title="جاري التحديث والتبديل التلقائي..."
-            subtitle="تم نقل الجلسة إلى قاعدة بيانات جديدة لاستكمال العمل بدون انقطاع"
+            title="جاري التحميل، الرجاء الانتظار قليلاً..."
+            subtitle="تم تحديث قاعدة البيانات المعتمدة من المبرمج — جاري نقلك تلقائياً واستكمال العمل"
             percent={100}
             accent="blue"
           />
@@ -1187,8 +1218,8 @@ export default function App() {
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
-            title="جاري التحديث والتبديل التلقائي..."
-            subtitle="تم تحويل الجلسة للقاعدة المعتمدة لتسجيل الدخول ومتابعة العمل"
+            title="جاري التحميل، الرجاء الانتظار قليلاً..."
+            subtitle="تم تحديث قاعدة البيانات المعتمدة من المبرمج — جاري نقلك تلقائياً"
             percent={100}
             accent="blue"
           />
@@ -1496,6 +1527,7 @@ export default function App() {
                 currentRoom={room}
                 isSupervisorInCurrentRoom={isSupervisor}
                 isMaster={isMasterProgrammer}
+                backendMode={programmerMode}
                 poolState={programmerState}
                 onPoolStateUpdated={(next) => {
                   setProgrammerState(next);
@@ -1543,8 +1575,8 @@ export default function App() {
       {autoSwitchNotice && (
         <DuoLoading
           variant="overlay"
-          title="جاري التحديث والتبديل التلقائي..."
-          subtitle="تم اعتماد قاعدة بيانات جديدة لتسجيل الدخول واستكمال العمل بدون انقطاع"
+          title="جاري التحميل، الرجاء الانتظار قليلاً..."
+          subtitle="قام المبرمج بتحديث قاعدة البيانات المعتمدة — جاري نقلك تلقائياً لاستكمال العمل"
           percent={100}
           accent="blue"
         />

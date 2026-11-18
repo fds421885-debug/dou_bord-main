@@ -386,6 +386,10 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isMasterProgrammerAuth() {
+      return isVerified() && request.auth.token.email == 'mohammedmonta2022m@gmail.com';
+    }
+
     function isValidPlatformPointer(data) {
       return data.keys().hasAll([
           'id', 'projectId', 'apiKey', 'authDomain', 'appId', 'migratedBy', 'migratedByName', 'updatedAt'
@@ -418,24 +422,76 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPlatformPool(data) {
+      return data.keys().hasAll([
+          'id', 'revision', 'activeDatabaseId', 'allExhausted',
+          'databases', 'exhaustedDatabaseIds', 'programmers',
+          'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'revision', 'activeDatabaseId', 'allExhausted',
+          'databases', 'exhaustedDatabaseIds', 'programmers',
+          'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.revision is int && data.revision >= 1 && data.revision <= 1000000
+        && isValidId(data.activeDatabaseId)
+        && data.allExhausted is bool
+        && data.databases is list && data.databases.size() >= 1 && data.databases.size() <= 25
+        && data.databases[0] is map
+        && data.exhaustedDatabaseIds is list && data.exhaustedDatabaseIds.size() <= 25
+        && (data.exhaustedDatabaseIds.size() == 0 || isValidId(data.exhaustedDatabaseIds[0]))
+        && data.programmers is list && data.programmers.size() >= 1 && data.programmers.size() <= 25
+        && data.programmers[0] is map
+        && isValidId(data.updatedBy)
+        && data.updatedBy == request.auth.uid
+        && data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
     match /platform/{docId} {
-      allow get: if isValidId(docId) && (docId == 'migration' || isVerified());
+      allow get: if isValidId(docId) && (docId == 'migration' || (docId == 'pool' && isVerified()));
       allow list: if false;
-      allow create: if isValidId(docId) && isVerified()
-        && isValidPlatformPointer(incoming())
-        && incoming().id == docId
-        && incoming().migratedBy == request.auth.uid
-        && incoming().updatedAt == request.time;
-      allow update: if isValidId(docId) && isVerified()
-        && isValidPlatformPointer(incoming())
-        && incoming().id == existing().id
-        && incoming().migratedBy == request.auth.uid
-        && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'projectId', 'apiKey', 'authDomain', 'appId', 'storageBucket', 'messagingSenderId',
-          'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
-          'migratedRoomId', 'migrationEpoch', 'previousConfigs', 'updatedAt'
-        ]);
+      allow create: if isValidId(docId) && (
+        (docId == 'migration' && isVerified()
+          && isValidPlatformPointer(incoming())
+          && incoming().id == docId
+          && incoming().migratedBy == request.auth.uid
+          && incoming().updatedAt == request.time)
+        || (docId == 'pool' && isMasterProgrammerAuth()
+          && isValidPlatformPool(incoming())
+          && incoming().id == docId
+          && incoming().updatedBy == request.auth.uid
+          && incoming().updatedAt == request.time)
+      );
+      allow update: if isValidId(docId) && (
+        (docId == 'migration' && isVerified()
+          && isValidPlatformPointer(incoming())
+          && incoming().id == existing().id
+          && incoming().migratedBy == request.auth.uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'projectId', 'apiKey', 'authDomain', 'appId', 'storageBucket', 'messagingSenderId',
+            'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
+            'migratedRoomId', 'migrationEpoch', 'previousConfigs', 'updatedAt'
+          ]))
+        || (docId == 'pool' && isVerified()
+          && isValidPlatformPool(incoming())
+          && incoming().id == existing().id
+          && incoming().updatedBy == request.auth.uid
+          && incoming().updatedAt == request.time
+          && (
+            isMasterProgrammerAuth()
+            || (
+              incoming().databases == existing().databases
+              && incoming().programmers == existing().programmers
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'activeDatabaseId', 'allExhausted', 'exhaustedDatabaseIds',
+                'revision', 'updatedBy', 'updatedByName', 'updatedAt'
+              ])
+            )
+          ))
+      );
       allow delete: if false;
     }
 

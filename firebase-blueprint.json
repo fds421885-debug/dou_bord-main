@@ -935,12 +935,73 @@
         "migratedByName",
         "updatedAt"
       ]
+    },
+    "PlatformPool": {
+      "title": "PlatformPool",
+      "description": "Ordered database pool, exhaustion tracking, and programmer roster for serverless static hosting",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "activeDatabaseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "allExhausted": {
+          "type": "boolean"
+        },
+        "databases": {
+          "type": "array"
+        },
+        "exhaustedDatabaseIds": {
+          "type": "array"
+        },
+        "programmers": {
+          "type": "array"
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedByName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "activeDatabaseId",
+        "allExhausted",
+        "databases",
+        "exhaustedDatabaseIds",
+        "programmers",
+        "updatedBy",
+        "updatedByName",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/platform/{docId}": {
       "schema": { "$ref": "#/entities/PlatformPointer" },
-      "description": "Platform-wide active database pointer for automatic migration failover"
+      "description": "Platform-wide active database pointer and pool configuration for automatic failover and serverless sync"
     },
     "/users/{userId}/private/{docId}": {
       "schema": { "$ref": "#/entities/UserProfile" },

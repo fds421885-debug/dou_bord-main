@@ -63,6 +63,7 @@ interface ProgrammerDashboardProps {
   currentRoom: Room | null;
   isSupervisorInCurrentRoom: boolean;
   isMaster: boolean;
+  backendMode?: 'server' | 'serverless';
   poolState: PlatformProgrammerState;
   onPoolStateUpdated: (next: PlatformProgrammerState) => void;
   onRefreshState: () => Promise<void>;
@@ -74,6 +75,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   currentRoom,
   isSupervisorInCurrentRoom,
   isMaster,
+  backendMode = 'server',
   poolState,
   onPoolStateUpdated,
   onRefreshState,
@@ -446,6 +448,19 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 >
                   {isMaster ? <Crown className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
                   <span>{isMaster ? 'المبرمج الأساسي' : 'مبرمج معتمد'}</span>
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-black border ${
+                    backendMode === 'serverless'
+                      ? 'bg-[#E6F7FF] border-[#1CB0F6] text-[#1899D6]'
+                      : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                  }`}
+                >
+                  <span>
+                    {backendMode === 'serverless'
+                      ? 'وضع الاستضافة الثابتة (GitHub / Netlify)'
+                      : 'متصل بالخادم + السحابة'}
+                  </span>
                 </span>
               </div>
               <p className="text-xs sm:text-sm font-bold text-[#777777] mt-0.5">

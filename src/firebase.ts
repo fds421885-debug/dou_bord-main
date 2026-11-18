@@ -18,13 +18,17 @@ import {
   getPreviousFirebaseConfigs,
   isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  MASTER_PROGRAMMER_EMAIL,
+  MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
   PENDING_REJOIN_ROOM_KEY,
+  resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
   savePreviousFirebaseConfigs,
   SYNCED_SOURCES_KEY_PREFIX,
   type FirebaseAppConfig,
   type InitialServerPlatformStatus,
+  type ResolvedRemotePointer,
   type ServerPlatformPointer,
 } from './firebaseConfigBootstrap';
 
@@ -36,11 +40,15 @@ export {
   getPreviousFirebaseConfigs,
   isMasterProgrammerIdentity,
   isSameFirebaseTarget,
+  MASTER_PROGRAMMER_EMAIL,
+  MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
+  resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
   savePreviousFirebaseConfigs,
   type FirebaseAppConfig,
   type InitialServerPlatformStatus,
+  type ResolvedRemotePointer,
   type ServerPlatformPointer,
 };
 

@@ -30,8 +30,14 @@ import {
   getPreviousFirebaseConfigs,
   getSyncedSourceKeys,
   getTargetFirebaseAppName,
+  getTimestampMillis,
+  isMasterProgrammerIdentity,
   isSameFirebaseTarget,
   markSourceKeySynced,
+  MASTER_PROGRAMMER_EMAIL,
+  MASTER_PROGRAMMER_NAME,
+  normalizeArabicName,
+  resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
   type FirebaseAppConfig,
   type ServerPlatformPointer,
@@ -2290,8 +2296,36 @@ export async function runFirebaseMigration(params: {
     let platformPointerUpdated = false;
     try {
       await setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid));
+      platformPointerUpdated = true;
     } catch {
       // Non-fatal if target project uses older rules
+    }
+
+    // Mirror pool metadata onto targetDb & current local cache if available
+    try {
+      const localPool = loadLocalServerlessPool();
+      if (localPool) {
+        const syncedPool = ensurePoolDefaults({
+          ...localPool,
+          revision: localPool.revision + 1,
+          updatedAt: Date.now(),
+        });
+        const matchedTarget = syncedPool.databases.find((d) =>
+          isSameFirebaseTarget(d.config, targetConfig)
+        );
+        if (matchedTarget) {
+          syncedPool.activeDatabaseId = matchedTarget.id;
+          syncedPool.allExhausted = false;
+          matchedTarget.exhaustedAt = null;
+          matchedTarget.exhaustedUntil = null;
+        }
+        saveLocalServerlessPool(syncedPool);
+        await writeFirestorePoolDoc(targetDb, syncedPool, targetUid, resolvedQuadName || 'مبرمج المنصة').catch(
+          () => undefined
+        );
+      }
+    } catch {
+      // Non-fatal pool mirror
     }
 
     for (const handle of sourceHandles) {
@@ -2657,6 +2691,427 @@ export async function restoreActiveSupervisorRoomFromSnapshot(params: {
   }
 }
 
+const STATIC_POOL_STORAGE_KEY = 'duoboard_static_programmer_pool_v1';
+const STATIC_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+class ApiUnavailableError extends Error {
+  constructor(message = 'Backend server unavailable') {
+    super(message);
+    this.name = 'ApiUnavailableError';
+  }
+}
+
+type StoredProgrammerWithHash = ProgrammerMember & {
+  emailHash?: string;
+  emailMasked?: string;
+};
+
+async function sha256Hex(value: string): Promise<string> {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      const encoded = new TextEncoder().encode(value.trim().toLowerCase());
+      const buf = await crypto.subtle.digest('SHA-256', encoded);
+      return Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  } catch {
+    // Fallback if subtle crypto unavailable
+  }
+  return '';
+}
+
+function maskEmailAddress(email: string): string {
+  const clean = email.trim().toLowerCase();
+  const [local, domain] = clean.split('@');
+  if (!local || !domain) return '';
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}***@${domain}`;
+}
+
+function loadLocalServerlessPool(): PlatformProgrammerState | null {
+  try {
+    const raw = localStorage.getItem(STATIC_POOL_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PlatformProgrammerState>;
+    if (!parsed || !Array.isArray(parsed.databases) || parsed.databases.length === 0) {
+      return null;
+    }
+    return parsed as PlatformProgrammerState;
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalServerlessPool(state: PlatformProgrammerState): void {
+  try {
+    localStorage.setItem(STATIC_POOL_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function ensurePoolDefaults(raw: Partial<PlatformProgrammerState> | null): PlatformProgrammerState {
+  const now = Date.now();
+  const dbs: PoolDatabaseEntry[] = [];
+  const rawDbs = Array.isArray(raw?.databases) ? raw!.databases : [];
+
+  for (const item of rawDbs) {
+    if (!item || typeof item !== 'object') continue;
+    const cfg = sanitizeFirebaseConfig(item.config);
+    if (!cfg) continue;
+    if (dbs.some((x) => isSameFirebaseTarget(x.config, cfg))) continue;
+    const exhaustedUntil =
+      typeof item.exhaustedUntil === 'number' && item.exhaustedUntil > now
+        ? item.exhaustedUntil
+        : null;
+    const exhaustedAt = exhaustedUntil ? item.exhaustedAt ?? now : null;
+    dbs.push({
+      id: typeof item.id === 'string' && item.id ? item.id : `db_${dbs.length + 1}`,
+      order: dbs.length + 1,
+      label:
+        typeof item.label === 'string' && item.label.trim()
+          ? item.label.trim().slice(0, 80)
+          : isSameFirebaseTarget(cfg, defaultFirebaseConfig)
+          ? 'القاعدة الأساسية (#1)'
+          : cfg.projectId,
+      config: cfg,
+      exhaustedAt,
+      exhaustedUntil,
+      addedByEmail: typeof item.addedByEmail === 'string' ? item.addedByEmail : undefined,
+      addedAt: typeof item.addedAt === 'number' ? item.addedAt : now,
+    });
+  }
+
+  if (!dbs.some((d) => isSameFirebaseTarget(d.config, defaultFirebaseConfig))) {
+    dbs.unshift({
+      id: 'primary_default',
+      order: 1,
+      label: 'القاعدة الأساسية (#1)',
+      config: defaultFirebaseConfig,
+      exhaustedAt: null,
+      exhaustedUntil: null,
+      addedAt: now,
+    });
+  }
+
+  // Ensure any previously visited / active configs are also present in the pool
+  for (const extraCfg of [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]) {
+    if (extraCfg && !dbs.some((d) => isSameFirebaseTarget(d.config, extraCfg))) {
+      dbs.push({
+        id: `db_${dbs.length + 1}_${extraCfg.projectId}`,
+        order: dbs.length + 1,
+        label: extraCfg.projectId,
+        config: extraCfg,
+        exhaustedAt: null,
+        exhaustedUntil: null,
+        addedAt: now,
+      });
+    }
+  }
+
+  const renumbered = dbs.map((d, idx) => ({ ...d, order: idx + 1 }));
+  const matchedActive =
+    renumbered.find((d) => d.id === raw?.activeDatabaseId) ||
+    renumbered.find((d) => isSameFirebaseTarget(d.config, activeFirebaseConfig)) ||
+    renumbered[0];
+
+  const rawProgs = Array.isArray(raw?.programmers) ? raw!.programmers : [];
+  const programmers: StoredProgrammerWithHash[] = [];
+  for (const p of rawProgs as StoredProgrammerWithHash[]) {
+    if (!p || typeof p !== 'object') continue;
+    programmers.push({
+      id: typeof p.id === 'string' && p.id ? p.id : `prog_${programmers.length + 1}`,
+      fullNameQuad: typeof p.fullNameQuad === 'string' ? p.fullNameQuad.trim() : '',
+      ...(typeof p.email === 'string' && p.email.trim() ? { email: p.email.trim().toLowerCase() } : {}),
+      ...(typeof p.emailHash === 'string' && p.emailHash ? { emailHash: p.emailHash } : {}),
+      ...(typeof p.emailMasked === 'string' && p.emailMasked ? { emailMasked: p.emailMasked } : {}),
+      isMaster: Boolean(p.isMaster),
+      promotedBy: typeof p.promotedBy === 'string' ? p.promotedBy : undefined,
+      promotedAt: typeof p.promotedAt === 'number' ? p.promotedAt : now,
+    });
+  }
+
+  const hasMaster = programmers.some((p) =>
+    isMasterProgrammerIdentity({ email: p.email, fullNameQuad: p.fullNameQuad })
+  );
+  if (!hasMaster) {
+    programmers.unshift({
+      id: 'master_programmer',
+      fullNameQuad: MASTER_PROGRAMMER_NAME,
+      email: MASTER_PROGRAMMER_EMAIL,
+      isMaster: true,
+      promotedAt: now,
+    });
+  }
+
+  const allExhausted = renumbered.every((d) => d.exhaustedAt !== null);
+
+  return {
+    revision: typeof raw?.revision === 'number' && raw.revision >= 1 ? raw.revision : 1,
+    databases: renumbered,
+    activeDatabaseId: matchedActive.id,
+    allExhausted: Boolean(raw?.allExhausted) && allExhausted,
+    programmers,
+    updatedByEmail: typeof raw?.updatedByEmail === 'string' ? raw.updatedByEmail : undefined,
+    updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : now,
+  };
+}
+
+async function writeFirestorePoolDoc(
+  targetDb: Firestore,
+  state: PlatformProgrammerState,
+  uid: string,
+  updaterName: string
+): Promise<boolean> {
+  try {
+    const cleanDbs = state.databases.slice(0, 25).map((d) => ({
+      id: d.id,
+      order: d.order,
+      label: (d.label || d.config.projectId).slice(0, 80),
+      config: {
+        apiKey: d.config.apiKey,
+        authDomain: d.config.authDomain,
+        projectId: d.config.projectId,
+        appId: d.config.appId,
+        ...(d.config.storageBucket ? { storageBucket: d.config.storageBucket } : {}),
+        ...(d.config.messagingSenderId ? { messagingSenderId: d.config.messagingSenderId } : {}),
+        ...(d.config.measurementId ? { measurementId: d.config.measurementId } : {}),
+        ...(d.config.firestoreDatabaseId
+          ? { firestoreDatabaseId: d.config.firestoreDatabaseId }
+          : {}),
+      },
+      addedAt: d.addedAt || Date.now(),
+    }));
+
+    const cleanProgrammers = await Promise.all(
+      (state.programmers as StoredProgrammerWithHash[]).slice(0, 25).map(async (p) => {
+        const emailHash = p.emailHash || (p.email ? await sha256Hex(p.email) : '');
+        const emailMasked = p.emailMasked || (p.email ? maskEmailAddress(p.email) : '');
+        return {
+          id: p.id,
+          fullNameQuad: (p.fullNameQuad || '').slice(0, 120),
+          ...(emailHash ? { emailHash } : {}),
+          ...(emailMasked ? { emailMasked } : {}),
+          isMaster: Boolean(p.isMaster),
+          promotedAt: p.promotedAt || Date.now(),
+        };
+      })
+    );
+
+    const exhaustedDatabaseIds = state.databases
+      .filter((d) => d.exhaustedAt !== null)
+      .map((d) => d.id)
+      .slice(0, 25);
+
+    await setDoc(doc(targetDb, 'platform', 'pool'), {
+      id: 'pool',
+      revision: Math.min(1000000, Math.max(1, state.revision || 1)),
+      activeDatabaseId: state.activeDatabaseId,
+      allExhausted: Boolean(state.allExhausted),
+      databases: cleanDbs,
+      exhaustedDatabaseIds,
+      programmers: cleanProgrammers,
+      updatedBy: uid,
+      updatedByName: (updaterName || 'مبرمج المنصة').slice(0, 120),
+      updatedAt: serverTimestamp(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeFirestoreMigrationPointerDoc(
+  targetDb: Firestore,
+  targetConfig: FirebaseAppConfig,
+  poolDbs: PoolDatabaseEntry[],
+  uid: string,
+  updaterName: string,
+  migratedRoomId?: string | null
+): Promise<boolean> {
+  try {
+    const priorChain = [
+      ...poolDbs.map((d) => d.config as FirebaseAppConfig),
+      defaultFirebaseConfig,
+      activeFirebaseConfig,
+      ...getPreviousFirebaseConfigs(),
+    ]
+      .filter(
+        (c, idx, arr) =>
+          !isSameFirebaseTarget(c, targetConfig) &&
+          arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
+      )
+      .slice(0, 10)
+      .map((c) => ({
+        apiKey: c.apiKey,
+        authDomain: c.authDomain,
+        projectId: c.projectId,
+        appId: c.appId,
+        ...(c.storageBucket ? { storageBucket: c.storageBucket } : {}),
+        ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
+        ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
+      }));
+
+    await setDoc(doc(targetDb, 'platform', 'migration'), {
+      id: 'migration',
+      projectId: targetConfig.projectId,
+      apiKey: targetConfig.apiKey,
+      authDomain: targetConfig.authDomain,
+      appId: targetConfig.appId,
+      ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
+      ...(targetConfig.messagingSenderId
+        ? { messagingSenderId: targetConfig.messagingSenderId }
+        : {}),
+      ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
+      ...(targetConfig.firestoreDatabaseId
+        ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
+        : {}),
+      migratedBy: uid,
+      migratedByName: (updaterName || 'مبرمج المنصة').slice(0, 120),
+      ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
+      migrationEpoch: CURRENT_DB_EPOCH,
+      previousConfigs: priorChain,
+      updatedAt: serverTimestamp(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readCloudPoolDoc(targetDb: Firestore): Promise<PlatformProgrammerState | null> {
+  try {
+    const snap = await getDoc(doc(targetDb, 'platform', 'pool'));
+    if (!snap.exists()) return null;
+    const raw = snap.data() as Record<string, unknown>;
+    const exhaustedIds = Array.isArray(raw.exhaustedDatabaseIds)
+      ? (raw.exhaustedDatabaseIds as string[])
+      : [];
+    const rawDbs = Array.isArray(raw.databases) ? (raw.databases as PoolDatabaseEntry[]) : [];
+    const hydratedDbs = rawDbs.map((d) => ({
+      ...d,
+      exhaustedAt: exhaustedIds.includes(d.id) ? Date.now() : null,
+      exhaustedUntil: exhaustedIds.includes(d.id)
+        ? Date.now() + STATIC_QUOTA_COOLDOWN_MS
+        : null,
+    }));
+    const rawProgs = Array.isArray(raw.programmers)
+      ? (raw.programmers as StoredProgrammerWithHash[])
+      : [];
+
+    const hydratedProgs = rawProgs.map((p) => ({
+      ...p,
+      email:
+        p.email ||
+        (isMasterProgrammerIdentity({ fullNameQuad: p.fullNameQuad })
+          ? MASTER_PROGRAMMER_EMAIL
+          : p.emailMasked),
+    }));
+
+    return ensurePoolDefaults({
+      revision: typeof raw.revision === 'number' ? raw.revision : 1,
+      databases: hydratedDbs,
+      activeDatabaseId: typeof raw.activeDatabaseId === 'string' ? raw.activeDatabaseId : undefined,
+      allExhausted: Boolean(raw.allExhausted),
+      programmers: hydratedProgs,
+      updatedAt: getTimestampMillis(raw.updatedAt) || Date.now(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function loadServerlessPoolState(): Promise<PlatformProgrammerState> {
+  const local = loadLocalServerlessPool();
+  const cloud = await readCloudPoolDoc(sourceDb);
+  const rest = await resolveLatestFirestoreMigrationRest().catch(() => null);
+
+  let base: PlatformProgrammerState;
+  if (cloud && (!local || cloud.revision > local.revision || cloud.updatedAt > local.updatedAt)) {
+    base = cloud;
+  } else if (local) {
+    base = local;
+  } else {
+    base = ensurePoolDefaults(null);
+  }
+
+  if (rest) {
+    const extraCfgs = [rest.config, ...rest.previousConfigs];
+    const dbs = [...base.databases];
+    for (const c of extraCfgs) {
+      if (!dbs.some((d) => isSameFirebaseTarget(d.config, c))) {
+        dbs.push({
+          id: `db_${dbs.length + 1}_${c.projectId}`,
+          order: dbs.length + 1,
+          label: isSameFirebaseTarget(c, defaultFirebaseConfig)
+            ? 'القاعدة الأساسية (#1)'
+            : c.projectId,
+          config: c,
+          exhaustedAt: null,
+          exhaustedUntil: null,
+          addedAt: Date.now(),
+        });
+      }
+    }
+    const activeEntry = dbs.find((d) => isSameFirebaseTarget(d.config, rest.config));
+    base = ensurePoolDefaults({
+      ...base,
+      databases: dbs,
+      activeDatabaseId: activeEntry ? activeEntry.id : base.activeDatabaseId,
+    });
+  } else {
+    base = ensurePoolDefaults(base);
+  }
+
+  saveLocalServerlessPool(base);
+  return base;
+}
+
+async function isIdentityProgrammerServerless(
+  state: PlatformProgrammerState,
+  identity: { email?: string | null; fullNameQuad?: string | null }
+): Promise<{ isProgrammer: boolean; isMaster: boolean }> {
+  if (isMasterProgrammerIdentity(identity)) {
+    return { isProgrammer: true, isMaster: true };
+  }
+  const emailLower = (identity.email || '').trim().toLowerCase();
+  const emailHash = emailLower ? await sha256Hex(emailLower) : '';
+  const normName = normalizeArabicName(identity.fullNameQuad);
+
+  const matched = (state.programmers as StoredProgrammerWithHash[]).some((m) => {
+    if (emailLower && m.email && m.email.toLowerCase() === emailLower) return true;
+    if (emailHash && m.emailHash && m.emailHash === emailHash) return true;
+    if (normName && m.fullNameQuad && normalizeArabicName(m.fullNameQuad) === normName) return true;
+    return false;
+  });
+  return { isProgrammer: matched, isMaster: false };
+}
+
+function buildPointerFromEntry(
+  entry: PoolDatabaseEntry,
+  state: PlatformProgrammerState,
+  migratedRoomId?: string | null
+): ServerPlatformPointer {
+  return {
+    id: 'migration',
+    config: entry.config as FirebaseAppConfig,
+    resetToDefault: isSameFirebaseTarget(entry.config, defaultFirebaseConfig),
+    migratedRoomId: migratedRoomId || null,
+    migrationEpoch: CURRENT_DB_EPOCH,
+    previousConfigs: state.databases
+      .filter((d) => d.id !== entry.id)
+      .map((d) => d.config as FirebaseAppConfig)
+      .slice(0, 10),
+    activeDatabaseId: entry.id,
+    activeOrder: entry.order,
+    totalDatabases: state.databases.length,
+    allExhausted: state.allExhausted,
+    revision: state.revision,
+    updatedAt: state.updatedAt,
+  };
+}
+
 export async function triggerAutomaticQuotaFailover(params: {
   failedProjectId: string;
   failedFirestoreDatabaseId?: string;
@@ -2667,7 +3122,7 @@ export async function triggerAutomaticQuotaFailover(params: {
 } | null> {
   try {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 4000);
+    const timer = window.setTimeout(() => controller.abort(), 3500);
     const resp = await fetch('/api/platform-db/failover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2678,11 +3133,77 @@ export async function triggerAutomaticQuotaFailover(params: {
       signal: controller.signal,
     });
     window.clearTimeout(timer);
-    if (!resp.ok) return null;
-    return (await resp.json()) as {
-      rotated: boolean;
-      allExhausted: boolean;
-      pointer?: ServerPlatformPointer | null;
+    const contentType = resp.headers.get('content-type') || '';
+    if (resp.ok && contentType.includes('application/json')) {
+      return (await resp.json()) as {
+        rotated: boolean;
+        allExhausted: boolean;
+        pointer?: ServerPlatformPointer | null;
+      };
+    }
+  } catch {
+    // Static host (GitHub Pages / Netlify) — run serverless circular failover below
+  }
+
+  // Serverless circular failover across pool
+  try {
+    const state = await loadServerlessPoolState();
+    const now = Date.now();
+    const currentIdx = Math.max(
+      0,
+      state.databases.findIndex((d) => d.id === state.activeDatabaseId)
+    );
+    const currentEntry = state.databases[currentIdx];
+    if (!currentEntry) return null;
+
+    currentEntry.exhaustedAt = now;
+    currentEntry.exhaustedUntil = now + STATIC_QUOTA_COOLDOWN_MS;
+
+    const total = state.databases.length;
+    let nextEntry: PoolDatabaseEntry | null = null;
+    for (let offset = 1; offset < total; offset++) {
+      const candidate = state.databases[(currentIdx + offset) % total];
+      if (candidate.exhaustedAt === null) {
+        nextEntry = candidate;
+        break;
+      }
+    }
+
+    if (nextEntry) {
+      state.activeDatabaseId = nextEntry.id;
+      state.allExhausted = false;
+    } else {
+      state.allExhausted = true;
+    }
+    state.revision += 1;
+    state.updatedAt = now;
+    saveLocalServerlessPool(state);
+
+    const uid = sourceAuth.currentUser?.uid;
+    if (uid) {
+      await writeFirestorePoolDoc(
+        sourceDb,
+        state,
+        uid,
+        sourceAuth.currentUser?.displayName || 'تبديل تلقائي'
+      ).catch(() => undefined);
+      if (nextEntry) {
+        await writeFirestoreMigrationPointerDoc(
+          sourceDb,
+          nextEntry.config as FirebaseAppConfig,
+          state.databases,
+          uid,
+          sourceAuth.currentUser?.displayName || 'تبديل تلقائي'
+        ).catch(() => undefined);
+      }
+    }
+
+    const active =
+      state.databases.find((d) => d.id === state.activeDatabaseId) || state.databases[0];
+    return {
+      rotated: Boolean(nextEntry),
+      allExhausted: state.allExhausted,
+      pointer: active ? buildPointerFromEntry(active, state) : null,
     };
   } catch {
     return null;
@@ -2713,26 +3234,34 @@ async function callProgrammerEndpoint<T>(
     });
   };
 
-  let resp = await sendWithToken(false);
-  if (resp.status === 401 || resp.status === 403) {
-    resp = await sendWithToken(true);
+  let resp: Response;
+  try {
+    resp = await sendWithToken(false);
+    if (resp.status === 401 || resp.status === 403) {
+      resp = await sendWithToken(true);
+    }
+  } catch {
+    throw new ApiUnavailableError('Network unreachable');
+  }
+
+  if (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 502) {
+    throw new ApiUnavailableError(`Static host or server unavailable (${resp.status})`);
   }
 
   const rawText = await resp.text();
+  if (rawText.trim().startsWith('<')) {
+    throw new ApiUnavailableError('HTML fallback returned for /api endpoint (static hosting)');
+  }
+
   let data: (T & { error?: string }) | null = null;
   try {
     data = rawText ? (JSON.parse(rawText) as T & { error?: string }) : null;
   } catch {
-    data = null;
+    throw new ApiUnavailableError('Non-JSON response from /api endpoint');
   }
 
   if (!data || typeof data !== 'object') {
-    if (!resp.ok || rawText.trim().startsWith('<')) {
-      throw new Error(
-        'خادم إدارة القواعد غير متاح على هذا الرابط (تأكد من تشغيل التطبيق عبر الخادم الكامل).'
-      );
-    }
-    throw new Error('استجابة غير متوقعة من خادم إدارة القواعد');
+    throw new ApiUnavailableError('Empty response from /api endpoint');
   }
 
   if (!resp.ok) {
@@ -2744,8 +3273,53 @@ async function callProgrammerEndpoint<T>(
 export async function fetchProgrammerSession(
   user: User,
   fullNameQuad: string
-): Promise<{ isProgrammer: boolean; isMaster: boolean; state?: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/session', user, fullNameQuad);
+): Promise<{
+  isProgrammer: boolean;
+  isMaster: boolean;
+  state?: PlatformProgrammerState;
+  mode?: 'server' | 'serverless';
+}> {
+  try {
+    const serverRes = await callProgrammerEndpoint<{
+      isProgrammer: boolean;
+      isMaster: boolean;
+      state?: PlatformProgrammerState;
+    }>('/api/programmer/session', user, fullNameQuad);
+    if (serverRes.state) {
+      saveLocalServerlessPool(serverRes.state);
+      if (serverRes.isMaster) {
+        void writeFirestorePoolDoc(
+          sourceDb,
+          serverRes.state,
+          user.uid,
+          fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+        );
+      }
+    }
+    return { ...serverRes, mode: 'server' };
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const role = await isIdentityProgrammerServerless(state, {
+    email: user.email,
+    fullNameQuad,
+  });
+  if (role.isMaster) {
+    void writeFirestorePoolDoc(
+      sourceDb,
+      state,
+      user.uid,
+      fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+    );
+  }
+  return {
+    isProgrammer: role.isProgrammer,
+    isMaster: role.isMaster,
+    state: role.isProgrammer ? state : undefined,
+    mode: 'serverless',
+  };
 }
 
 export async function addDatabaseToPool(
@@ -2754,10 +3328,47 @@ export async function addDatabaseToPool(
   config: FirebaseAppConfig,
   label: string
 ): Promise<{ ok: boolean; added: PoolDatabaseEntry; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/databases/add', user, fullNameQuad, {
-    config,
-    label,
+  try {
+    const res = await callProgrammerEndpoint<{
+      ok: boolean;
+      added: PoolDatabaseEntry;
+      state: PlatformProgrammerState;
+    }>('/api/programmer/databases/add', user, fullNameQuad, { config, label });
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const cleanCfg = sanitizeFirebaseConfig(config);
+  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
+  if (state.databases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    throw new Error('قاعدة البيانات هذه مضافة بالفعل في القائمة.');
+  }
+
+  const now = Date.now();
+  const added: PoolDatabaseEntry = {
+    id: `db_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    order: state.databases.length + 1,
+    label: label.trim() || `قاعدة #${state.databases.length + 1} — ${cleanCfg.projectId}`,
+    config: cleanCfg,
+    exhaustedAt: null,
+    exhaustedUntil: null,
+    addedByEmail: user.email || undefined,
+    addedAt: now,
+  };
+  const next = ensurePoolDefaults({
+    ...state,
+    databases: [...state.databases, added],
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: now,
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, added, state: next };
 }
 
 export async function reorderDatabasePool(
@@ -2765,9 +3376,42 @@ export async function reorderDatabasePool(
   fullNameQuad: string,
   orderedIds: string[]
 ): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/databases/reorder', user, fullNameQuad, {
-    orderedIds,
+  try {
+    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
+      '/api/programmer/databases/reorder',
+      user,
+      fullNameQuad,
+      { orderedIds }
+    );
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const byId = new Map(state.databases.map((d) => [d.id, d]));
+  const reordered: PoolDatabaseEntry[] = [];
+  for (const id of orderedIds) {
+    const found = byId.get(id);
+    if (found) {
+      reordered.push(found);
+      byId.delete(id);
+    }
+  }
+  for (const rest of byId.values()) reordered.push(rest);
+
+  const next = ensurePoolDefaults({
+    ...state,
+    databases: reordered,
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: Date.now(),
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, state: next };
 }
 
 export async function activateDatabaseFromPool(
@@ -2776,10 +3420,71 @@ export async function activateDatabaseFromPool(
   databaseId: string,
   migratedRoomId?: string | null
 ): Promise<{ ok: boolean; state: PlatformProgrammerState; pointer: ServerPlatformPointer }> {
-  return callProgrammerEndpoint('/api/programmer/databases/activate', user, fullNameQuad, {
-    databaseId,
-    migratedRoomId: migratedRoomId || null,
+  try {
+    const res = await callProgrammerEndpoint<{
+      ok: boolean;
+      state: PlatformProgrammerState;
+      pointer: ServerPlatformPointer;
+    }>('/api/programmer/databases/activate', user, fullNameQuad, {
+      databaseId,
+      migratedRoomId: migratedRoomId || null,
+    });
+    saveLocalServerlessPool(res.state);
+    const chosen =
+      res.state.databases.find((d) => d.id === res.state.activeDatabaseId) ||
+      res.state.databases[0];
+    if (chosen) {
+      await Promise.all([
+        writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME),
+        writeFirestoreMigrationPointerDoc(
+          sourceDb,
+          chosen.config as FirebaseAppConfig,
+          res.state.databases,
+          user.uid,
+          fullNameQuad || MASTER_PROGRAMMER_NAME,
+          migratedRoomId
+        ),
+      ]);
+    }
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const target = state.databases.find((d) => d.id === databaseId);
+  if (!target) throw new Error('القاعدة المطلوبة غير موجودة');
+
+  const now = Date.now();
+  target.exhaustedAt = null;
+  target.exhaustedUntil = null;
+  const next = ensurePoolDefaults({
+    ...state,
+    activeDatabaseId: target.id,
+    allExhausted: false,
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: now,
   });
+  saveLocalServerlessPool(next);
+
+  await Promise.all([
+    writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME),
+    writeFirestoreMigrationPointerDoc(
+      sourceDb,
+      target.config as FirebaseAppConfig,
+      next.databases,
+      user.uid,
+      fullNameQuad || MASTER_PROGRAMMER_NAME,
+      migratedRoomId
+    ),
+  ]);
+
+  return {
+    ok: true,
+    state: next,
+    pointer: buildPointerFromEntry(target, next, migratedRoomId),
+  };
 }
 
 export async function reactivatePoolDatabase(
@@ -2787,9 +3492,40 @@ export async function reactivatePoolDatabase(
   fullNameQuad: string,
   databaseId: string | 'ALL'
 ): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/databases/reactivate', user, fullNameQuad, {
-    databaseId,
+  try {
+    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
+      '/api/programmer/databases/reactivate',
+      user,
+      fullNameQuad,
+      { databaseId }
+    );
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const now = Date.now();
+  const updatedDbs = state.databases.map((d) =>
+    databaseId === 'ALL' || d.id === databaseId
+      ? { ...d, exhaustedAt: null, exhaustedUntil: null }
+      : d
+  );
+  const firstHealthy = updatedDbs.find((d) => d.exhaustedAt === null) || updatedDbs[0];
+  const next = ensurePoolDefaults({
+    ...state,
+    databases: updatedDbs,
+    activeDatabaseId: state.allExhausted ? firstHealthy.id : state.activeDatabaseId,
+    allExhausted: updatedDbs.every((d) => d.exhaustedAt !== null),
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: now,
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, state: next };
 }
 
 export async function removeDatabaseFromPool(
@@ -2797,9 +3533,44 @@ export async function removeDatabaseFromPool(
   fullNameQuad: string,
   databaseId: string
 ): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/databases/remove', user, fullNameQuad, {
-    databaseId,
+  try {
+    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
+      '/api/programmer/databases/remove',
+      user,
+      fullNameQuad,
+      { databaseId }
+    );
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  if (state.databases.length <= 1) {
+    throw new Error('يجب الإبقاء على قاعدة بيانات واحدة على الأقل.');
+  }
+  const remaining = state.databases.filter((d) => d.id !== databaseId);
+  if (remaining.length === state.databases.length) {
+    throw new Error('القاعدة غير موجودة');
+  }
+  const nextActive =
+    state.activeDatabaseId === databaseId
+      ? (remaining.find((d) => d.exhaustedAt === null) || remaining[0]).id
+      : state.activeDatabaseId;
+
+  const next = ensurePoolDefaults({
+    ...state,
+    databases: remaining,
+    activeDatabaseId: nextActive,
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: Date.now(),
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, state: next };
 }
 
 export async function promoteProgrammerMember(
@@ -2808,10 +3579,59 @@ export async function promoteProgrammerMember(
   targetFullNameQuad: string,
   targetEmail: string
 ): Promise<{ ok: boolean; member: ProgrammerMember; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/members/add', user, fullNameQuad, {
-    fullNameQuad: targetFullNameQuad,
-    email: targetEmail,
+  try {
+    const res = await callProgrammerEndpoint<{
+      ok: boolean;
+      member: ProgrammerMember;
+      state: PlatformProgrammerState;
+    }>('/api/programmer/members/add', user, fullNameQuad, {
+      fullNameQuad: targetFullNameQuad,
+      email: targetEmail,
+    });
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const cleanName = targetFullNameQuad.trim().replace(/\s+/g, ' ');
+  const cleanEmail = targetEmail.trim().toLowerCase();
+  if (!cleanName && !cleanEmail) {
+    throw new Error('أدخل الاسم الرباعي أو البريد الإلكتروني للمستخدم.');
+  }
+
+  const state = await loadServerlessPoolState();
+  const normNew = normalizeArabicName(cleanName);
+  const newHash = cleanEmail ? await sha256Hex(cleanEmail) : '';
+  const dup = (state.programmers as StoredProgrammerWithHash[]).some(
+    (m) =>
+      (cleanEmail && m.email && m.email.toLowerCase() === cleanEmail) ||
+      (newHash && m.emailHash && m.emailHash === newHash) ||
+      (normNew && m.fullNameQuad && normalizeArabicName(m.fullNameQuad) === normNew)
+  );
+  if (dup) {
+    throw new Error('هذا المستخدم مُرقّى بالفعل إلى مبرمج.');
+  }
+
+  const member: StoredProgrammerWithHash = {
+    id: `prog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    fullNameQuad: cleanName || cleanEmail,
+    ...(cleanEmail ? { email: cleanEmail, emailHash: newHash, emailMasked: maskEmailAddress(cleanEmail) } : {}),
+    isMaster: false,
+    promotedBy: fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME,
+    promotedAt: Date.now(),
+  };
+
+  const next = ensurePoolDefaults({
+    ...state,
+    programmers: [...state.programmers, member],
+    revision: state.revision + 1,
+    updatedAt: Date.now(),
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, member, state: next };
 }
 
 export async function removeProgrammerMember(
@@ -2819,8 +3639,34 @@ export async function removeProgrammerMember(
   fullNameQuad: string,
   memberId: string
 ): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  return callProgrammerEndpoint('/api/programmer/members/remove', user, fullNameQuad, {
-    memberId,
+  try {
+    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
+      '/api/programmer/members/remove',
+      user,
+      fullNameQuad,
+      { memberId }
+    );
+    saveLocalServerlessPool(res.state);
+    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
+    return res;
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessPoolState();
+  const target = state.programmers.find((m) => m.id === memberId);
+  if (!target) throw new Error('العضو غير موجود');
+  if (target.isMaster) throw new Error('لا يمكن إزالة المبرمج الأساسي للمنصة.');
+
+  const next = ensurePoolDefaults({
+    ...state,
+    programmers: state.programmers.filter((m) => m.id !== memberId),
+    revision: state.revision + 1,
+    updatedAt: Date.now(),
   });
+  saveLocalServerlessPool(next);
+  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, state: next };
 }
+
 

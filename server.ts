@@ -67,7 +67,7 @@ const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.js
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
-const CURRENT_DB_EPOCH = 'consolidated_huiiii_50983_2026_11_18';
+const CURRENT_DB_EPOCH = 'consolidated_siiiiii_3720b_2026_11_18';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
 const QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -152,7 +152,7 @@ function loadDefaultAppletConfig(): SanitizedFirebaseConfig {
   return {
     apiKey: '',
     authDomain: '',
-    projectId: 'huiiii-50983',
+    projectId: 'siiiiii-3720b',
     appId: '',
   };
 }

@@ -473,7 +473,7 @@ export async function verifyDatabaseBeforeAdd(params: {
     resp: Response
   ): Promise<{ message: string; status: string }> => {
     try {
-      const body = (await resp.json()) as {
+      const body = (await withTimeout(resp.json(), 2500)) as {
         error?: { message?: string; status?: string };
       };
       return {
@@ -767,6 +767,15 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
+    if (rogueResp.status === 429) {
+      return {
+        ok: false,
+        retryablePropagation: false,
+        detail: `تم استهلاك الحصة المجانية اليومية للقاعدة (${projectId}) في Firebase (429 Quota Exceeded).`,
+        fixHint: 'انتظر التصفير اليومي لحصة Firebase أو أضف مشروعاً جديداً بحصة مجانية متاحة.',
+      };
+    }
+
     if (rogueResp.status !== 403) {
       const { message: rogueErr } = await parseFirestoreRestError(rogueResp);
       return {
@@ -792,6 +801,15 @@ export async function verifyDatabaseBeforeAdd(params: {
         detail: `تم رفض قراءة (${deniedTargets}) في ${projectId} (${dbSegment}) — إما أن القواعد ما زالت على الوضع المغلق (Production Mode) أو أُلصقت نسخة قديمة قبل تحديث المنصة.`,
         fixHint:
           'اضغط "نسخ firestore.rules" أدناه واستبدل محتوى Rules بالكامل في Firebase Console (بعد حذف القديم) ثم اضغط Publish.',
+      };
+    }
+
+    if (roomReadResp.status === 429 || migrationReadResp.status === 429) {
+      return {
+        ok: false,
+        retryablePropagation: false,
+        detail: `تم استهلاك الحصة المجانية اليومية للقاعدة (${projectId}) في Firebase (429 Quota Exceeded).`,
+        fixHint: 'انتظر التصفير اليومي لحصة Firebase أو استخدم مشروعاً آخر.',
       };
     }
 
@@ -3802,12 +3820,88 @@ function cleanEntryObject(d: RegisteredDatabaseEntry): Record<string, unknown> {
   };
 }
 
+const mirroredRegistrySigByTarget = new Map<string, string>();
+const cloudKnownRevisionByTarget = new Map<string, number>();
+const MIRROR_SIG_STORAGE_PREFIX = 'duoboard_mirrored_reg_sig_v1_';
+
+function computeRegistrySignature(
+  state: Pick<
+    PlatformProgrammerState,
+    'revision' | 'activeTargetConfig' | 'playerDatabases' | 'backupDatabases' | 'programmers'
+  >
+): string {
+  const players = (state.playerDatabases || [])
+    .map((d) => d.config?.projectId || '')
+    .join(',');
+  const backups = (state.backupDatabases || [])
+    .map((d) => d.config?.projectId || '')
+    .join(',');
+  return `${state.revision || 1}::${state.activeTargetConfig?.projectId || ''}::${players}::${backups}::${
+    state.programmers?.length || 0
+  }`;
+}
+
+function getLastMirroredSignature(projectId: string): string {
+  const mem = mirroredRegistrySigByTarget.get(projectId);
+  if (mem) return mem;
+  try {
+    return sessionStorage.getItem(`${MIRROR_SIG_STORAGE_PREFIX}${projectId}`) || '';
+  } catch {
+    return '';
+  }
+}
+
+function markMirroredSignature(projectId: string, sig: string, revision: number): void {
+  mirroredRegistrySigByTarget.set(projectId, sig);
+  cloudKnownRevisionByTarget.set(projectId, Math.max(cloudKnownRevisionByTarget.get(projectId) || 0, revision));
+  try {
+    sessionStorage.setItem(`${MIRROR_SIG_STORAGE_PREFIX}${projectId}`, sig);
+  } catch {
+    // Ignore sessionStorage restrictions
+  }
+}
+
+export function noteCloudRegistrySnapshot(
+  projectId: string,
+  raw: Record<string, unknown>
+): { revision: number; playerCount: number; backupCount: number; programmerCount: number; signature: string } {
+  const revision = typeof raw.revision === 'number' ? raw.revision : 1;
+  const players = Array.isArray(raw.playerDatabases)
+    ? (raw.playerDatabases as RegisteredDatabaseEntry[])
+    : [];
+  const backups = Array.isArray(raw.backupDatabases)
+    ? (raw.backupDatabases as RegisteredDatabaseEntry[])
+    : [];
+  const progs = Array.isArray(raw.programmers) ? raw.programmers : [];
+  const activeCfg = (raw.activeTargetConfig || {}) as FirebaseAppConfig;
+  const signature = `${revision}::${activeCfg.projectId || ''}::${players
+    .map((d) => d?.config?.projectId || '')
+    .join(',')}::${backups.map((d) => d?.config?.projectId || '').join(',')}::${progs.length}`;
+  markMirroredSignature(projectId, signature, revision);
+  return {
+    revision,
+    playerCount: players.length,
+    backupCount: backups.length,
+    programmerCount: progs.length,
+    signature,
+  };
+}
+
 async function writeFirestoreRegistryDoc(
   targetDb: Firestore,
   state: PlatformProgrammerState,
   uid: string,
-  updaterName: string
+  updaterName: string,
+  forceWrite = false
 ): Promise<boolean> {
+  const targetProjectId =
+    (targetDb as { app?: { options?: { projectId?: string } } })?.app?.options?.projectId ||
+    activeFirebaseConfig.projectId;
+  const sig = computeRegistrySignature(state);
+  if (!forceWrite && getLastMirroredSignature(targetProjectId) === sig) {
+    return true;
+  }
+
   try {
     const cleanProgrammers = await Promise.all(
       (state.programmers as StoredProgrammerWithHash[]).slice(0, 25).map(async (p) => {
@@ -3852,6 +3946,8 @@ async function writeFirestoreRegistryDoc(
       };
     }
 
+    // Mark before write as well so a failing/quota write never loops endlessly on retries
+    markMirroredSignature(targetProjectId, sig, state.revision || 1);
     await withTimeout(setDoc(doc(targetDb, 'platform', 'registry'), payload), 2500);
     return true;
   } catch {
@@ -3908,8 +4004,10 @@ export function getFallbackProgrammerState(
 
 async function loadServerlessRegistryState(): Promise<PlatformProgrammerState> {
   const local = loadLocalRegistryState();
-  const cloud = await readCloudRegistryDoc(sourceDb).catch(() => null);
-  const rest = await resolveLatestFirestoreMigrationRest().catch(() => null);
+  const cloud = await withTimeout(readCloudRegistryDoc(sourceDb), 1500).catch(() => null);
+  const rest = !local
+    ? await withTimeout(resolveLatestFirestoreMigrationRest(), 1500).catch(() => null)
+    : null;
 
   let base: PlatformProgrammerState;
   if (cloud && (!local || cloud.revision > local.revision || cloud.updatedAt > local.updatedAt)) {
@@ -4066,10 +4164,18 @@ export async function fetchProgrammerSession(
         serverRes.state.playerDatabases.length === 0 &&
         serverRes.state.backupDatabases.length === 0);
 
-    const cloudReg =
-      serverLooksFresh || !serverRes.isProgrammer
-        ? await withTimeout(readCloudRegistryDoc(sourceDb), 2200).catch(() => null)
-        : null;
+    const didReadCloud = serverLooksFresh || !serverRes.isProgrammer;
+    const cloudReg = didReadCloud
+      ? await withTimeout(readCloudRegistryDoc(sourceDb), 1800).catch(() => null)
+      : null;
+
+    if (cloudReg) {
+      markMirroredSignature(
+        activeFirebaseConfig.projectId,
+        computeRegistrySignature(cloudReg),
+        cloudReg.revision
+      );
+    }
 
     if (cloudReg && serverRes.state) {
       const cloudHasMissingDbs =
@@ -4167,7 +4273,14 @@ export async function fetchProgrammerSession(
           activeFirebaseConfig
         );
       }
-      if (serverRes.isMaster && (cloudReg === null || normalized.revision > cloudReg.revision)) {
+
+      // Only mirror to Firestore when signature actually changed AND (we verified cloud was missing/older or local revision exceeded known cloud revision).
+      const knownCloudRev = cloudReg?.revision ?? cloudKnownRevisionByTarget.get(activeFirebaseConfig.projectId) ?? 0;
+      const shouldMirror =
+        serverRes.isMaster &&
+        getLastMirroredSignature(activeFirebaseConfig.projectId) !== computeRegistrySignature(normalized) &&
+        ((didReadCloud && cloudReg === null) || normalized.revision > knownCloudRev);
+      if (shouldMirror) {
         void writeFirestoreRegistryDoc(
           sourceDb,
           normalized,
@@ -4216,7 +4329,10 @@ export async function fetchProgrammerSession(
       email: user.email,
       fullNameQuad,
     });
-    if (role.isMaster) {
+    if (
+      role.isMaster &&
+      getLastMirroredSignature(activeFirebaseConfig.projectId) !== computeRegistrySignature(state)
+    ) {
       void writeFirestoreRegistryDoc(
         sourceDb,
         state,
@@ -4436,9 +4552,9 @@ export async function addBackupDatabase(
       throw new Error('لم يؤكد الخادم حفظ القاعدة الاحتياطية في القائمة.');
     }
     saveLocalRegistryState(normalized);
-    await withTimeout(
+    void withTimeout(
       writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad),
-      2200
+      2000
     ).catch(() => false);
     return { ok: true, added: res.added || persisted, state: normalized };
   } catch (err) {

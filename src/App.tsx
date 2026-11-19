@@ -66,6 +66,7 @@ import {
 import {
   fetchProgrammerSession,
   getFallbackProgrammerState,
+  noteCloudRegistrySnapshot,
   restoreActiveSupervisorRoomFromSnapshot,
   syncPersonalAccountFromPreviousDbs,
   type MigrationProgress,
@@ -286,6 +287,10 @@ export default function App() {
   const switchingInProgressRef = useRef(false);
   const backupCheckInProgressRef = useRef(false);
   const lastSeenRegistryTagRef = useRef<string>('');
+  const programmerStateRef = useRef(programmerState);
+  programmerStateRef.current = programmerState;
+  const lastProgrammerRefreshAtRef = useRef(0);
+  const lastRegistrySnapshotRefreshAtRef = useRef(0);
 
   const applyRemotePlatformPointer = useCallback(
     (incoming: {
@@ -522,7 +527,7 @@ export default function App() {
   ]);
 
   const refreshProgrammerState = useCallback(
-    async (userOverride?: User | null, nameOverride?: string | null) => {
+    async (userOverride?: User | null, nameOverride?: string | null, force = false) => {
       const targetUser = userOverride ?? firebaseUserRef.current;
       if (!targetUser) {
         setIsProgrammer(false);
@@ -530,6 +535,16 @@ export default function App() {
         setProgrammerState(null);
         return;
       }
+
+      const now = Date.now();
+      if (
+        !force &&
+        programmerStateRef.current &&
+        now - lastProgrammerRefreshAtRef.current < 2500
+      ) {
+        return;
+      }
+      lastProgrammerRefreshAtRef.current = now;
 
       let candidateName = nameOverride || profile?.fullNameQuad || targetUser.displayName || '';
       if (!candidateName) {
@@ -550,15 +565,21 @@ export default function App() {
       if (quickMaster) {
         setIsProgrammer(true);
         setIsMasterProgrammer(true);
+        if (!programmerStateRef.current) {
+          setProgrammerState(getFallbackProgrammerState());
+        }
       }
 
       const reqSeq = ++programmerReqSeqRef.current;
-      setProgrammerLoading(true);
+      if (!programmerStateRef.current) {
+        setProgrammerLoading(true);
+      }
       setProgrammerError(null);
       try {
         const res = await fetchProgrammerSession(targetUser, candidateName);
         if (reqSeq !== programmerReqSeqRef.current) return;
-        setIsProgrammer(res.isProgrammer || quickMaster);
+        const resolvedProgrammer = res.isProgrammer || quickMaster;
+        setIsProgrammer(resolvedProgrammer);
         setIsMasterProgrammer(res.isMaster || quickMaster);
         if (res.mode) setProgrammerMode(res.mode);
         if (res.state) {
@@ -573,7 +594,7 @@ export default function App() {
             }
             return res.state!;
           });
-        } else if (res.isProgrammer || quickMaster) {
+        } else if (resolvedProgrammer) {
           setProgrammerState((prev) => prev || getFallbackProgrammerState());
         }
       } catch (err) {
@@ -644,14 +665,14 @@ export default function App() {
         saveBackupFirebaseConfigs(ptr.backupConfigs);
       }
 
-      const regTag = `${ptr?.revision || 0}::${counts?.poolUpdatedAt || ptr?.updatedAt || 0}::${
+      const regTag = `${ptr?.revision || 0}::${ptr?.config?.projectId || ''}::${
         counts?.playerDatabasesCount ?? 0
       }::${counts?.backupDatabasesCount ?? 0}`;
       if (regTag !== lastSeenRegistryTagRef.current) {
         const hadPrevTag = Boolean(lastSeenRegistryTagRef.current);
         lastSeenRegistryTagRef.current = regTag;
         if ((hadPrevTag || payloadType === 'update') && firebaseUserRef.current) {
-          void refreshProgrammerState(firebaseUserRef.current);
+          void refreshProgrammerState(firebaseUserRef.current, undefined, payloadType === 'update');
         }
       }
 
@@ -770,7 +791,7 @@ export default function App() {
       if (document.visibilityState === 'visible') {
         void checkServerPointer(false);
       }
-    }, 4_500);
+    }, 25_000);
 
     return () => {
       disposed = true;
@@ -806,15 +827,31 @@ export default function App() {
     );
 
     let unsubRegistry: (() => void) | null = null;
-    if (firebaseUser?.emailVerified) {
+    if (firebaseUser?.emailVerified && isProgrammer) {
       unsubRegistry = onSnapshot(
         doc(db, 'platform', 'registry'),
         (snap) => {
-          if (!snap.exists()) return;
-          void refreshProgrammerState(firebaseUser);
+          if (!snap.exists() || snap.metadata.hasPendingWrites) return;
+          const info = noteCloudRegistrySnapshot(
+            activeProjectId,
+            snap.data() as Record<string, unknown>
+          );
+          const cur = programmerStateRef.current;
+          const changedVsLocal =
+            !cur ||
+            info.revision > cur.revision ||
+            info.playerCount !== cur.playerDatabases.length ||
+            info.backupCount !== cur.backupDatabases.length ||
+            info.programmerCount !== cur.programmers.length;
+          if (!changedVsLocal) return;
+
+          const now = Date.now();
+          if (now - lastRegistrySnapshotRefreshAtRef.current < 3000) return;
+          lastRegistrySnapshotRefreshAtRef.current = now;
+          void refreshProgrammerState(firebaseUser, undefined, true);
         },
         () => {
-          // Silent fallback if registry doc absent
+          // Silent fallback if registry doc absent or quota exhausted
         }
       );
     }
@@ -827,6 +864,7 @@ export default function App() {
     applyRemotePlatformPointer,
     firebaseUser?.uid,
     firebaseUser?.emailVerified,
+    isProgrammer,
     refreshProgrammerState,
   ]);
 
@@ -1306,8 +1344,15 @@ export default function App() {
 
   const isSupervisor = Boolean(room && room.supervisorId === profile?.uid);
 
+  const effectiveIsProgrammer =
+    isProgrammer ||
+    isMasterProgrammerIdentity({
+      email: firebaseUser?.email,
+      fullNameQuad: profile?.fullNameQuad || firebaseUser?.displayName,
+    });
+
   // Direct view into Programmer Console if profile Firestore load failed on current DB
-  if (isProgrammer && tab === 'programmer' && firebaseUser && !profile) {
+  if (effectiveIsProgrammer && tab === 'programmer' && firebaseUser && !profile) {
     return (
       <AppErrorBoundary>
         <div className="min-h-screen bg-[#FFFFFF] flex flex-col">
@@ -1414,10 +1459,14 @@ export default function App() {
               {profileLoadError}
             </p>
             <div className="flex flex-wrap items-center justify-center gap-3 w-full pt-2">
-              {isProgrammer && (
+              {effectiveIsProgrammer && (
                 <button
                   type="button"
-                  onClick={() => setTab('programmer')}
+                  onClick={() => {
+                    setProgrammerState((prev) => prev || getFallbackProgrammerState());
+                    setTab('programmer');
+                    void refreshProgrammerState(firebaseUser, firebaseUser.displayName, true);
+                  }}
                   className="duo-btn flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-sm font-black cursor-pointer"
                 >
                   <Code2 className="w-4 h-4" />
@@ -1503,6 +1552,14 @@ export default function App() {
         <AuthGate
           firebaseUser={firebaseUser}
           profile={profile}
+          isProgrammer={effectiveIsProgrammer}
+          onOpenProgrammer={() => {
+            setProgrammerState((prev) => prev || getFallbackProgrammerState());
+            setTab('programmer');
+            if (firebaseUser) {
+              void refreshProgrammerState(firebaseUser, firebaseUser.displayName, true);
+            }
+          }}
           onProfileSaved={(saved) => {
             setProfileLoadError(null);
             setProfile(saved);
@@ -1598,12 +1655,13 @@ export default function App() {
                   <span>اختباراتي</span>
                 </button>
 
-                {isProgrammer && (
+                {effectiveIsProgrammer && (
                   <button
                     type="button"
                     onClick={() => {
+                      setProgrammerState((prev) => prev || getFallbackProgrammerState());
                       setTab('programmer');
-                      void refreshProgrammerState();
+                      void refreshProgrammerState(firebaseUser, profile?.fullNameQuad, true);
                     }}
                     className={`flex items-center gap-1 sm:gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       tab === 'programmer'
@@ -1983,7 +2041,7 @@ export default function App() {
                 closingRoom={closingRoomBusy}
               />
             )
-          ) : tab === 'programmer' && isProgrammer ? (
+          ) : tab === 'programmer' && effectiveIsProgrammer ? (
             programmerLoading && !programmerState ? (
               <div className="max-w-3xl mx-auto px-4 py-12">
                 <DuoLoading

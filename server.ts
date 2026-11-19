@@ -379,7 +379,7 @@ async function verifyFirebaseIdToken(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
+    const timer = setTimeout(() => controller.abort(), 2000);
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
       {
@@ -841,7 +841,7 @@ async function tryHydrateServerFromFirestoreRegistry(
       targetCfg.projectId
     )}/databases/${dbName}/documents/platform/registry?key=${encodeURIComponent(targetCfg.apiKey)}`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
+    const timer = setTimeout(() => controller.abort(), 1800);
     const resp = await fetch(url, {
       headers: { Authorization: `Bearer ${idToken}` },
       signal: controller.signal,
@@ -977,12 +977,14 @@ async function tryHydrateServerFromFirestoreRegistry(
       getOrCreateProjectQuotaRecord(remoteTarget.projectId);
     }
 
-    platformState.revision = Math.max(platformState.revision, remoteRevision) + 1;
+    platformState.revision = Math.max(platformState.revision, remoteRevision);
     platformState.migrationEpoch = CURRENT_DB_EPOCH;
     platformState.updatedAt = Date.now();
     saveQuotaStateFile();
     savePlatformState(platformState);
-    broadcastState();
+    if (shouldUpdateTarget || hasMissingPlayer || hasMissingBackup || hasMissingProg) {
+      broadcastState();
+    }
     return true;
   } catch {
     return false;
@@ -1353,12 +1355,7 @@ async function startServer(): Promise<void> {
         : '';
     const hydrateKey = `${reqProj || platformState.activeTargetConfig.projectId}:${reqDbId || '(default)'}`;
 
-    if (
-      bearer &&
-      (!hydratedProjectKeys.has(hydrateKey) ||
-        platformState.revision <= 1 ||
-        (reqProj && reqProj !== platformState.activeTargetConfig.projectId))
-    ) {
+    if (bearer && !hydratedProjectKeys.has(hydrateKey)) {
       hydratedProjectKeys.add(hydrateKey);
       const targetCfg =
         (reqProj &&

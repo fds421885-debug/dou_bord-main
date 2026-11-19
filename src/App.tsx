@@ -226,6 +226,7 @@ export default function App() {
   );
   const [programmerLoading, setProgrammerLoading] = useState<boolean>(false);
   const [programmerError, setProgrammerError] = useState<string | null>(null);
+  const programmerReqSeqRef = useRef(0);
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
   const [autoSwitchNotice, setAutoSwitchNotice] = useState<{
     targetProjectId: string;
@@ -550,24 +551,39 @@ export default function App() {
         setIsMasterProgrammer(true);
       }
 
+      const reqSeq = ++programmerReqSeqRef.current;
       setProgrammerLoading(true);
       setProgrammerError(null);
       try {
         const res = await fetchProgrammerSession(targetUser, candidateName);
+        if (reqSeq !== programmerReqSeqRef.current) return;
         setIsProgrammer(res.isProgrammer || quickMaster);
         setIsMasterProgrammer(res.isMaster || quickMaster);
         if (res.mode) setProgrammerMode(res.mode);
         if (res.state) {
-          setProgrammerState(res.state);
+          setProgrammerState((prev) => {
+            if (!prev) return res.state!;
+            if (
+              res.state!.revision < prev.revision &&
+              (res.state!.playerDatabases.length < prev.playerDatabases.length ||
+                res.state!.backupDatabases.length < prev.backupDatabases.length)
+            ) {
+              return prev;
+            }
+            return res.state!;
+          });
         }
       } catch (err) {
+        if (reqSeq !== programmerReqSeqRef.current) return;
         const msg =
           err instanceof Error && err.message
             ? err.message
             : 'تعذر الاتصال بخادم إدارة القواعد حالياً.';
         setProgrammerError(msg);
       } finally {
-        setProgrammerLoading(false);
+        if (reqSeq === programmerReqSeqRef.current) {
+          setProgrammerLoading(false);
+        }
       }
     },
     [profile?.fullNameQuad]
@@ -1732,6 +1748,63 @@ export default function App() {
           </div>
         )}
 
+        {/* Live Capacity Bar & Percentage Strip (Supervisors & Programmers Only) */}
+        {canReceiveQuotaAlerts && tab !== 'programmer' && (
+          <div className="bg-[#F8FAFC] border-b border-[#E5E5E5] px-3 sm:px-6 py-2">
+            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 font-black text-[#3C3C3C]">
+                <Database className="w-4 h-4 text-[#1899D6] shrink-0" />
+                <span>سعة القاعدة المجانية:</span>
+                <span className="font-latin text-[#1899D6] bg-white px-2 py-0.5 rounded-lg border border-[#E5E5E5]">
+                  {liveQuotaStatus.projectId}
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-lg border text-[11px] font-black ${
+                    liveQuotaStatus.minRemainingPct <= 2
+                      ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                      : liveQuotaStatus.minRemainingPct <= 5
+                      ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                      : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                  }`}
+                >
+                  متبقي {liveQuotaStatus.minRemainingPct.toFixed(1)}%
+                </span>
+                <span className="text-[11px] font-bold text-[#777777]">
+                  ({formatQuotaMetricArabic(liveQuotaStatus.bottleneckMetric)} • متبقي{' '}
+                  <span className="font-latin text-[#3C3C3C]">
+                    {liveQuotaStatus.bottleneckRemainingCount.toLocaleString('en-US')}
+                  </span>{' '}
+                  اليوم)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2.5 sm:w-72 shrink-0">
+                <div className="flex-1 h-3 rounded-full bg-[#E5E5E5] overflow-hidden relative border border-[#D0D0D0]">
+                  <svg className="w-full h-full block" aria-hidden="true">
+                    <rect
+                      x="0"
+                      y="0"
+                      height="100%"
+                      width={`${Math.max(0, Math.min(100, liveQuotaStatus.minRemainingPct)).toFixed(2)}%`}
+                      className={
+                        liveQuotaStatus.minRemainingPct <= 2
+                          ? 'fill-[#FF4B4B]'
+                          : liveQuotaStatus.minRemainingPct <= 5
+                          ? 'fill-[#FFC800]'
+                          : 'fill-[#58CC02]'
+                      }
+                    />
+                    <rect x="4.5%" y="0" width="1%" height="100%" className="fill-[#EA2B2B]/80" />
+                  </svg>
+                </div>
+                <span dir="ltr" className="font-latin text-[11px] font-black text-[#3C3C3C] w-14 text-right">
+                  {liveQuotaStatus.minRemainingPct.toFixed(1)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {consolidatedNoticeProject && !activeRoomId && (
           <div className="bg-[#D7FFB8] border-b-2 border-[#58CC02] px-3 sm:px-6 py-3">
             <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm font-black text-[#46A302]">
@@ -1908,7 +1981,10 @@ export default function App() {
                 isMaster={isMasterProgrammer}
                 backendMode={programmerMode}
                 poolState={programmerState}
-                onPoolStateUpdated={(next) => setProgrammerState(next)}
+                onPoolStateUpdated={(next) => {
+                  programmerReqSeqRef.current += 1;
+                  setProgrammerState(next);
+                }}
                 onRefreshState={() =>
                   refreshProgrammerState(firebaseUser, profile.fullNameQuad)
                 }

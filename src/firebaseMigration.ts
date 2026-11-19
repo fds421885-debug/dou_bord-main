@@ -673,7 +673,7 @@ export async function verifyDatabaseBeforeAdd(params: {
   };
 
   type RulesProbeOutcome =
-    | { ok: true }
+    | { ok: true; wroteProfile: boolean }
     | {
         ok: false;
         retryablePropagation: boolean;
@@ -873,7 +873,7 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    return { ok: true };
+    return { ok: true, wroteProfile: needsProfileCreate };
   };
 
   setStep('rules', {
@@ -910,7 +910,7 @@ export async function verifyDatabaseBeforeAdd(params: {
     // Track live REST operations toward Spark free-tier quota
     recordFirestoreOperations(projectId, {
       reads: role === 'player' ? 3 : 2,
-      writes: needsProfileCreate ? 2 : 1,
+      writes: probeOutcome.wroteProfile ? 2 : 1,
       deletes: 1,
     });
 

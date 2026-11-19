@@ -58,6 +58,7 @@ import type {
 } from '../types';
 import {
   calibrateProjectQuotaUsage,
+  fetchAllServerQuotaStatuses,
   fetchServerQuotaStatus,
   formatQuotaMetricArabic,
   getCachedProjectQuotaStatus,
@@ -122,17 +123,41 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [quotaStatus, setQuotaStatus] = useState<ProjectQuotaStatus>(() =>
     getCachedProjectQuotaStatus(activeProjectId)
   );
+  const [quotaByProject, setQuotaByProject] = useState<Record<string, ProjectQuotaStatus>>(() => ({
+    [activeProjectId]: getCachedProjectQuotaStatus(activeProjectId),
+  }));
+  const [justAddedDbId, setJustAddedDbId] = useState<string | null>(null);
   const [calibratingQuota, setCalibratingQuota] = useState(false);
+
+  const registeredProjectIdsKey = useMemo(
+    () =>
+      [
+        activeProjectId,
+        ...poolState.playerDatabases.map((d) => d.config.projectId),
+      ].join(','),
+    [poolState.playerDatabases]
+  );
 
   useEffect(() => {
     const unsub = subscribeQuotaStatus((status) => {
+      setQuotaByProject((prev) => ({
+        ...prev,
+        [status.projectId]: status,
+      }));
       if (status.projectId === activeProjectId) {
         setQuotaStatus(status);
       }
     });
+    const projectIds = registeredProjectIdsKey.split(',').filter(Boolean);
     void fetchServerQuotaStatus(activeProjectId);
+    void fetchAllServerQuotaStatuses(projectIds).then((map) => {
+      setQuotaByProject((prev) => ({ ...prev, ...map }));
+      if (map[activeProjectId]) {
+        setQuotaStatus(map[activeProjectId]);
+      }
+    });
     return () => unsub();
-  }, []);
+  }, [registeredProjectIdsKey]);
 
   const handleCalibrateQuota = async (targetRemainingPct: number) => {
     setCalibratingQuota(true);
@@ -247,7 +272,21 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           verifyRes.summary
         );
         onPoolStateUpdated(res.state);
-        const okMsg = `تم فحص القاعدة 100% وإضافتها إلى «قواعد البيانات» (#${res.added.order} — ${res.added.config.projectId}) وتسجيل الدخول عليها بنجاح!`;
+        setJustAddedDbId(res.added.id);
+        setVerifySteps((prev) =>
+          prev
+            ? prev.map((s) =>
+                s.id === 'register'
+                  ? {
+                      ...s,
+                      status: 'passed',
+                      detail: `تم حفظ القاعدة (#${res.added.order} — ${res.added.config.projectId}) وربطها بالبرنامج بالكامل وتسجيل الدخول`,
+                    }
+                  : s
+              )
+            : prev
+        );
+        const okMsg = `تم فحص القاعدة 100% وحفظها وربطها بالبرنامج بالكامل في «قواعد البيانات» (#${res.added.order} — ${res.added.config.projectId})!`;
         setStatusNotice(okMsg);
         setAddSuccessNotice(okMsg);
       } else {
@@ -259,10 +298,30 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           verifyRes.summary
         );
         onPoolStateUpdated(res.state);
-        const okMsg = `تم فحص القاعدة الاحتياطية 100% وإضافتها كقاعدة صامتة (#${res.added.order} — ${res.added.config.projectId}) بدون لمسها بتاتاً!`;
+        setJustAddedDbId(res.added.id);
+        setVerifySteps((prev) =>
+          prev
+            ? prev.map((s) =>
+                s.id === 'register'
+                  ? {
+                      ...s,
+                      status: 'passed',
+                      detail: `تم حفظ القاعدة الاحتياطية (#${res.added.order} — ${res.added.config.projectId}) وربطها بنظام الإعلان الصامت بدون لمسها`,
+                    }
+                  : s
+              )
+            : prev
+        );
+        const okMsg = `تم فحص القاعدة الاحتياطية 100% وحفظها وربطها بنظام الإعلان الصامت (#${res.added.order} — ${res.added.config.projectId})!`;
         setStatusNotice(okMsg);
         setAddSuccessNotice(okMsg);
       }
+
+      void fetchAllServerQuotaStatuses([
+        activeProjectId,
+        verifyRes.config.projectId,
+        ...poolState.playerDatabases.map((d) => d.config.projectId),
+      ]).then((map) => setQuotaByProject((prev) => ({ ...prev, ...map })));
 
       playDuoSound('correct');
       setConfigInput('');
@@ -270,7 +329,17 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
       setCustomDatabaseId('');
     } catch (err) {
       playDuoSound('wrong');
-      setErrorNotice(err instanceof Error ? err.message : 'تعذر فحص وإضافة قاعدة البيانات.');
+      const errMsg = err instanceof Error ? err.message : 'تعذر فحص وإضافة قاعدة البيانات.';
+      setVerifySteps((prev) =>
+        prev
+          ? prev.map((s) =>
+              s.id === 'register' && s.status === 'running'
+                ? { ...s, status: 'failed', detail: errMsg }
+                : s
+            )
+          : prev
+      );
+      setErrorNotice(errMsg);
     } finally {
       setVerifyingAndAdding(false);
     }
@@ -661,53 +730,132 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
               )}
               <div>
                 <h3 className="text-xs sm:text-sm font-black text-[#3C3C3C]">
-                  مراقبة الحصة المجانية اليومية للقاعدة النشطة (<span className="font-latin">{activeProjectId}</span>)
+                  مراقبة حدود الحصة المجانية اليومية (<span className="font-latin">{activeProjectId}</span>)
                 </h3>
                 <p className="text-[11px] font-bold text-[#777777]">
-                  عند بقاء <span className="font-latin">5%</span> أو أقل يُرسل إشعار تلقائي للمشرف عند كل نقص مقداره{' '}
+                  عند بقاء <span className="font-latin">5.0%</span> أو أقل يُرسل تنبيه تلقائي للمشرف عند كل نقص بمقدار{' '}
                   <span className="font-latin">0.5%</span> ({quotaStatus.dateKey})
                 </p>
               </div>
             </div>
-            <span
-              className={`self-start sm:self-center px-3 py-1 rounded-xl text-xs font-black border ${
-                quotaStatus.alertStep !== null
-                  ? quotaStatus.alertStep <= 2.0
-                    ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
-                    : 'bg-[#FFC800] border-[#E0A800] text-[#3C3C3C]'
-                  : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
-              }`}
-            >
-              {quotaStatus.alertStep !== null
-                ? `تنبيه نشط: متبقي ${quotaStatus.minRemainingPct.toFixed(2)}% (عتبة ${quotaStatus.alertStep.toFixed(1)}%)`
-                : `آمن — متبقي ${quotaStatus.minRemainingPct.toFixed(1)}% اليوم`}
-            </span>
+            <div className="flex items-center gap-2 self-start sm:self-center">
+              <span
+                className={`px-3 py-1 rounded-xl text-xs font-black border ${
+                  quotaStatus.alertStep !== null
+                    ? quotaStatus.alertStep <= 2.0
+                      ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
+                      : 'bg-[#FFC800] border-[#E0A800] text-[#3C3C3C]'
+                    : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                }`}
+              >
+                {quotaStatus.alertStep !== null
+                  ? `متبقي ${quotaStatus.minRemainingPct.toFixed(2)}% (عتبة ${quotaStatus.alertStep.toFixed(1)}%)`
+                  : `متبقي ${quotaStatus.minRemainingPct.toFixed(1)}% • مستخدم ${(100 - quotaStatus.minRemainingPct).toFixed(1)}%`}
+              </span>
+            </div>
           </div>
 
+          {/* Overall Visual Free-Quota Bar with 5% Alert Marker */}
+          <div className="flex flex-col gap-1.5 bg-white/80 p-3 rounded-xl border border-[#E5E5E5]">
+            <div className="flex items-center justify-between text-[11px] font-black">
+              <span className="text-[#3C3C3C]">
+                النسبة المتبقية حتى انتهاء الحد المجاني اليومي
+              </span>
+              <span dir="ltr" className="font-latin text-xs text-[#1899D6]">
+                {quotaStatus.minRemainingPct.toFixed(2)}% متبقية ({quotaStatus.bottleneckRemainingCount.toLocaleString('en-US')} عملية)
+              </span>
+            </div>
+            <div className="h-4 w-full rounded-full bg-[#EDEDED] border border-[#D4D4D4] overflow-hidden relative">
+              <svg className="w-full h-full block" aria-hidden="true">
+                <rect
+                  x="0"
+                  y="0"
+                  height="100%"
+                  width={`${Math.max(0, Math.min(100, quotaStatus.minRemainingPct)).toFixed(2)}%`}
+                  className={
+                    quotaStatus.minRemainingPct <= 2
+                      ? 'fill-[#FF4B4B]'
+                      : quotaStatus.minRemainingPct <= 5
+                      ? 'fill-[#FFC800]'
+                      : quotaStatus.minRemainingPct <= 20
+                      ? 'fill-[#FF9600]'
+                      : 'fill-[#58CC02]'
+                  }
+                />
+                {/* 5% Warning Threshold Tick */}
+                <rect x="5%" y="0" width="2" height="100%" className="fill-[#EA2B2B]" />
+              </svg>
+            </div>
+            <div className="flex items-center justify-between text-[10px] font-bold text-[#777777]">
+              <span>المتبقي: {quotaStatus.minRemainingPct.toFixed(2)}%</span>
+              <span className="text-[#EA2B2B] font-extrabold">خط التنبيه الأول: 5.0% (وكل نقص 0.5%)</span>
+              <span>المستخدم: {(100 - quotaStatus.minRemainingPct).toFixed(2)}%</span>
+            </div>
+          </div>
+
+          {/* Individual Metric Progress Bars */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs font-black">
-            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
-              <span className="text-[#777777]">القراءة (Reads)</span>
-              <span className="font-latin text-[#3C3C3C]">
-                {quotaStatus.readsRemainingPct.toFixed(1)}% ({quotaStatus.readsUsed.toLocaleString('en-US')}/{quotaStatus.readsLimit.toLocaleString('en-US')})
-              </span>
-            </div>
-            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
-              <span className="text-[#777777]">الكتابة (Writes)</span>
-              <span className="font-latin text-[#3C3C3C]">
-                {quotaStatus.writesRemainingPct.toFixed(1)}% ({quotaStatus.writesUsed.toLocaleString('en-US')}/{quotaStatus.writesLimit.toLocaleString('en-US')})
-              </span>
-            </div>
-            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
-              <span className="text-[#777777]">الحذف (Deletes)</span>
-              <span className="font-latin text-[#3C3C3C]">
-                {quotaStatus.deletesRemainingPct.toFixed(1)}% ({quotaStatus.deletesUsed.toLocaleString('en-US')}/{quotaStatus.deletesLimit.toLocaleString('en-US')})
-              </span>
-            </div>
+            {[
+              {
+                key: 'reads',
+                title: 'القراءة (Reads)',
+                pct: quotaStatus.readsRemainingPct,
+                used: quotaStatus.readsUsed,
+                limit: quotaStatus.readsLimit,
+              },
+              {
+                key: 'writes',
+                title: 'الكتابة (Writes)',
+                pct: quotaStatus.writesRemainingPct,
+                used: quotaStatus.writesUsed,
+                limit: quotaStatus.writesLimit,
+              },
+              {
+                key: 'deletes',
+                title: 'الحذف (Deletes)',
+                pct: quotaStatus.deletesRemainingPct,
+                used: quotaStatus.deletesUsed,
+                limit: quotaStatus.deletesLimit,
+              },
+            ].map((m) => (
+              <div
+                key={m.key}
+                className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex flex-col gap-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[#777777]">{m.title}</span>
+                  <span dir="ltr" className="font-latin text-[#3C3C3C]">
+                    {m.pct.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-2.5 w-full rounded-full bg-[#EDEDED] overflow-hidden">
+                  <svg className="w-full h-full block" aria-hidden="true">
+                    <rect
+                      x="0"
+                      y="0"
+                      height="100%"
+                      width={`${Math.max(0, Math.min(100, m.pct)).toFixed(2)}%`}
+                      className={
+                        m.pct <= 2
+                          ? 'fill-[#FF4B4B]'
+                          : m.pct <= 5
+                          ? 'fill-[#FFC800]'
+                          : 'fill-[#1CB0F6]'
+                      }
+                    />
+                  </svg>
+                </div>
+                <span dir="ltr" className="font-latin text-[10px] font-bold text-[#777777] text-left">
+                  مستخدم {m.used.toLocaleString('en-US')} / {m.limit.toLocaleString('en-US')} • باقي{' '}
+                  {Math.max(0, m.limit - m.used).toLocaleString('en-US')}
+                </span>
+              </div>
+            ))}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-black/10">
             <span className="text-[11px] font-bold text-[#777777]">
-              أقرب مورد: {formatQuotaMetricArabic(quotaStatus.bottleneckMetric)} • عدد التنبيهات المرسلة اليوم:{' '}
+              أقرب مورد للنفاد: {formatQuotaMetricArabic(quotaStatus.bottleneckMetric)} • عدد التنبيهات المرسلة اليوم:{' '}
               <span className="font-latin text-[#3C3C3C]">{quotaStatus.alertCount}</span>
             </span>
             <div className="flex flex-wrap items-center gap-2">
@@ -934,7 +1082,11 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                   const isActive = isSameFirebaseTarget(entry.config, activeFirebaseConfig);
                   const isMigratingThis = migratingEntryId === entry.id;
                   const isDeletingThis = confirmDeleteDbId === entry.id;
+                  const isJustAdded = justAddedDbId === entry.id;
                   const chosenBackup = getChosenBackupForTarget(entry.id);
+                  const entryQuota =
+                    quotaByProject[entry.config.projectId] ||
+                    getCachedProjectQuotaStatus(entry.config.projectId);
 
                   return (
                     <div
@@ -942,6 +1094,8 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                       className={`rounded-2xl border-2 p-4 flex flex-col gap-3 transition-colors ${
                         isActive
                           ? 'bg-[#D7FFB8]/35 border-[#58CC02]'
+                          : isJustAdded
+                          ? 'bg-[#E6F7FF]/60 border-[#1CB0F6]'
                           : 'bg-white border-[#E5E5E5]'
                       }`}
                     >
@@ -966,9 +1120,14 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                                   النشطة حالياً للجميع
                                 </span>
                               )}
+                              {isJustAdded && (
+                                <span className="px-2.5 py-0.5 rounded-lg bg-[#1CB0F6] text-white text-[11px] font-black">
+                                  تم الحفظ والربط للتو
+                                </span>
+                              )}
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#D7FFB8] text-[#46A302] text-[10px] font-black">
                                 <ShieldCheck className="w-3 h-3" />
-                                فحص 100% (Firestore + OAuth + Rules)
+                                فحص 100% ومربوطة بالبرنامج
                               </span>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#777777]">
@@ -1064,6 +1223,51 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                               <Trash2 className="w-4 h-4" />
                             </button>
                           )}
+                        </div>
+                      </div>
+
+                      {/* Per-Database Free Quota Limit Bar & Percentage */}
+                      <div className="pt-2.5 border-t border-black/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                        <div className="flex flex-wrap items-center gap-2 font-black text-[#3C3C3C]">
+                          <Gauge className="w-3.5 h-3.5 text-[#1899D6] shrink-0" />
+                          <span>المتبقي من الحد المجاني:</span>
+                          <span
+                            className={`px-2 py-0.5 rounded-lg border font-latin ${
+                              entryQuota.minRemainingPct <= 2
+                                ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                                : entryQuota.minRemainingPct <= 5
+                                ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                                : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                            }`}
+                          >
+                            {entryQuota.minRemainingPct.toFixed(1)}%
+                          </span>
+                          <span className="font-bold text-[#777777]">
+                            (باقي {entryQuota.bottleneckRemainingCount.toLocaleString('en-US')} •{' '}
+                            {formatQuotaMetricArabic(entryQuota.bottleneckMetric)})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 sm:w-56 shrink-0">
+                          <div className="flex-1 h-2.5 rounded-full bg-[#EDEDED] overflow-hidden border border-[#D4D4D4]">
+                            <svg className="w-full h-full block" aria-hidden="true">
+                              <rect
+                                x="0"
+                                y="0"
+                                height="100%"
+                                width={`${Math.max(0, Math.min(100, entryQuota.minRemainingPct)).toFixed(2)}%`}
+                                className={
+                                  entryQuota.minRemainingPct <= 2
+                                    ? 'fill-[#FF4B4B]'
+                                    : entryQuota.minRemainingPct <= 5
+                                    ? 'fill-[#FFC800]'
+                                    : 'fill-[#58CC02]'
+                                }
+                              />
+                            </svg>
+                          </div>
+                          <span dir="ltr" className="font-latin font-black text-[#3C3C3C] w-12 text-right">
+                            {entryQuota.minRemainingPct.toFixed(1)}%
+                          </span>
                         </div>
                       </div>
                     </div>

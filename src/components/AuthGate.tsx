@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { signInWithPopup, signOut, type User } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from '../firestoreTracked';
 import { LogIn, UserCheck, AlertCircle, LogOut } from 'lucide-react';
 import {
   auth,

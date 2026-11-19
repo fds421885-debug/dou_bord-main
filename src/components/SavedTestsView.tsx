@@ -7,7 +7,7 @@ import {
   query,
   where,
   writeBatch,
-} from 'firebase/firestore';
+} from '../firestoreTracked';
 import { BookOpen, FolderOpen, Trash2 } from 'lucide-react';
 import {
   db,

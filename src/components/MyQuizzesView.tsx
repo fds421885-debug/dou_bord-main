@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from '../firestoreTracked';
 import {
   ArrowRight,
   CheckCircle2,

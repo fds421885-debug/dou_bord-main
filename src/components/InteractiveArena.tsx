@@ -10,7 +10,7 @@ import {
   updateDoc,
   where,
   writeBatch,
-} from 'firebase/firestore';
+} from '../firestoreTracked';
 import {
   Ban,
   BookmarkCheck,

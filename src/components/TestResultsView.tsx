@@ -8,7 +8,7 @@ import {
   serverTimestamp,
   where,
   writeBatch,
-} from 'firebase/firestore';
+} from '../firestoreTracked';
 import { ArrowRight, CheckCircle2, Power, X, ZoomIn } from 'lucide-react';
 import { db, getTimestampMillis, handleFirestoreError, OperationType } from '../firebase';
 import { isPermissionOrMissingError } from '../roomLifecycle';

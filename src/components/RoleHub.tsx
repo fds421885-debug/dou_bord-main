@@ -9,7 +9,7 @@ import {
   setDoc,
   updateDoc,
   where,
-} from 'firebase/firestore';
+} from '../firestoreTracked';
 import {
   AlertCircle,
   ArrowLeft,

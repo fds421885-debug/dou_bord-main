@@ -12,7 +12,7 @@ import {
   updateDoc,
   where,
   writeBatch,
-} from 'firebase/firestore';
+} from '../firestoreTracked';
 import {
   CheckCircle2,
   Clock,

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, updateDoc } from '../firestoreTracked';
 import { Copy, Check, Users, Play, Clock, Power } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { Participant, Room, UserProfile } from '../types';

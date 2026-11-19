@@ -87,8 +87,42 @@ interface PublicPlatformPointer {
 
 const PORT = Number(process.env.PORT || 3000);
 const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.json');
+const QUOTA_STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-quota-state.json');
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
+
+const SPARK_DAILY_LIMITS = {
+  reads: 50_000,
+  writes: 20_000,
+  deletes: 20_000,
+} as const;
+
+type QuotaMetricKind = 'reads' | 'writes' | 'deletes';
+
+interface ServerProjectQuotaRecord {
+  projectId: string;
+  dateKey: string;
+  readsUsed: number;
+  writesUsed: number;
+  deletesUsed: number;
+  exhausted: boolean;
+  lastAlertStep: number | null;
+  alertCount: number;
+  updatedAt: number;
+}
+
+interface ServerProjectQuotaStatus extends ServerProjectQuotaRecord {
+  readsLimit: number;
+  writesLimit: number;
+  deletesLimit: number;
+  readsRemainingPct: number;
+  writesRemainingPct: number;
+  deletesRemainingPct: number;
+  minRemainingPct: number;
+  bottleneckMetric: QuotaMetricKind;
+  bottleneckRemainingCount: number;
+  alertStep: number | null;
+}
 
 const CURRENT_DB_EPOCH = 'clean_split_v3_2026_11_18';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
@@ -174,12 +208,124 @@ function loadDefaultAppletConfig(): SanitizedFirebaseConfig {
   return {
     apiKey: '',
     authDomain: '',
-    projectId: 'siiiiii-3720b',
+    projectId: 'qdrat-1',
     appId: '',
   };
 }
 
 const defaultAppletConfig = loadDefaultAppletConfig();
+
+function getQuotaDateKey(): string {
+  try {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function computeQuotaStep(minRemainingPct: number): number | null {
+  if (!Number.isFinite(minRemainingPct) || minRemainingPct > 5.0) return null;
+  if (minRemainingPct <= 0.0001) return 0;
+  return Math.max(0, Math.min(5.0, Math.ceil(minRemainingPct * 2 - 1e-9) / 2));
+}
+
+function buildQuotaStatusFromRecord(rec: ServerProjectQuotaRecord): ServerProjectQuotaStatus {
+  const readsUsed = Math.max(0, Math.round(rec.readsUsed || 0));
+  const writesUsed = Math.max(0, Math.round(rec.writesUsed || 0));
+  const deletesUsed = Math.max(0, Math.round(rec.deletesUsed || 0));
+  const exhausted = Boolean(rec.exhausted);
+
+  const readsRemainingPct = exhausted
+    ? 0
+    : Math.max(0, 100 - (readsUsed / SPARK_DAILY_LIMITS.reads) * 100);
+  const writesRemainingPct = exhausted
+    ? 0
+    : Math.max(0, 100 - (writesUsed / SPARK_DAILY_LIMITS.writes) * 100);
+  const deletesRemainingPct = exhausted
+    ? 0
+    : Math.max(0, 100 - (deletesUsed / SPARK_DAILY_LIMITS.deletes) * 100);
+
+  let bottleneckMetric: QuotaMetricKind = 'reads';
+  let minRemainingPct = readsRemainingPct;
+  let bottleneckRemainingCount = Math.max(0, SPARK_DAILY_LIMITS.reads - readsUsed);
+
+  if (writesRemainingPct < minRemainingPct) {
+    bottleneckMetric = 'writes';
+    minRemainingPct = writesRemainingPct;
+    bottleneckRemainingCount = Math.max(0, SPARK_DAILY_LIMITS.writes - writesUsed);
+  }
+  if (deletesRemainingPct < minRemainingPct) {
+    bottleneckMetric = 'deletes';
+    minRemainingPct = deletesRemainingPct;
+    bottleneckRemainingCount = Math.max(0, SPARK_DAILY_LIMITS.deletes - deletesUsed);
+  }
+  if (exhausted) {
+    minRemainingPct = 0;
+    bottleneckRemainingCount = 0;
+  }
+
+  return {
+    ...rec,
+    readsUsed,
+    writesUsed,
+    deletesUsed,
+    exhausted,
+    readsLimit: SPARK_DAILY_LIMITS.reads,
+    writesLimit: SPARK_DAILY_LIMITS.writes,
+    deletesLimit: SPARK_DAILY_LIMITS.deletes,
+    readsRemainingPct,
+    writesRemainingPct,
+    deletesRemainingPct,
+    minRemainingPct,
+    bottleneckMetric,
+    bottleneckRemainingCount,
+    alertStep: computeQuotaStep(minRemainingPct),
+  };
+}
+
+let quotaStateMap: Record<string, ServerProjectQuotaRecord> = {};
+try {
+  if (fs.existsSync(QUOTA_STATE_FILE_PATH)) {
+    const parsedQuota = JSON.parse(fs.readFileSync(QUOTA_STATE_FILE_PATH, 'utf8')) as Record<
+      string,
+      ServerProjectQuotaRecord
+    >;
+    if (parsedQuota && typeof parsedQuota === 'object') {
+      quotaStateMap = parsedQuota;
+    }
+  }
+} catch {
+  quotaStateMap = {};
+}
+
+function saveQuotaStateFile(): void {
+  try {
+    fs.writeFileSync(QUOTA_STATE_FILE_PATH, JSON.stringify(quotaStateMap, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist quota state:', err);
+  }
+}
+
+function getOrCreateProjectQuotaRecord(projectId: string): ServerProjectQuotaRecord {
+  const dateKey = getQuotaDateKey();
+  const existing = quotaStateMap[projectId];
+  if (existing && existing.dateKey === dateKey) {
+    return existing;
+  }
+  const fresh: ServerProjectQuotaRecord = {
+    projectId,
+    dateKey,
+    readsUsed: 0,
+    writesUsed: 0,
+    deletesUsed: 0,
+    exhausted: false,
+    lastAlertStep: null,
+    alertCount: 0,
+    updatedAt: Date.now(),
+  };
+  quotaStateMap[projectId] = fresh;
+  return fresh;
+}
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -403,10 +549,26 @@ function loadPlatformState(): PlatformState {
       (b) => !playerDatabases.some((p) => isSameConfig(p.config, b.config))
     );
 
-    const activeTargetConfig = sanitizeConfig(parsed.activeTargetConfig) || defaultAppletConfig;
-    const matchedActivePlayer = playerDatabases.find((d) =>
+    let activeTargetConfig = sanitizeConfig(parsed.activeTargetConfig) || defaultAppletConfig;
+    let matchedActivePlayer = playerDatabases.find((d) =>
       isSameConfig(d.config, activeTargetConfig)
     );
+    let promotedBaseConfig = false;
+    const preservedPrev = Array.isArray(parsed.previousConfigs)
+      ? (parsed.previousConfigs.map(sanitizeConfig).filter(Boolean) as SanitizedFirebaseConfig[])
+      : [];
+
+    // Automatically migrate base target when base firebase-applet-config.json moves off previous base DB
+    if (
+      activeTargetConfig.projectId === 'siiiiii-3720b' &&
+      !matchedActivePlayer &&
+      defaultAppletConfig.projectId !== 'siiiiii-3720b'
+    ) {
+      preservedPrev.unshift(activeTargetConfig);
+      activeTargetConfig = defaultAppletConfig;
+      matchedActivePlayer = undefined;
+      promotedBaseConfig = true;
+    }
 
     let lastBackupAnnouncement: BackupAnnouncementInfo | null = null;
     if (parsed.lastBackupAnnouncement && typeof parsed.lastBackupAnnouncement === 'object') {
@@ -426,15 +588,14 @@ function loadPlatformState(): PlatformState {
       }
     }
 
-    const prevRaw = Array.isArray(parsed.previousConfigs) ? parsed.previousConfigs : [];
-    const previousConfigs = prevRaw
-      .map(sanitizeConfig)
-      .filter((x): x is SanitizedFirebaseConfig => x !== null)
-      .filter((x) => !isSameConfig(x, activeTargetConfig))
+    const previousConfigs = preservedPrev
+      .filter((x, idx, arr) => !isSameConfig(x, activeTargetConfig) && arr.findIndex((y) => isSameConfig(y, x)) === idx)
       .slice(0, 12);
 
-    return {
-      revision: typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1,
+    const loadedState: PlatformState = {
+      revision:
+        (typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1) +
+        (promotedBaseConfig ? 1 : 0),
       migrationEpoch: CURRENT_DB_EPOCH,
       playerDatabases,
       backupDatabases: renumberEntries(backupDatabases),
@@ -448,9 +609,13 @@ function loadPlatformState(): PlatformState {
           ? parsed.migratedRoomId.toUpperCase()
           : null,
       previousConfigs,
-      updatedByEmail: typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
-      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
+      updatedByEmail: typeof parsed.updatedByEmail === 'string' ? parsed.updatedAt ? parsed.updatedByEmail : undefined : undefined,
+      updatedAt: promotedBaseConfig ? Date.now() : typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
     };
+    if (promotedBaseConfig) {
+      savePlatformState(loadedState);
+    }
+    return loadedState;
   } catch {
     const clean = createCleanInitialState();
     savePlatformState(clean);
@@ -500,8 +665,10 @@ function buildPublicPayload(state: PlatformState): {
   backupDatabasesCount: number;
   backupConfigs: SanitizedFirebaseConfig[];
   poolUpdatedAt: number;
+  quotaStatus: ServerProjectQuotaStatus;
 } {
   const activeCfg = state.activeTargetConfig || defaultAppletConfig;
+  const quotaStatus = buildQuotaStatusFromRecord(getOrCreateProjectQuotaRecord(activeCfg.projectId));
   const backupConfigs = state.backupDatabases.map((b) => b.config);
   const previousConfigs = [
     ...state.previousConfigs,
@@ -537,6 +704,7 @@ function buildPublicPayload(state: PlatformState): {
     backupDatabasesCount: state.backupDatabases.length,
     backupConfigs,
     poolUpdatedAt: state.updatedAt,
+    quotaStatus,
   };
 }
 
@@ -714,6 +882,20 @@ function broadcastState(): void {
   }
 }
 
+function broadcastQuotaAlert(quotaStatus: ServerProjectQuotaStatus): void {
+  const payload = JSON.stringify({
+    type: 'quota_alert',
+    quotaStatus,
+  });
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
 function isAllowedFirebaseCredentials(projectId: string, apiKey: string): boolean {
   if (
     projectId === defaultAppletConfig.projectId &&
@@ -845,6 +1027,113 @@ async function startServer(): Promise<void> {
       clearInterval(keepAlive);
       sseClients.delete(res);
     });
+  });
+
+  // Live Free-Tier Quota Status & Reporting (alerts supervisor at <= 5% and every 0.5% drop)
+  app.get('/api/quota/status', (req: Request, res: Response) => {
+    const projectId =
+      typeof req.query.projectId === 'string' && req.query.projectId.trim()
+        ? req.query.projectId.trim()
+        : (platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId);
+    const rec = getOrCreateProjectQuotaRecord(projectId);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({ ok: true, quotaStatus: buildQuotaStatusFromRecord(rec) });
+  });
+
+  app.post('/api/quota/report', (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const projectId =
+      typeof body.projectId === 'string' && /^[a-z0-9-]{4,64}$/.test(body.projectId.trim())
+        ? body.projectId.trim()
+        : platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId;
+
+    const addReads = Math.min(5000, Math.max(0, Math.round(Number(body.reads) || 0)));
+    const addWrites = Math.min(5000, Math.max(0, Math.round(Number(body.writes) || 0)));
+    const addDeletes = Math.min(5000, Math.max(0, Math.round(Number(body.deletes) || 0)));
+    const exhausted = Boolean(body.exhausted);
+
+    const rec = getOrCreateProjectQuotaRecord(projectId);
+    rec.readsUsed += addReads;
+    rec.writesUsed += addWrites;
+    rec.deletesUsed += addDeletes;
+    if (exhausted) {
+      rec.exhausted = true;
+    }
+    rec.updatedAt = Date.now();
+
+    const status = buildQuotaStatusFromRecord(rec);
+    const step = status.alertStep;
+    const crossedNewStep =
+      step !== null && (rec.lastAlertStep === null || step < rec.lastAlertStep);
+
+    if (crossedNewStep && step !== null) {
+      rec.lastAlertStep = step;
+      rec.alertCount += 1;
+      saveQuotaStateFile();
+      const updatedStatus = buildQuotaStatusFromRecord(rec);
+      if (projectId === (platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId)) {
+        broadcastQuotaAlert(updatedStatus);
+      }
+      res.json({ ok: true, triggeredAlert: true, quotaStatus: updatedStatus });
+      return;
+    }
+
+    if (addReads > 0 || addWrites > 0 || addDeletes > 0 || exhausted) {
+      saveQuotaStateFile();
+    }
+    res.json({ ok: true, triggeredAlert: false, quotaStatus: status });
+  });
+
+  app.post('/api/programmer/quota/calibrate', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok) {
+      res.status(authRes.status).json({ error: authRes.error });
+      return;
+    }
+    if (!authRes.isProgrammer) {
+      res.status(403).json({ error: 'صلاحية مبرمج مطلوبة' });
+      return;
+    }
+
+    const projectId =
+      typeof body.projectId === 'string' && /^[a-z0-9-]{4,64}$/.test(body.projectId.trim())
+        ? body.projectId.trim()
+        : platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId;
+
+    const rec = getOrCreateProjectQuotaRecord(projectId);
+    if (typeof body.readsUsed === 'number' && Number.isFinite(body.readsUsed)) {
+      rec.readsUsed = Math.max(0, Math.round(body.readsUsed));
+    }
+    if (typeof body.writesUsed === 'number' && Number.isFinite(body.writesUsed)) {
+      rec.writesUsed = Math.max(0, Math.round(body.writesUsed));
+    }
+    if (typeof body.deletesUsed === 'number' && Number.isFinite(body.deletesUsed)) {
+      rec.deletesUsed = Math.max(0, Math.round(body.deletesUsed));
+    }
+    if (typeof body.exhausted === 'boolean') {
+      rec.exhausted = body.exhausted;
+    }
+    rec.updatedAt = Date.now();
+
+    const preStatus = buildQuotaStatusFromRecord(rec);
+    if (preStatus.alertStep !== null) {
+      rec.lastAlertStep = preStatus.alertStep;
+      rec.alertCount += 1;
+    } else {
+      rec.lastAlertStep = null;
+    }
+    saveQuotaStateFile();
+
+    const updatedStatus = buildQuotaStatusFromRecord(rec);
+    if (
+      updatedStatus.alertStep !== null &&
+      projectId === (platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId)
+    ) {
+      broadcastQuotaAlert(updatedStatus);
+    }
+
+    res.json({ ok: true, quotaStatus: updatedStatus });
   });
 
   // Programmer session check & registry retrieval

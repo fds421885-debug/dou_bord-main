@@ -20,7 +20,7 @@ import {
   where,
   writeBatch,
   type Firestore,
-} from 'firebase/firestore';
+} from './firestoreTracked';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {

@@ -1,4 +1,4 @@
-import { deleteDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, serverTimestamp, setDoc } from './firestoreTracked';
 import { db, handleFirestoreError, OperationType } from './firebase';
 import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion } from './types';
 import { sanitizeChart } from './quizChart';

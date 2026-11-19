@@ -8,7 +8,7 @@ import {
   serverTimestamp,
   setDoc,
   where,
-} from 'firebase/firestore';
+} from './firestoreTracked';
 import { db, getTimestampMillis, handleFirestoreError, OperationType } from './firebase';
 import { handleRoomListenerError } from './roomLifecycle';
 import {

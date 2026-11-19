@@ -7,7 +7,7 @@ import {
   updateDoc,
   where,
   writeBatch,
-} from 'firebase/firestore';
+} from './firestoreTracked';
 import { db } from './firebase';
 import { compressSlideImageToDataUrl, renderPdfToSlideImagesWithMeta } from './pdfUtils';
 import { BOARD_HEIGHT, BOARD_WIDTH, renderStrokesToCanvas } from './components/WhiteboardCanvas';

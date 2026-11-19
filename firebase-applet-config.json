@@ -1,12 +1,12 @@
 {
-  "projectId": "siiiiii-3720b",
-  "appId": "1:729491638917:web:798895cf6d472d07ba37ec",
-  "apiKey": "AIzaSyALiuUck_FQacRvyTHoIpT8szF2Kir-yl4",
-  "authDomain": "siiiiii-3720b.firebaseapp.com",
+  "projectId": "qdrat-1",
+  "appId": "1:170115946515:web:908aecc393357cd35607e6",
+  "apiKey": "AIzaSyALkUAZV37Yzlmx0I-T6zqtsT0iCpFmqhs",
+  "authDomain": "qdrat-1.firebaseapp.com",
   "firestoreDatabaseId": "",
-  "storageBucket": "siiiiii-3720b.firebasestorage.app",
-  "messagingSenderId": "729491638917",
-  "measurementId": "",
+  "storageBucket": "qdrat-1.firebasestorage.app",
+  "messagingSenderId": "170115946515",
+  "measurementId": "G-SZ97N6FVWZ",
   "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }

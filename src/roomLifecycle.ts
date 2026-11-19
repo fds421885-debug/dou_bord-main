@@ -10,7 +10,7 @@ import {
   where,
   writeBatch,
   type DocumentReference,
-} from 'firebase/firestore';
+} from './firestoreTracked';
 import { db, handleFirestoreError, OperationType } from './firebase';
 import type { Competition, Room } from './types';
 

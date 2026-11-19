@@ -63,6 +63,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../firebase';
+import { handleRoomListenerError } from '../roomLifecycle';
 import { renderPdfToSlideImages } from '../pdfUtils';
 import {
   MAX_ROOM_SLIDES,
@@ -375,7 +376,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         setQuestions(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, qPath);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, qPath);
       }
     );
     return () => unsub();
@@ -394,7 +395,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         setExplainSlides(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, sPath);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, sPath);
       }
     );
     return () => unsub();
@@ -450,7 +451,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, lPath);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, lPath);
       }
     );
     return () => unsub();
@@ -485,7 +486,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.GET, sbPath);
+        void handleRoomListenerError(room.id, err, OperationType.GET, sbPath);
       }
     );
     return () => unsub();
@@ -510,7 +511,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, elPath);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, elPath);
       }
     );
     return () => unsub();
@@ -617,7 +618,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         setBoards(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, bPath);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, bPath);
       }
     );
     return () => unsub();

@@ -9,8 +9,9 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { ArrowRight, CheckCircle2, X, ZoomIn } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Power, X, ZoomIn } from 'lucide-react';
 import { db, getTimestampMillis, handleFirestoreError, OperationType } from '../firebase';
+import { isPermissionOrMissingError } from '../roomLifecycle';
 import {
   loadSessionSnapshot,
   saveSavedTestsListSnapshot,
@@ -56,6 +57,8 @@ interface TestResultsViewProps {
   archivedTest?: SavedTest;
   archivedQuestions?: SavedQuestion[];
   onBack: () => void;
+  onCloseRoom?: () => void;
+  closingRoom?: boolean;
 }
 
 export const TestResultsView: React.FC<TestResultsViewProps> = ({
@@ -66,6 +69,8 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
   archivedTest,
   archivedQuestions,
   onBack,
+  onCloseRoom,
+  closingRoom = false,
 }) => {
   const [loading, setLoading] = useState<boolean>(Boolean(liveRoom));
   const [questionsData, setQuestionsData] = useState<SavedQuestion[]>(archivedQuestions ?? []);
@@ -462,7 +467,9 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
           setSavedNotice(true);
         }
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${profile.uid}/savedTests`);
+        if (!cancelled && !isPermissionOrMissingError(err)) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${profile.uid}/savedTests`);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -520,14 +527,27 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={onBack}
-          className="duo-btn flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-[#1899D6] border-b-[5px] text-white text-base font-black cursor-pointer whitespace-nowrap"
-        >
-          <ArrowRight className="w-5 h-5" />
-          <span>العودة للرئيسية</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {isSupervisor && liveRoom && onCloseRoom && (
+            <button
+              type="button"
+              disabled={closingRoom}
+              onClick={onCloseRoom}
+              className="duo-btn flex items-center gap-2 px-5 py-3.5 rounded-2xl bg-[#FFDFE0] hover:bg-[#FF4B4B] hover:text-white border-2 border-[#FF4B4B] border-b-[5px] text-[#EA2B2B] text-sm sm:text-base font-black cursor-pointer whitespace-nowrap disabled:opacity-60 transition-colors"
+            >
+              <Power className="w-5 h-5" />
+              <span>{closingRoom ? 'جاري الإغلاق...' : 'إغلاق الغرفة للجميع'}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onBack}
+            className="duo-btn flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-[#1899D6] border-b-[5px] text-white text-base font-black cursor-pointer whitespace-nowrap"
+          >
+            <ArrowRight className="w-5 h-5" />
+            <span>العودة للرئيسية</span>
+          </button>
+        </div>
       </div>
 
       {loading ? (

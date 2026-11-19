@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
-import { Copy, Check, Users, Play, Clock } from 'lucide-react';
+import { Copy, Check, Users, Play, Clock, Power } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { Participant, Room, UserProfile } from '../types';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
@@ -13,6 +13,8 @@ interface WaitingRoomProps {
   participants: Participant[];
   isSupervisor: boolean;
   onLeaveRoom: () => void;
+  onCloseRoom?: () => Promise<void>;
+  closingRoom?: boolean;
 }
 
 export const WaitingRoom: React.FC<WaitingRoomProps> = ({
@@ -21,9 +23,12 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
   participants,
   isSupervisor,
   onLeaveRoom,
+  onCloseRoom,
+  closingRoom = false,
 }) => {
   const [copied, setCopied] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
   const handleCopyCode = async () => {
     try {
@@ -174,18 +179,32 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
 
         {/* Action Footer */}
         <div className="pt-4 border-t-2 border-[#F0F0F0] flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-          <button
-            type="button"
-            onClick={onLeaveRoom}
-            className="duo-btn w-full sm:w-auto px-5 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-extrabold text-[#777777] hover:text-[#3C3C3C] cursor-pointer whitespace-nowrap"
-          >
-            الخروج من الغرفة
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={onLeaveRoom}
+              className="duo-btn flex-1 sm:flex-initial px-5 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-extrabold text-[#777777] hover:text-[#3C3C3C] cursor-pointer whitespace-nowrap"
+            >
+              {isSupervisor ? 'خروج مؤقت من الغرفة' : 'الخروج من الغرفة'}
+            </button>
+
+            {isSupervisor && onCloseRoom && (
+              <button
+                type="button"
+                disabled={closingRoom || starting}
+                onClick={() => setShowCloseConfirm(true)}
+                className="duo-btn flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-4 py-3 rounded-2xl bg-[#FFDFE0] hover:bg-[#FF4B4B] hover:text-white border-2 border-b-4 border-[#FF4B4B] text-sm font-black text-[#EA2B2B] cursor-pointer disabled:opacity-60 whitespace-nowrap transition-colors"
+              >
+                <Power className="w-4 h-4" />
+                <span>إغلاق الغرفة نهائياً</span>
+              </button>
+            )}
+          </div>
 
           {isSupervisor ? (
             <button
               type="button"
-              disabled={starting}
+              disabled={starting || closingRoom}
               onClick={handleStartSession}
               className="duo-btn w-full sm:w-auto flex items-center justify-center gap-2.5 px-6 sm:px-8 py-4 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-[#46A302] border-b-[5px] text-white text-base sm:text-lg font-black cursor-pointer disabled:opacity-60 whitespace-nowrap"
             >
@@ -206,6 +225,41 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
           )}
         </div>
       </div>
+
+      {showCloseConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="duo-card max-w-md w-full p-6 flex flex-col gap-4 text-center">
+            <h3 className="text-xl font-black text-[#3C3C3C]">
+              إغلاق الغرفة نهائياً؟
+            </h3>
+            <p className="text-sm font-bold text-[#777777]">
+              سيتم إخراج جميع الطلاب المتواجدين في غرفة الانتظار فوراً وإغلاق الغرفة وحذفها من قاعدة البيانات.
+            </p>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={closingRoom}
+                onClick={() => setShowCloseConfirm(false)}
+                className="duo-btn flex-1 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-black text-[#3C3C3C] cursor-pointer"
+              >
+                تراجع
+              </button>
+              <button
+                type="button"
+                disabled={closingRoom}
+                onClick={async () => {
+                  if (!onCloseRoom) return;
+                  await onCloseRoom();
+                  setShowCloseConfirm(false);
+                }}
+                className="duo-btn flex-1 py-3 rounded-2xl bg-[#FF4B4B] border-2 border-b-4 border-[#EA2B2B] text-sm font-black text-white cursor-pointer disabled:opacity-60"
+              >
+                {closingRoom ? 'جاري الإغلاق...' : 'تأكيد الإغلاق'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {starting && (
         <DuoLoading

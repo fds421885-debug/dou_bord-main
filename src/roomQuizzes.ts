@@ -10,6 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { db, getTimestampMillis, handleFirestoreError, OperationType } from './firebase';
+import { handleRoomListenerError } from './roomLifecycle';
 import {
   loadSessionSnapshot,
   saveMyQuizzesSnapshot,
@@ -112,7 +113,7 @@ export function useRoomSharedQuizzes(roomId: string) {
       },
       (err) => {
         setLoading(false);
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(roomId, err, OperationType.LIST, path);
       }
     );
 

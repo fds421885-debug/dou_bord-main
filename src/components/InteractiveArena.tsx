@@ -40,6 +40,7 @@ import {
   X,
 } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
+import { handleRoomListenerError } from '../roomLifecycle';
 import type {
   InteractiveSlide,
   Participant,
@@ -134,7 +135,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         setSlides(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, path);
       }
     );
     return () => unsub();
@@ -216,7 +217,7 @@ export const InteractiveArena: React.FC<InteractiveArenaProps> = ({
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, path);
       }
     );
 

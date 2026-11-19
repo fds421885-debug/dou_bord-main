@@ -34,6 +34,7 @@ import {
   OperationType,
 } from '../firebase';
 import type { Room, SessionType, UserProfile } from '../types';
+import { closeRoomInDatabase } from '../roomLifecycle';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
 import { DuoLoading } from './DuoLoading';
 
@@ -65,6 +66,7 @@ export const RoleHub: React.FC<RoleHubProps> = ({
   const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
   const [confirmCloseRoomId, setConfirmCloseRoomId] = useState<string | null>(null);
   const [closingRoomId, setClosingRoomId] = useState<string | null>(null);
+  const [closedRoomNotice, setClosedRoomNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const rPath = 'rooms';
@@ -112,15 +114,17 @@ export const RoleHub: React.FC<RoleHubProps> = ({
   const handleCloseOpenRoom = async (roomId: string) => {
     if (closingRoomId) return;
     setClosingRoomId(roomId);
+    setErrorMsg(null);
+    setClosedRoomNotice(null);
     try {
-      await updateDoc(doc(db, 'rooms', roomId), {
-        status: 'finished',
-        updatedAt: serverTimestamp(),
-      });
+      await closeRoomInDatabase(roomId);
+      setOpenRooms((prev) => prev.filter((r) => r.id !== roomId));
       setConfirmCloseRoomId(null);
+      setClosedRoomNotice(`تم إغلاق الغرفة (${roomId}) وإخراج جميع المشاركين وإغلاقها في قاعدة البيانات.`);
       playDuoSound('pop');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
+      setErrorMsg('تعذر إغلاق الغرفة بالكامل، يرجى المحاولة مرة أخرى.');
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${roomId}`);
     } finally {
       setClosingRoomId(null);
     }
@@ -235,7 +239,7 @@ export const RoleHub: React.FC<RoleHubProps> = ({
 
       const roomData = roomSnap.data();
       if (roomData.status === 'finished') {
-        setErrorMsg('انتهى الاختبار في هذه الغرفة بالفعل');
+        setErrorMsg('تم إغلاق هذه الغرفة وانتهى الاختبار فيها بالفعل');
         setBusyRole(null);
         return;
       }
@@ -348,6 +352,23 @@ export const RoleHub: React.FC<RoleHubProps> = ({
         <div className="flex items-center gap-3 p-4 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-extrabold">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <span>{errorMsg}</span>
+        </div>
+      )}
+
+      {closedRoomNotice && (
+        <div className="flex items-center justify-between gap-3 p-4 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-[#46A302] text-sm font-extrabold">
+          <div className="flex items-center gap-2">
+            <Check className="w-5 h-5 shrink-0" />
+            <span>{closedRoomNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setClosedRoomNotice(null)}
+            className="p-1 rounded-lg hover:bg-white/60 cursor-pointer"
+            title="إخفاء"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 

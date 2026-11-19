@@ -2,6 +2,7 @@ import React, { Component, useCallback, useEffect, useRef, useState } from 'reac
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   onSnapshot,
@@ -19,6 +20,7 @@ import {
   Home,
   ListChecks,
   LogOut,
+  Power,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -68,12 +70,14 @@ import {
   type PlatformMigrationPointer,
 } from './firebaseMigration';
 import {
+  deleteSessionSnapshot,
   loadSessionSnapshot,
   mergeActiveRoomSnapshot,
   saveSessionSnapshot,
   type StoredRoomSnapshot,
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
+import { closeRoomInDatabase, handleRoomListenerError } from './roomLifecycle';
 import type {
   Participant,
   PlatformProgrammerState,
@@ -210,6 +214,9 @@ export default function App() {
     useState<MigrationProgress | null>(null);
   const [needsInteractiveSync, setNeedsInteractiveSync] = useState<boolean>(false);
   const [syncSuccessNotice, setSyncSuccessNotice] = useState<string | null>(null);
+  const [roomClosedNotice, setRoomClosedNotice] = useState<string | null>(null);
+  const [closingRoomBusy, setClosingRoomBusy] = useState<boolean>(false);
+  const [showCloseRoomModal, setShowCloseRoomModal] = useState<boolean>(false);
   const [consolidatedNoticeProject, setConsolidatedNoticeProject] = useState<
     string | null
   >(() => (justConsolidatedFrom ? null : consumeConsolidatedProjectNotice()));
@@ -243,8 +250,12 @@ export default function App() {
 
   const activeRoomIdRef = useRef(activeRoomId);
   activeRoomIdRef.current = activeRoomId;
+  const roomRef = useRef(room);
+  roomRef.current = room;
   const firebaseUserRef = useRef(firebaseUser);
   firebaseUserRef.current = firebaseUser;
+  const wasParticipantInRoomRef = useRef(false);
+  const previousRoomStatusRef = useRef<Room['status'] | null>(null);
   const switchingInProgressRef = useRef(false);
   const backupCheckInProgressRef = useRef(false);
   const lastSeenRegistryTagRef = useRef<string>('');
@@ -707,7 +718,30 @@ export default function App() {
     }
   };
 
+  const exitRoomLocally = useCallback(
+    (nextTab: 'home' | 'saved' | 'quizzes' = 'home', closedMessage?: string) => {
+      setActiveRoomId(null);
+      setRoom(null);
+      setParticipants([]);
+      setShowCloseRoomModal(false);
+      setQuickMigrateOpen(false);
+      setTab(nextTab);
+      wasParticipantInRoomRef.current = false;
+      previousRoomStatusRef.current = null;
+      clearPendingRejoinRoom();
+      void deleteSessionSnapshot('active_room');
+      if (firebaseUserRef.current) {
+        persistActiveRoom(firebaseUserRef.current.uid, null);
+      }
+      if (closedMessage) {
+        setRoomClosedNotice(closedMessage);
+      }
+    },
+    []
+  );
+
   const handleEnterRoom = (roomId: string) => {
+    setRoomClosedNotice(null);
     setActiveRoomId(roomId);
     setPendingRoomNotice(null);
     clearPendingRejoinRoom();
@@ -717,10 +751,45 @@ export default function App() {
   };
 
   const handleLeaveRoom = (nextTab: 'home' | 'saved' | 'quizzes' = 'home') => {
-    setActiveRoomId(null);
-    setTab(nextTab);
-    if (firebaseUser) {
-      persistActiveRoom(firebaseUser.uid, null);
+    const currentRoom = roomRef.current;
+    const currentUser = firebaseUserRef.current;
+    if (
+      currentRoom &&
+      currentUser &&
+      currentRoom.supervisorId !== currentUser.uid &&
+      currentRoom.status === 'waiting'
+    ) {
+      void deleteDoc(doc(db, 'rooms', currentRoom.id, 'participants', currentUser.uid)).catch(
+        () => {}
+      );
+    }
+    exitRoomLocally(nextTab);
+  };
+
+  const handleCloseActiveRoom = async () => {
+    const targetRoomId = activeRoomIdRef.current || roomRef.current?.id;
+    const currentRoom = roomRef.current;
+    const currentUser = firebaseUserRef.current;
+    if (
+      !targetRoomId ||
+      !currentRoom ||
+      !currentUser ||
+      currentRoom.supervisorId !== currentUser.uid ||
+      closingRoomBusy
+    ) {
+      return;
+    }
+    setClosingRoomBusy(true);
+    try {
+      await closeRoomInDatabase(targetRoomId);
+      exitRoomLocally(
+        'home',
+        `تم إغلاق الغرفة (${targetRoomId}) نهائياً وإخراج جميع المشاركين وإغلاقها في قاعدة البيانات.`
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `rooms/${targetRoomId}`);
+    } finally {
+      setClosingRoomBusy(false);
     }
   };
 
@@ -823,7 +892,11 @@ export default function App() {
             const rSnap = await getDoc(doc(db, 'rooms', candidateRoom));
             if (rSnap.exists()) {
               const rData = rSnap.data() as Room;
-              if (rData.supervisorId === user.uid) {
+              if (rData.status === 'finished') {
+                persistActiveRoom(user.uid, null);
+                clearPendingRejoinRoom();
+                void deleteSessionSnapshot('active_room');
+              } else if (rData.supervisorId === user.uid) {
                 setActiveRoomId(candidateRoom);
                 persistActiveRoom(user.uid, candidateRoom);
                 clearPendingRejoinRoom();
@@ -834,7 +907,7 @@ export default function App() {
                   setActiveRoomId(candidateRoom);
                   persistActiveRoom(user.uid, candidateRoom);
                   clearPendingRejoinRoom();
-                } else if (pendingRoom && rData.status !== 'finished') {
+                } else if (pendingRoom) {
                   // Auto-join student onto the newly migrated room
                   await setDoc(pRef, {
                     uid: user.uid,
@@ -850,6 +923,7 @@ export default function App() {
                   clearPendingRejoinRoom();
                 } else {
                   persistActiveRoom(user.uid, null);
+                  void deleteSessionSnapshot('active_room');
                 }
               }
             } else if (pendingRoom) {
@@ -876,6 +950,7 @@ export default function App() {
               }
             } else {
               persistActiveRoom(user.uid, null);
+              void deleteSessionSnapshot('active_room');
             }
           } catch {
             if (!pendingRoom) {
@@ -950,23 +1025,47 @@ export default function App() {
     if (!activeRoomId || !firebaseUser) {
       setRoom(null);
       setParticipants([]);
+      wasParticipantInRoomRef.current = false;
+      previousRoomStatusRef.current = null;
       return;
     }
+
+    wasParticipantInRoomRef.current = false;
+    previousRoomStatusRef.current = null;
 
     const rPath = `rooms/${activeRoomId}`;
     const unsubRoom = onSnapshot(
       doc(db, 'rooms', activeRoomId),
       (snap) => {
         if (snap.exists()) {
-          setRoom(snap.data() as Room);
+          const nextRoom = snap.data() as Room;
+          const prevStatus = previousRoomStatusRef.current;
+          previousRoomStatusRef.current = nextRoom.status;
+
+          if (nextRoom.status === 'finished') {
+            persistActiveRoom(firebaseUser.uid, null);
+            clearPendingRejoinRoom();
+            void deleteSessionSnapshot('active_room');
+
+            // If room closed directly from waiting room (no activity), exit everyone immediately
+            const closedWithoutActivity =
+              prevStatus === 'waiting' ||
+              (nextRoom.questionCount === 0 &&
+                (nextRoom.slideCount ?? 0) === 0 &&
+                nextRoom.mode !== 'competition');
+            if (closedWithoutActivity) {
+              exitRoomLocally('home', 'تم إغلاق الغرفة من قِبل المشرف وإخراج الجميع.');
+              return;
+            }
+          }
+
+          setRoom(nextRoom);
         } else {
-          setRoom(null);
-          setActiveRoomId(null);
-          persistActiveRoom(firebaseUser.uid, null);
+          exitRoomLocally('home', 'تم إغلاق الغرفة نهائياً من قِبل المشرف وإخراج الجميع.');
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.GET, rPath);
+        void handleRoomListenerError(activeRoomId, err, OperationType.GET, rPath);
       }
     );
 
@@ -982,9 +1081,21 @@ export default function App() {
         snap.forEach((d) => list.push(d.data() as Participant));
         list.sort((a, b) => getTimestampMillis(a.joinedAt) - getTimestampMillis(b.joinedAt));
         setParticipants(list);
+
+        const currentRoom = roomRef.current;
+        const inList = list.some((p) => p.uid === firebaseUser.uid);
+        if (inList) {
+          wasParticipantInRoomRef.current = true;
+        } else if (
+          currentRoom &&
+          currentRoom.supervisorId !== firebaseUser.uid &&
+          (wasParticipantInRoomRef.current || !snap.metadata.fromCache)
+        ) {
+          exitRoomLocally('home', 'تم إغلاق الغرفة أو إخراجك منها من قِبل المشرف.');
+        }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, pPath);
+        void handleRoomListenerError(activeRoomId, err, OperationType.LIST, pPath);
       }
     );
 
@@ -992,11 +1103,11 @@ export default function App() {
       unsubRoom();
       unsubParts();
     };
-  }, [activeRoomId, firebaseUser]);
+  }, [activeRoomId, firebaseUser, exitRoomLocally]);
 
-  // Mirror current room & participants into IndexedDB snapshot (covers WaitingRoom as well)
+  // Mirror current room & participants into IndexedDB snapshot only while room is open
   useEffect(() => {
-    if (!room || !profile) return;
+    if (!room || !profile || room.status === 'finished') return;
     void mergeActiveRoomSnapshot(room.id, {
       room,
       participants,
@@ -1368,6 +1479,19 @@ export default function App() {
                       <span>نقل القاعدة</span>
                     </button>
                   )}
+                  {isSupervisor && room && (
+                    <button
+                      type="button"
+                      disabled={closingRoomBusy}
+                      onClick={() => setShowCloseRoomModal(true)}
+                      className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl bg-[#FFDFE0] hover:bg-[#FF4B4B] hover:text-white border-2 border-b-4 border-[#FF4B4B] text-[#EA2B2B] text-[11px] sm:text-xs font-black whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
+                      title="إغلاق الغرفة نهائياً وإخراج الجميع من قاعدة البيانات"
+                    >
+                      <Power className="w-3.5 h-3.5" />
+                      <span className="sm:hidden">إغلاق</span>
+                      <span className="hidden sm:inline">إغلاق الغرفة</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => handleLeaveRoom('home')}
@@ -1518,6 +1642,25 @@ export default function App() {
           </div>
         )}
 
+        {roomClosedNotice && !activeRoomId && (
+          <div className="bg-[#FFF4CC] border-b-2 border-[#FFC800] px-3 sm:px-6 py-2.5">
+            <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm font-black text-[#9A6B00]">
+              <div className="flex items-center gap-2">
+                <Power className="w-4 h-4 shrink-0" />
+                <span>{roomClosedNotice}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRoomClosedNotice(null)}
+                className="p-1 rounded-lg hover:bg-white/50 cursor-pointer"
+                title="إخفاء"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Main Content */}
         <main className="flex-1">
           {activeRoomId ? (
@@ -1537,6 +1680,8 @@ export default function App() {
                 participants={participants}
                 isSupervisor={isSupervisor}
                 onLeaveRoom={() => handleLeaveRoom('home')}
+                onCloseRoom={handleCloseActiveRoom}
+                closingRoom={closingRoomBusy}
               />
             ) : room.status === 'active' ? (
               room.sessionType === 'interactive' ? (
@@ -1561,6 +1706,8 @@ export default function App() {
                 liveParticipants={participants}
                 isSupervisor={isSupervisor}
                 onBack={() => handleLeaveRoom('saved')}
+                onCloseRoom={() => setShowCloseRoomModal(true)}
+                closingRoom={closingRoomBusy}
               />
             )
           ) : tab === 'programmer' && isProgrammer ? (
@@ -1647,6 +1794,39 @@ export default function App() {
           percent={autoSwitchNotice.percent}
           accent={autoSwitchNotice.backupProjectId ? 'purple' : 'blue'}
         />
+      )}
+      {showCloseRoomModal && isSupervisor && room && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="duo-card max-w-md w-full p-6 flex flex-col gap-4 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-[#FFDFE0] text-[#EA2B2B] flex items-center justify-center mx-auto">
+              <Power className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-black text-[#3C3C3C]">
+              إغلاق الغرفة نهائياً وإخراج الجميع؟
+            </h3>
+            <p className="text-sm font-bold text-[#777777] leading-relaxed">
+              سيتم إخراج جميع الطلاب والمشاركين من الغرفة <span className="font-latin text-[#3C3C3C]">({room.id})</span> فوراً، وإغلاق الغرفة وحذفها نهائياً من قاعدة البيانات.
+            </p>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={closingRoomBusy}
+                onClick={() => setShowCloseRoomModal(false)}
+                className="duo-btn flex-1 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-black text-[#3C3C3C] cursor-pointer"
+              >
+                تراجع
+              </button>
+              <button
+                type="button"
+                disabled={closingRoomBusy}
+                onClick={() => void handleCloseActiveRoom()}
+                className="duo-btn flex-1 py-3 rounded-2xl bg-[#FF4B4B] border-2 border-b-4 border-[#EA2B2B] text-sm font-black text-white cursor-pointer disabled:opacity-60"
+              >
+                {closingRoomBusy ? 'جاري الإغلاق...' : 'تأكيد إغلاق الغرفة'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {personalSyncProgress && (
         <DuoLoading

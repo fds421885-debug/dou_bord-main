@@ -39,6 +39,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../firebase';
+import { handleRoomListenerError } from '../roomLifecycle';
 import {
   availableCount,
   buildExam,
@@ -158,7 +159,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
       },
       (err) => {
         setCompsLoading(false);
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, path);
       }
     );
     return () => unsub();
@@ -190,7 +191,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         setCompQuestions(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, path);
       }
     );
     return () => unsub();
@@ -890,7 +891,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
         }
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, path);
+        void handleRoomListenerError(room.id, err, OperationType.LIST, path);
       }
     );
 

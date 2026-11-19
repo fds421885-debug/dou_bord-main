@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { getAuth, GoogleAuthProvider, signInWithPopup, type User } from 'firebase/auth';
 import {
   AlertCircle,
   ArrowRightLeft,
+  BellRing,
   Check,
   CheckCircle2,
   Code2,
@@ -10,6 +11,7 @@ import {
   Crown,
   Database,
   ExternalLink,
+  Gauge,
   Loader2,
   Plus,
   Radio,
@@ -54,6 +56,15 @@ import type {
   Room,
   UserProfile,
 } from '../types';
+import {
+  calibrateProjectQuotaUsage,
+  fetchServerQuotaStatus,
+  formatQuotaMetricArabic,
+  getCachedProjectQuotaStatus,
+  SPARK_DAILY_LIMITS,
+  subscribeQuotaStatus,
+  type ProjectQuotaStatus,
+} from '../quotaTracker';
 import { playDuoSound } from './DuoIcons';
 import { DuoLoading } from './DuoLoading';
 
@@ -108,6 +119,44 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [copiedRules, setCopiedRules] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const [showRulesPreview, setShowRulesPreview] = useState(false);
+  const [quotaStatus, setQuotaStatus] = useState<ProjectQuotaStatus>(() =>
+    getCachedProjectQuotaStatus(activeProjectId)
+  );
+  const [calibratingQuota, setCalibratingQuota] = useState(false);
+
+  useEffect(() => {
+    const unsub = subscribeQuotaStatus((status) => {
+      if (status.projectId === activeProjectId) {
+        setQuotaStatus(status);
+      }
+    });
+    void fetchServerQuotaStatus(activeProjectId);
+    return () => unsub();
+  }, []);
+
+  const handleCalibrateQuota = async (targetRemainingPct: number) => {
+    setCalibratingQuota(true);
+    try {
+      const clampedPct = Math.max(0, Math.min(100, targetRemainingPct));
+      const targetReadsUsed =
+        clampedPct >= 100
+          ? 0
+          : Math.round(SPARK_DAILY_LIMITS.reads * (1 - clampedPct / 100));
+      const next = await calibrateProjectQuotaUsage({
+        user: firebaseUser,
+        fullNameQuad,
+        projectId: activeProjectId,
+        readsUsed: targetReadsUsed,
+        writesUsed: clampedPct >= 100 ? 0 : quotaStatus.writesUsed,
+        deletesUsed: clampedPct >= 100 ? 0 : quotaStatus.deletesUsed,
+        exhausted: clampedPct <= 0,
+      });
+      setQuotaStatus(next);
+      playDuoSound(clampedPct <= 5 ? 'pop' : 'correct');
+    } finally {
+      setCalibratingQuota(false);
+    }
+  };
   const [confirmDeleteDbId, setConfirmDeleteDbId] = useState<string | null>(null);
 
   // Promote Programmer State
@@ -588,6 +637,109 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
             </span>
           </div>
         )}
+
+        {/* Live Spark Free Quota Monitor + <= 5% (-0.5% Step) Supervisor Alert Control */}
+        <div
+          className={`p-4 rounded-2xl border-2 flex flex-col gap-3 ${
+            quotaStatus.alertStep !== null
+              ? quotaStatus.alertStep <= 2.0
+                ? 'bg-[#FFDFE0]/70 border-[#FF4B4B]'
+                : 'bg-[#FFF4CC]/80 border-[#FFC800]'
+              : 'bg-white border-[#E5E5E5]'
+          }`}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              {quotaStatus.alertStep !== null ? (
+                <BellRing
+                  className={`w-5 h-5 shrink-0 ${
+                    quotaStatus.alertStep <= 2.0 ? 'text-[#EA2B2B]' : 'text-[#9A6B00]'
+                  }`}
+                />
+              ) : (
+                <Gauge className="w-5 h-5 text-[#1899D6] shrink-0" />
+              )}
+              <div>
+                <h3 className="text-xs sm:text-sm font-black text-[#3C3C3C]">
+                  مراقبة الحصة المجانية اليومية للقاعدة النشطة (<span className="font-latin">{activeProjectId}</span>)
+                </h3>
+                <p className="text-[11px] font-bold text-[#777777]">
+                  عند بقاء <span className="font-latin">5%</span> أو أقل يُرسل إشعار تلقائي للمشرف عند كل نقص مقداره{' '}
+                  <span className="font-latin">0.5%</span> ({quotaStatus.dateKey})
+                </p>
+              </div>
+            </div>
+            <span
+              className={`self-start sm:self-center px-3 py-1 rounded-xl text-xs font-black border ${
+                quotaStatus.alertStep !== null
+                  ? quotaStatus.alertStep <= 2.0
+                    ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
+                    : 'bg-[#FFC800] border-[#E0A800] text-[#3C3C3C]'
+                  : 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+              }`}
+            >
+              {quotaStatus.alertStep !== null
+                ? `تنبيه نشط: متبقي ${quotaStatus.minRemainingPct.toFixed(2)}% (عتبة ${quotaStatus.alertStep.toFixed(1)}%)`
+                : `آمن — متبقي ${quotaStatus.minRemainingPct.toFixed(1)}% اليوم`}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs font-black">
+            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
+              <span className="text-[#777777]">القراءة (Reads)</span>
+              <span className="font-latin text-[#3C3C3C]">
+                {quotaStatus.readsRemainingPct.toFixed(1)}% ({quotaStatus.readsUsed.toLocaleString('en-US')}/{quotaStatus.readsLimit.toLocaleString('en-US')})
+              </span>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
+              <span className="text-[#777777]">الكتابة (Writes)</span>
+              <span className="font-latin text-[#3C3C3C]">
+                {quotaStatus.writesRemainingPct.toFixed(1)}% ({quotaStatus.writesUsed.toLocaleString('en-US')}/{quotaStatus.writesLimit.toLocaleString('en-US')})
+              </span>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/90 border border-[#E5E5E5] flex items-center justify-between gap-2">
+              <span className="text-[#777777]">الحذف (Deletes)</span>
+              <span className="font-latin text-[#3C3C3C]">
+                {quotaStatus.deletesRemainingPct.toFixed(1)}% ({quotaStatus.deletesUsed.toLocaleString('en-US')}/{quotaStatus.deletesLimit.toLocaleString('en-US')})
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-black/10">
+            <span className="text-[11px] font-bold text-[#777777]">
+              أقرب مورد: {formatQuotaMetricArabic(quotaStatus.bottleneckMetric)} • عدد التنبيهات المرسلة اليوم:{' '}
+              <span className="font-latin text-[#3C3C3C]">{quotaStatus.alertCount}</span>
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={calibratingQuota}
+                onClick={() =>
+                  void handleCalibrateQuota(
+                    quotaStatus.alertStep === null
+                      ? 5.0
+                      : Math.max(0, Number((quotaStatus.minRemainingPct - 0.5).toFixed(2)))
+                  )
+                }
+                className="duo-btn px-3 py-1.5 rounded-xl bg-[#FFF4CC] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] text-[11px] font-black cursor-pointer disabled:opacity-60"
+              >
+                {quotaStatus.alertStep === null
+                  ? 'محاكاة 5.0% متبقية (اختبار إشعار المشرف)'
+                  : 'محاكاة نقص 0.5% إضافية'}
+              </button>
+              {quotaStatus.minRemainingPct < 99.9 && (
+                <button
+                  type="button"
+                  disabled={calibratingQuota}
+                  onClick={() => void handleCalibrateQuota(100)}
+                  className="duo-btn px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-[11px] font-black cursor-pointer disabled:opacity-60"
+                >
+                  تصفير عداد اليوم (100%)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Sub-tabs */}

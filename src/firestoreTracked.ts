@@ -152,19 +152,23 @@ export function writeBatch(firestore: Firestore): WriteBatch {
   let queuedWrites = 0;
   let queuedDeletes = 0;
 
-  const tracked: WriteBatch = {
-    set(docRef: DocumentReference<unknown, DocumentData>, data: unknown, options?: SetOptions) {
+  const tracked = {
+    set(
+      docRef: DocumentReference<unknown, DocumentData>,
+      data: unknown,
+      options?: SetOptions
+    ) {
       queuedWrites++;
       if (options) {
-        inner.set(docRef, data, options);
+        (inner.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(docRef, data, options);
       } else {
-        inner.set(docRef, data);
+        (inner.set as (r: unknown, d: unknown) => unknown)(docRef, data);
       }
       return tracked;
     },
-    update(docRef: DocumentReference<unknown, DocumentData>, data: Record<string, unknown>) {
+    update(docRef: DocumentReference<unknown, DocumentData>, ...args: unknown[]) {
       queuedWrites++;
-      inner.update(docRef, data);
+      (inner.update as (r: unknown, ...rest: unknown[]) => unknown)(docRef, ...args);
       return tracked;
     },
     delete(docRef: DocumentReference<unknown, DocumentData>) {
@@ -184,7 +188,7 @@ export function writeBatch(firestore: Firestore): WriteBatch {
         throw err;
       }
     },
-  } as WriteBatch;
+  } as unknown as WriteBatch;
 
   return tracked;
 }
@@ -199,28 +203,33 @@ export async function runTransaction<T>(
       let reads = 0;
       let writes = 0;
       let deletes = 0;
-      const proxiedTx: Transaction = {
-        get: async (ref) => {
+      const proxiedTx = {
+        get: async <AppModelType = DocumentData, DbModelType extends DocumentData = DocumentData>(
+          ref: DocumentReference<AppModelType, DbModelType>
+        ) => {
           reads++;
           return tx.get(ref);
         },
-        set: (ref, data, options) => {
+        set: (ref: unknown, data: unknown, options?: SetOptions) => {
           writes++;
-          if (options) tx.set(ref, data, options);
-          else tx.set(ref, data);
+          if (options) {
+            (tx.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(ref, data, options);
+          } else {
+            (tx.set as (r: unknown, d: unknown) => unknown)(ref, data);
+          }
           return proxiedTx;
         },
-        update: (ref, data) => {
+        update: (ref: unknown, ...args: unknown[]) => {
           writes++;
-          tx.update(ref, data as Record<string, unknown>);
+          (tx.update as (r: unknown, ...rest: unknown[]) => unknown)(ref, ...args);
           return proxiedTx;
         },
-        delete: (ref) => {
+        delete: (ref: DocumentReference<unknown, DocumentData>) => {
           deletes++;
           tx.delete(ref);
           return proxiedTx;
         },
-      } as Transaction;
+      } as unknown as Transaction;
 
       const out = await updateFunction(proxiedTx);
       recordFirestoreOperations(pid, { reads, writes, deletes });
@@ -242,16 +251,20 @@ export function onSnapshot<AppModelType = DocumentData, DbModelType extends Docu
   onNext: (snapshot: QuerySnapshot<AppModelType, DbModelType>) => void,
   onError?: (error: FirestoreError) => void
 ): Unsubscribe;
-export function onSnapshot(
-  target: DocumentReference<DocumentData, DocumentData> | Query<DocumentData, DocumentData>,
-  onNext: (snap: DocumentSnapshot<DocumentData, DocumentData> | QuerySnapshot<DocumentData, DocumentData>) => void,
+export function onSnapshot<AppModelType = DocumentData, DbModelType extends DocumentData = DocumentData>(
+  target: DocumentReference<AppModelType, DbModelType> | Query<AppModelType, DbModelType>,
+  onNext:
+    | ((snapshot: DocumentSnapshot<AppModelType, DbModelType>) => void)
+    | ((snapshot: QuerySnapshot<AppModelType, DbModelType>) => void),
   onError?: (error: FirestoreError) => void
 ): Unsubscribe {
   const pid = resolveProjectId(target);
   let isInitialSnapshot = true;
 
+  const emitSnap = onNext as (snap: unknown) => void;
+
   const wrappedNext = (
-    snap: DocumentSnapshot<DocumentData, DocumentData> | QuerySnapshot<DocumentData, DocumentData>
+    snap: DocumentSnapshot<AppModelType, DbModelType> | QuerySnapshot<AppModelType, DbModelType>
   ) => {
     if (snap && 'docs' in snap && typeof snap.docChanges === 'function') {
       const changesCount = snap.docChanges().length;
@@ -265,7 +278,7 @@ export function onSnapshot(
       recordFirestoreOperations(pid, { reads: 1 });
       isInitialSnapshot = false;
     }
-    onNext(snap);
+    emitSnap(snap);
   };
 
   const wrappedError = (err: FirestoreError) => {
@@ -275,14 +288,14 @@ export function onSnapshot(
 
   if (target.type === 'document') {
     return rawOnSnapshot(
-      target as DocumentReference<DocumentData, DocumentData>,
-      wrappedNext as (snap: DocumentSnapshot<DocumentData, DocumentData>) => void,
+      target as DocumentReference<AppModelType, DbModelType>,
+      wrappedNext as (snap: DocumentSnapshot<AppModelType, DbModelType>) => void,
       wrappedError
     );
   }
   return rawOnSnapshot(
-    target as Query<DocumentData, DocumentData>,
-    wrappedNext as (snap: QuerySnapshot<DocumentData, DocumentData>) => void,
+    target as Query<AppModelType, DbModelType>,
+    wrappedNext as (snap: QuerySnapshot<AppModelType, DbModelType>) => void,
     wrappedError
   );
 }

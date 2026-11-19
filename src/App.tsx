@@ -15,6 +15,7 @@ import {
   AlertCircle,
   Archive,
   ArrowRightLeft,
+  BellRing,
   Code2,
   Database,
   Home,
@@ -84,6 +85,15 @@ import type {
   Room,
   UserProfile,
 } from './types';
+import {
+  applyServerQuotaStatus,
+  fetchServerQuotaStatus,
+  formatQuotaMetricArabic,
+  getCachedProjectQuotaStatus,
+  reportFirestoreQuotaExhausted,
+  subscribeQuotaStatus,
+  type ProjectQuotaStatus,
+} from './quotaTracker';
 import { AuthGate } from './components/AuthGate';
 import { RoleHub } from './components/RoleHub';
 import { WaitingRoom } from './components/WaitingRoom';
@@ -94,7 +104,7 @@ import { SavedTestsView } from './components/SavedTestsView';
 import { MyQuizzesView } from './components/MyQuizzesView';
 import { ProgrammerDashboard } from './components/ProgrammerDashboard';
 import { QuickMigrateModal } from './components/QuickMigrateModal';
-import { DuoOwlEmblem } from './components/DuoIcons';
+import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
 
 interface ErrorBoundaryState {
@@ -191,6 +201,21 @@ export default function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [quotaAlert, setQuotaAlert] = useState<boolean>(false);
+  const [liveQuotaStatus, setLiveQuotaStatus] = useState<ProjectQuotaStatus>(() =>
+    getCachedProjectQuotaStatus(activeProjectId)
+  );
+  const [dismissedQuotaStep, setDismissedQuotaStep] = useState<number | null>(null);
+  const [quotaToastNotification, setQuotaToastNotification] = useState<{
+    step: number;
+    minRemainingPct: number;
+    metricLabel: string;
+    remainingCount: number;
+    alertCount: number;
+  } | null>(null);
+  const lastAlertedStepRef = useRef<{ key: string; step: number | null }>({
+    key: '',
+    step: null,
+  });
   const [quickMigrateOpen, setQuickMigrateOpen] = useState<boolean>(false);
   const [isProgrammer, setIsProgrammer] = useState<boolean>(false);
   const [isMasterProgrammer, setIsMasterProgrammer] = useState<boolean>(false);
@@ -415,11 +440,84 @@ export default function App() {
   }, [applyRemotePlatformPointer]);
 
   useEffect(() => {
-    return subscribeQuotaError(() => {
+    const unsubErr = subscribeQuotaError(() => {
       setQuotaAlert(true);
+      reportFirestoreQuotaExhausted(activeProjectId);
       void checkBackupAnnouncementSignal();
     });
+    const unsubQuota = subscribeQuotaStatus((status) => {
+      if (status.projectId === activeProjectId) {
+        setLiveQuotaStatus(status);
+      }
+    });
+    void fetchServerQuotaStatus(activeProjectId);
+    const quotaPoll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void fetchServerQuotaStatus(activeProjectId);
+      }
+    }, 15_000);
+    return () => {
+      unsubErr();
+      unsubQuota();
+      window.clearInterval(quotaPoll);
+    };
   }, [checkBackupAnnouncementSignal]);
+
+  // Fire supervisor/programmer notification at <= 5.0% remaining AND on every 0.5% decrement (4.5%, 4.0%, ... 0.0%)
+  const canReceiveQuotaAlerts = Boolean(
+    (room && profile && room.supervisorId === profile.uid) || isProgrammer
+  );
+
+  useEffect(() => {
+    if (!canReceiveQuotaAlerts) return;
+    if (liveQuotaStatus.projectId !== activeProjectId) return;
+    const step = liveQuotaStatus.alertStep;
+    if (step === null) return;
+
+    const bucketKey = `${liveQuotaStatus.projectId}_${liveQuotaStatus.dateKey}`;
+    if (lastAlertedStepRef.current.key !== bucketKey) {
+      lastAlertedStepRef.current = { key: bucketKey, step: null };
+    }
+
+    const prevStep = lastAlertedStepRef.current.step;
+    if (prevStep === null || step < prevStep) {
+      lastAlertedStepRef.current.step = step;
+      // Re-open banner on every new -0.5% drop even if user dismissed previous step
+      setDismissedQuotaStep((prevDismissed) =>
+        prevDismissed !== null && step >= prevDismissed ? prevDismissed : null
+      );
+      const metricLabel = formatQuotaMetricArabic(liveQuotaStatus.bottleneckMetric);
+      setQuotaToastNotification({
+        step,
+        minRemainingPct: liveQuotaStatus.minRemainingPct,
+        metricLabel,
+        remainingCount: liveQuotaStatus.bottleneckRemainingCount,
+        alertCount: Math.max(1, liveQuotaStatus.alertCount),
+      });
+      playDuoSound(step <= 2.0 ? 'wrong' : 'pop');
+
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          new Notification(`تنبيه سعة القاعدة (${step.toFixed(1)}% متبقية)`, {
+            body: `${metricLabel} — متبقي ${liveQuotaStatus.bottleneckRemainingCount.toLocaleString(
+              'en-US'
+            )} عملية اليوم في ${liveQuotaStatus.projectId}`,
+          });
+        } catch {
+          // Ignore browser notification restrictions
+        }
+      }
+    }
+  }, [
+    canReceiveQuotaAlerts,
+    liveQuotaStatus.projectId,
+    liveQuotaStatus.dateKey,
+    liveQuotaStatus.alertStep,
+    liveQuotaStatus.minRemainingPct,
+    liveQuotaStatus.bottleneckMetric,
+    liveQuotaStatus.bottleneckRemainingCount,
+    liveQuotaStatus.alertCount,
+  ]);
 
   const refreshProgrammerState = useCallback(
     async (userOverride?: User | null, nameOverride?: string | null) => {
@@ -584,7 +682,11 @@ export default function App() {
             backupDatabasesCount?: number;
             backupConfigs?: FirebaseAppConfig[];
             poolUpdatedAt?: number;
+            quotaStatus?: ProjectQuotaStatus;
           };
+          if (data?.quotaStatus) {
+            applyServerQuotaStatus(data.quotaStatus);
+          }
           handleServerPayload(data?.pointer, data);
           return;
         }
@@ -605,7 +707,12 @@ export default function App() {
             backupDatabasesCount?: number;
             backupConfigs?: FirebaseAppConfig[];
             poolUpdatedAt?: number;
+            quotaStatus?: ProjectQuotaStatus;
           };
+          if (msg?.quotaStatus) {
+            applyServerQuotaStatus(msg.quotaStatus);
+          }
+          if (msg?.type === 'quota_alert') return;
           handleServerPayload(msg?.pointer, msg, msg?.type);
         } catch {
           // Ignore malformed SSE payload
@@ -1533,18 +1640,67 @@ export default function App() {
           </div>
         </header>
 
-        {/* Quota Alert Banner */}
-        {quotaAlert && (
-          <div className="bg-[#FFF4CC] border-b-2 border-[#FFC800] px-3 sm:px-6 py-3">
+        {/* Live <= 5% Free Quota & -0.5% Step Supervisor Alert Banner */}
+        {(quotaAlert ||
+          (canReceiveQuotaAlerts &&
+            liveQuotaStatus.alertStep !== null &&
+            dismissedQuotaStep !== liveQuotaStatus.alertStep)) && (
+          <div
+            className={`border-b-2 px-3 sm:px-6 py-3 ${
+              quotaAlert || (liveQuotaStatus.alertStep !== null && liveQuotaStatus.alertStep <= 2.0)
+                ? 'bg-[#FFDFE0] border-[#FF4B4B]'
+                : 'bg-[#FFF4CC] border-[#FFC800]'
+            }`}
+          >
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 text-[#9A6B00] text-xs sm:text-sm font-black">
-                <AlertCircle className="w-5 h-5 shrink-0" />
-                <span>
-                  وصلت القاعدة الحالية للحد اليومي (Quota) — يمكن للمبرمج نقل المنصة الآن لقاعدة بيانات بديلة.
-                </span>
+              <div
+                className={`flex items-start gap-2.5 text-xs sm:text-sm font-black ${
+                  quotaAlert || (liveQuotaStatus.alertStep !== null && liveQuotaStatus.alertStep <= 2.0)
+                    ? 'text-[#EA2B2B]'
+                    : 'text-[#9A6B00]'
+                }`}
+              >
+                <BellRing className="w-5 h-5 shrink-0 mt-0.5 animate-bounce" />
+                <div className="flex flex-col gap-0.5">
+                  <span>
+                    {quotaAlert || liveQuotaStatus.exhausted || liveQuotaStatus.alertStep === 0
+                      ? 'تنبيه عاجل للمشرف: نفدت الحصة المجانية اليومية للقاعدة (0% متبقي)!'
+                      : `تنبيه حرج للمشرف (${liveQuotaStatus.alertStep?.toFixed(1)}% متبقية): لم يبقَ سوى ${liveQuotaStatus.minRemainingPct.toFixed(
+                          2
+                        )}% من الحصة المجانية في (${activeProjectId})!`}
+                  </span>
+                  {liveQuotaStatus.alertStep !== null && (
+                    <span className="text-[11px] sm:text-xs font-extrabold opacity-90">
+                      أقرب مورد للنفاد: {formatQuotaMetricArabic(liveQuotaStatus.bottleneckMetric)} — متبقي{' '}
+                      <span className="font-latin">
+                        {liveQuotaStatus.bottleneckRemainingCount.toLocaleString('en-US')}
+                      </span>{' '}
+                      عملية اليوم • إشعار #{Math.max(1, liveQuotaStatus.alertCount)} (يرسل تنبيهاً جديداً تلقائياً عند كل نقص بمقدار 0.5%)
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {isProgrammer && (
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {typeof Notification !== 'undefined' && Notification.permission === 'default' && (
+                  <button
+                    type="button"
+                    onClick={() => void Notification.requestPermission()}
+                    className="duo-btn px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black cursor-pointer"
+                  >
+                    تفعيل إشعارات المتصفح
+                  </button>
+                )}
+                {isProgrammer && room && (
+                  <button
+                    type="button"
+                    onClick={() => setQuickMigrateOpen(true)}
+                    className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-xs sm:text-sm font-black cursor-pointer"
+                  >
+                    <ArrowRightLeft className="w-4 h-4" />
+                    <span>نقل سريع لقاعدة أخرى</span>
+                  </button>
+                )}
+                {isProgrammer && !room && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1559,9 +1715,15 @@ export default function App() {
                 )}
                 <button
                   type="button"
-                  onClick={() => setQuotaAlert(false)}
-                  className="p-1.5 rounded-lg text-[#9A6B00] hover:bg-white/60 cursor-pointer"
-                  title="إخفاء التنبيه"
+                  onClick={() => {
+                    setQuotaAlert(false);
+                    setQuotaToastNotification(null);
+                    if (liveQuotaStatus.alertStep !== null) {
+                      setDismissedQuotaStep(liveQuotaStatus.alertStep);
+                    }
+                  }}
+                  className="p-1.5 rounded-lg text-[#3C3C3C] hover:bg-white/60 cursor-pointer"
+                  title="تم الاستلام (سيتكرر التنبيه عند النقص 0.5% القادم)"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1841,6 +2003,76 @@ export default function App() {
               >
                 {closingRoomBusy ? 'جاري الإغلاق...' : 'تأكيد إغلاق الغرفة'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {canReceiveQuotaAlerts && quotaToastNotification && (
+        <div
+          className="fixed bottom-4 left-4 z-50 max-w-sm w-[calc(100vw-2rem)]"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div
+            className={`duo-card p-4 border-2 shadow-xl flex flex-col gap-2.5 ${
+              quotaToastNotification.step <= 2.0
+                ? 'bg-[#FFDFE0] border-[#FF4B4B]'
+                : 'bg-[#FFF4CC] border-[#FFC800]'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div
+                className={`flex items-start gap-2 ${
+                  quotaToastNotification.step <= 2.0 ? 'text-[#EA2B2B]' : 'text-[#9A6B00]'
+                }`}
+              >
+                <BellRing className="w-5 h-5 shrink-0 mt-0.5 animate-bounce" />
+                <div>
+                  <p className="text-xs sm:text-sm font-black leading-snug">
+                    {quotaToastNotification.step <= 0
+                      ? 'تنبيه للمشرف: نفدت الحصة المجانية للقاعدة (0% متبقية)!'
+                      : `إشعار للمشرف #${quotaToastNotification.alertCount}: بقي ${quotaToastNotification.minRemainingPct.toFixed(
+                          2
+                        )}% فقط (عتبة ${quotaToastNotification.step.toFixed(1)}%)`}
+                  </p>
+                  <p className="text-[11px] font-extrabold opacity-90 mt-0.5">
+                    {quotaToastNotification.metricLabel} — متبقي{' '}
+                    <span className="font-latin">
+                      {quotaToastNotification.remainingCount.toLocaleString('en-US')}
+                    </span>{' '}
+                    عملية اليوم في <span className="font-latin">{activeProjectId}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuotaToastNotification(null)}
+                className="p-1 rounded-lg text-[#3C3C3C] hover:bg-white/60 cursor-pointer shrink-0"
+                title="إغلاق هذا الإشعار (سيصلك تنبيه جديد عند النقص 0.5% القادم)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-black/10">
+              <span className="text-[10px] font-extrabold text-[#3C3C3C]/80">
+                ينبّه تلقائياً كل نقص بمقدار 0.5%
+              </span>
+              {isProgrammer && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuotaToastNotification(null);
+                    if (room) {
+                      setQuickMigrateOpen(true);
+                    } else {
+                      setTab('programmer');
+                    }
+                  }}
+                  className="duo-btn px-3 py-1.5 rounded-xl bg-[#A560E8] border-2 border-b-4 border-[#8938D6] text-white text-[11px] font-black cursor-pointer"
+                >
+                  {room ? 'نقل القاعدة الآن' : 'فتح إدارة القواعد'}
+                </button>
+              )}
             </div>
           </div>
         </div>

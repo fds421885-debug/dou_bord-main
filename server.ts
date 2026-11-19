@@ -127,6 +127,10 @@ interface ServerProjectQuotaStatus extends ServerProjectQuotaRecord {
 const CURRENT_DB_EPOCH = 'clean_split_v3_2026_11_18';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
+const MASTER_PROGRAMMER_EMAILS = [
+  'mohammedmonta2022m@gmail.com',
+  'qdrat2626@gmail.com',
+];
 
 function normalizeArabicName(input: string | undefined | null): string {
   if (!input) return '';
@@ -409,12 +413,12 @@ function ensureMasterProgrammerPresent(members: ProgrammerMember[]): ProgrammerM
     (m) =>
       m.isMaster ||
       normalizeArabicName(m.fullNameQuad) === normalizeArabicName(MASTER_PROGRAMMER_NAME) ||
-      (m.email && m.email.toLowerCase() === MASTER_PROGRAMMER_EMAIL)
+      (m.email && MASTER_PROGRAMMER_EMAILS.includes(m.email.toLowerCase()))
   );
   if (hasMaster) {
     return members.map((m) =>
       normalizeArabicName(m.fullNameQuad) === normalizeArabicName(MASTER_PROGRAMMER_NAME) ||
-      (m.email && m.email.toLowerCase() === MASTER_PROGRAMMER_EMAIL)
+      (m.email && MASTER_PROGRAMMER_EMAILS.includes(m.email.toLowerCase()))
         ? { ...m, isMaster: true }
         : m
     );
@@ -639,7 +643,7 @@ function isIdentityProgrammer(
   const normName = normalizeArabicName(identity.fullNameQuad);
 
   const isMaster =
-    emailLower === MASTER_PROGRAMMER_EMAIL ||
+    MASTER_PROGRAMMER_EMAILS.includes(emailLower) ||
     (Boolean(normName) && normName === normalizeArabicName(MASTER_PROGRAMMER_NAME));
 
   if (isMaster) {
@@ -1036,8 +1040,24 @@ async function startServer(): Promise<void> {
         ? req.query.projectId.trim()
         : (platformState.activeTargetConfig?.projectId || defaultAppletConfig.projectId);
     const rec = getOrCreateProjectQuotaRecord(projectId);
+    const allIds = Array.from(
+      new Set([
+        projectId,
+        defaultAppletConfig.projectId,
+        platformState.activeTargetConfig?.projectId,
+        ...platformState.playerDatabases.map((d) => d.config.projectId),
+      ].filter((id): id is string => Boolean(id)))
+    );
+    const quotaByProject: Record<string, ServerProjectQuotaStatus> = {};
+    for (const pid of allIds) {
+      quotaByProject[pid] = buildQuotaStatusFromRecord(getOrCreateProjectQuotaRecord(pid));
+    }
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json({ ok: true, quotaStatus: buildQuotaStatusFromRecord(rec) });
+    res.json({
+      ok: true,
+      quotaStatus: buildQuotaStatusFromRecord(rec),
+      quotaByProject,
+    });
   });
 
   app.post('/api/quota/report', (req: Request, res: Response) => {
@@ -1265,6 +1285,14 @@ async function startServer(): Promise<void> {
     if (isSameConfig(config, platformState.activeTargetConfig)) {
       platformState.activePlayerDatabaseId = newEntry.id;
     }
+    if (
+      !isSameConfig(config, platformState.activeTargetConfig) &&
+      !platformState.previousConfigs.some((c) => isSameConfig(c, config))
+    ) {
+      platformState.previousConfigs = [...platformState.previousConfigs, config].slice(0, 12);
+    }
+    getOrCreateProjectQuotaRecord(config.projectId);
+    saveQuotaStateFile();
     platformState.revision += 1;
     platformState.updatedAt = now;
     platformState.updatedByEmail = authRes.email;
@@ -1272,6 +1300,69 @@ async function startServer(): Promise<void> {
     broadcastState();
 
     res.json({ ok: true, added: newEntry, state: platformState });
+  });
+
+  // Re-hydrate / merge saved local or cloud registry entries if server restarted
+  app.post('/api/programmer/sync-state', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok) {
+      res.status(authRes.status).json({ error: authRes.error });
+      return;
+    }
+    if (!authRes.isProgrammer) {
+      res.status(403).json({ error: 'صلاحية مبرمج مطلوبة' });
+      return;
+    }
+
+    const incomingState = body.state as Partial<PlatformState> | undefined;
+    if (!incomingState || typeof incomingState !== 'object') {
+      res.json({ ok: true, state: platformState });
+      return;
+    }
+
+    let changed = false;
+    const incomingPlayers = parseRegisteredEntries(incomingState.playerDatabases, 'player');
+    for (const p of incomingPlayers) {
+      if (
+        !platformState.playerDatabases.some((x) => isSameConfig(x.config, p.config)) &&
+        !platformState.backupDatabases.some((b) => isSameConfig(b.config, p.config))
+      ) {
+        platformState.playerDatabases.push(p);
+        getOrCreateProjectQuotaRecord(p.config.projectId);
+        changed = true;
+      }
+    }
+    if (changed) {
+      platformState.playerDatabases = renumberEntries(platformState.playerDatabases);
+    }
+
+    const incomingBackups = parseRegisteredEntries(incomingState.backupDatabases, 'backup');
+    for (const b of incomingBackups) {
+      if (
+        !platformState.backupDatabases.some((x) => isSameConfig(x.config, b.config)) &&
+        !platformState.playerDatabases.some((p) => isSameConfig(p.config, b.config)) &&
+        !isSameConfig(b.config, defaultAppletConfig) &&
+        !isSameConfig(b.config, platformState.activeTargetConfig)
+      ) {
+        platformState.backupDatabases.push(b);
+        changed = true;
+      }
+    }
+    if (changed) {
+      platformState.backupDatabases = renumberEntries(platformState.backupDatabases);
+      platformState.revision = Math.max(
+        platformState.revision + 1,
+        typeof incomingState.revision === 'number' ? incomingState.revision : platformState.revision + 1
+      );
+      platformState.updatedAt = Date.now();
+      platformState.updatedByEmail = authRes.email;
+      saveQuotaStateFile();
+      savePlatformState(platformState);
+      broadcastState();
+    }
+
+    res.json({ ok: true, merged: changed, state: platformState });
   });
 
   // Remove Player Database

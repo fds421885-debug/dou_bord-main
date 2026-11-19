@@ -49,9 +49,11 @@ import {
   resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
   saveBackupFirebaseConfigs,
+  savePreviousFirebaseConfigs,
   type FirebaseAppConfig,
   type ServerPlatformPointer,
 } from './firebase';
+import { fetchServerQuotaStatus, recordFirestoreOperations } from './quotaTracker';
 import {
   loadAllQuizDrafts,
   loadSessionSnapshot,
@@ -905,6 +907,13 @@ export async function verifyDatabaseBeforeAdd(params: {
       return { ok: false, config: cleanCfg, role, steps, failureMessage: probeOutcome.detail };
     }
 
+    // Track live REST operations toward Spark free-tier quota
+    recordFirestoreOperations(projectId, {
+      reads: role === 'player' ? 3 : 2,
+      writes: needsProfileCreate ? 2 : 1,
+      deletes: 1,
+    });
+
     setStep('rules', {
       status: 'passed',
       detail:
@@ -932,8 +941,14 @@ export async function verifyDatabaseBeforeAdd(params: {
     return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
   }
 
-  // Step 5: Ready to register
-  setStep('register', { status: 'running', detail: 'جاري تسجيل القاعدة واعتمادها...' });
+  // Step 5: Keep as 'running' until addPlayerDatabase / addBackupDatabase confirms actual persistence!
+  setStep('register', {
+    status: 'running',
+    detail:
+      role === 'player'
+        ? 'جاري الحفظ الفعلي في قواعد البيانات والربط مع البرنامج بالكامل...'
+        : 'جاري الحفظ الفعلي في قائمة القواعد الاحتياطية الصامتة...',
+  });
   const summary: DatabaseVerificationSummary = {
     firestoreReady: true,
     googleAuthReady: true,
@@ -941,13 +956,6 @@ export async function verifyDatabaseBeforeAdd(params: {
     verifiedAt: Date.now(),
     verifiedByEmail: verifiedUser.email || undefined,
   };
-  setStep('register', {
-    status: 'passed',
-    detail:
-      role === 'player'
-        ? 'تم اعتماد القاعدة وإضافتها لقواعد اللاعبين وتسجيل الدخول'
-        : 'تم اعتماد القاعدة الاحتياطية الصامتة بنجاح',
-  });
 
   return {
     ok: true,
@@ -3976,6 +3984,8 @@ export async function fetchProgrammerSession(
   state?: PlatformProgrammerState;
   mode?: 'server' | 'serverless';
 }> {
+  const localBeforeFetch = loadLocalRegistryState();
+
   try {
     let serverRes = await callProgrammerEndpoint<{
       isProgrammer: boolean;
@@ -3985,19 +3995,26 @@ export async function fetchProgrammerSession(
 
     const serverLooksFresh =
       !serverRes.state ||
-      (serverRes.state.revision <= 1 &&
+      (serverRes.state.revision <= 2 &&
         serverRes.state.playerDatabases.length === 0 &&
         serverRes.state.backupDatabases.length === 0);
 
-    // Only query Firestore registry doc synchronously if server state looks fresh/empty or user isn't listed yet;
-    // otherwise skip blocking on SDK WebChannel so session refresh completes in ~100ms!
     const cloudReg =
       serverLooksFresh || !serverRes.isProgrammer
-        ? await withTimeout(readCloudRegistryDoc(sourceDb), 1800).catch(() => null)
+        ? await withTimeout(readCloudRegistryDoc(sourceDb), 2200).catch(() => null)
         : null;
 
     if (cloudReg && serverRes.state) {
+      const cloudHasMissingDbs =
+        cloudReg.playerDatabases.some(
+          (cp) => !serverRes.state!.playerDatabases.some((sp) => isSameFirebaseTarget(sp.config, cp.config))
+        ) ||
+        cloudReg.backupDatabases.some(
+          (cb) => !serverRes.state!.backupDatabases.some((sb) => isSameFirebaseTarget(sb.config, cb.config))
+        );
+
       const cloudRicher =
+        cloudHasMissingDbs ||
         cloudReg.revision > serverRes.state.revision ||
         cloudReg.playerDatabases.length > serverRes.state.playerDatabases.length ||
         cloudReg.backupDatabases.length > serverRes.state.backupDatabases.length ||
@@ -4021,10 +4038,52 @@ export async function fetchProgrammerSession(
       }
     }
 
+    // Never drop already-saved local databases if server container restarted cleanly!
+    if (serverRes.isProgrammer && serverRes.state && localBeforeFetch) {
+      const missingPlayers = localBeforeFetch.playerDatabases.filter(
+        (lp) =>
+          !serverRes.state!.playerDatabases.some((sp) => isSameFirebaseTarget(sp.config, lp.config)) &&
+          !serverRes.state!.backupDatabases.some((sb) => isSameFirebaseTarget(sb.config, lp.config))
+      );
+      const missingBackups = localBeforeFetch.backupDatabases.filter(
+        (lb) =>
+          !serverRes.state!.backupDatabases.some((sb) => isSameFirebaseTarget(sb.config, lb.config)) &&
+          !serverRes.state!.playerDatabases.some((sp) => isSameFirebaseTarget(sp.config, lb.config))
+      );
+
+      if (
+        (missingPlayers.length > 0 || missingBackups.length > 0) &&
+        (serverLooksFresh || localBeforeFetch.revision >= serverRes.state.revision)
+      ) {
+        try {
+          const synced = await callProgrammerEndpoint<{
+            ok: boolean;
+            state?: PlatformProgrammerState;
+          }>('/api/programmer/sync-state', user, fullNameQuad, {
+            state: localBeforeFetch,
+          });
+          if (synced?.state) {
+            serverRes.state = synced.state;
+          }
+        } catch {
+          // Ignore sync failure
+        }
+      }
+    }
+
     if (serverRes.state) {
       const normalized = ensureRegistryDefaults(serverRes.state);
       serverRes.state = normalized;
       saveLocalRegistryState(normalized);
+      if (normalized.playerDatabases.length > 0) {
+        savePreviousFirebaseConfigs(
+          [
+            ...normalized.playerDatabases.map((d) => d.config),
+            ...getPreviousFirebaseConfigs(),
+          ],
+          activeFirebaseConfig
+        );
+      }
       if (serverRes.isMaster && (cloudReg === null || normalized.revision > cloudReg.revision)) {
         void writeFirestoreRegistryDoc(
           sourceDb,
@@ -4085,27 +4144,81 @@ export async function addPlayerDatabase(
     throw new Error('يجب إتمام الفحص الشامل (100%) أولاً قبل إضافة القاعدة.');
   }
 
+  const cleanCfg = sanitizeFirebaseConfig(config);
+  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
+
+  const linkAddedPlayerDatabaseEverywhere = async (
+    normalized: PlatformProgrammerState
+  ): Promise<void> => {
+    saveLocalRegistryState(normalized);
+    savePreviousFirebaseConfigs(
+      [
+        cleanCfg,
+        ...normalized.playerDatabases.map((d) => d.config),
+        ...getPreviousFirebaseConfigs(),
+      ],
+      activeFirebaseConfig
+    );
+    // Sync registry onto active DB + newly added DB in parallel (bounded, non-blocking error)
+    const writes: Promise<unknown>[] = [
+      withTimeout(
+        writeFirestoreRegistryDoc(
+          sourceDb,
+          normalized,
+          user.uid,
+          fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+        ),
+        2200
+      ).catch(() => false),
+      fetchServerQuotaStatus(cleanCfg.projectId).catch(() => null),
+    ];
+    try {
+      const targetApp = getOrInitFirebaseApp(cleanCfg);
+      const targetAuth = getAuth(targetApp);
+      if (targetAuth.currentUser) {
+        const targetDb = createFirestoreInstance(targetApp, cleanCfg);
+        writes.push(
+          withTimeout(
+            writeFirestoreRegistryDoc(
+              targetDb,
+              normalized,
+              targetAuth.currentUser.uid,
+              fullNameQuad || targetAuth.currentUser.displayName || MASTER_PROGRAMMER_NAME
+            ),
+            2200
+          ).catch(() => false)
+        );
+      }
+    } catch {
+      // Optional target registry mirror
+    }
+    await Promise.allSettled(writes);
+  };
+
   try {
     const res = await callProgrammerEndpoint<{
       ok: boolean;
       added: RegisteredDatabaseEntry;
       state: PlatformProgrammerState;
     }>('/api/programmer/player-dbs/add', user, fullNameQuad, {
-      config,
+      config: cleanCfg,
       label,
       verification,
     });
     const normalized = ensureRegistryDefaults(res.state);
-    saveLocalRegistryState(normalized);
-    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
-    return { ok: true, added: res.added, state: normalized };
+    const persisted = normalized.playerDatabases.find((d) =>
+      isSameFirebaseTarget(d.config, cleanCfg)
+    );
+    if (!persisted) {
+      throw new Error('لم يؤكد الخادم حفظ القاعدة في القائمة. أعد المحاولة.');
+    }
+    await linkAddedPlayerDatabaseEverywhere(normalized);
+    return { ok: true, added: res.added || persisted, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
   const state = await loadServerlessRegistryState();
-  const cleanCfg = sanitizeFirebaseConfig(config);
-  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
   if (state.playerDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
     throw new Error('قاعدة البيانات هذه مضافة بالفعل في قائمة قواعد البيانات.');
   }
@@ -4133,8 +4246,7 @@ export async function addPlayerDatabase(
     updatedByEmail: user.email || undefined,
     updatedAt: now,
   });
-  saveLocalRegistryState(next);
-  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  await linkAddedPlayerDatabaseEverywhere(next);
   return { ok: true, added, state: next };
 }
 
@@ -4152,7 +4264,10 @@ export async function removePlayerDatabase(
     );
     const normalized = ensureRegistryDefaults(res.state);
     saveLocalRegistryState(normalized);
-    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    await withTimeout(
+      writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad),
+      2200
+    ).catch(() => false);
     return { ok: true, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
@@ -4189,27 +4304,37 @@ export async function addBackupDatabase(
     throw new Error('يجب إتمام الفحص الشامل (100%) أولاً قبل إضافة القاعدة الاحتياطية.');
   }
 
+  const cleanCfg = sanitizeFirebaseConfig(config);
+  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
+
   try {
     const res = await callProgrammerEndpoint<{
       ok: boolean;
       added: RegisteredDatabaseEntry;
       state: PlatformProgrammerState;
     }>('/api/programmer/backup-dbs/add', user, fullNameQuad, {
-      config,
+      config: cleanCfg,
       label,
       verification,
     });
     const normalized = ensureRegistryDefaults(res.state);
+    const persisted = normalized.backupDatabases.find((d) =>
+      isSameFirebaseTarget(d.config, cleanCfg)
+    );
+    if (!persisted) {
+      throw new Error('لم يؤكد الخادم حفظ القاعدة الاحتياطية في القائمة.');
+    }
     saveLocalRegistryState(normalized);
-    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
-    return { ok: true, added: res.added, state: normalized };
+    await withTimeout(
+      writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad),
+      2200
+    ).catch(() => false);
+    return { ok: true, added: res.added || persisted, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
   const state = await loadServerlessRegistryState();
-  const cleanCfg = sanitizeFirebaseConfig(config);
-  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
   if (state.backupDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
     throw new Error('هذه القاعدة الاحتياطية مضافة بالفعل.');
   }

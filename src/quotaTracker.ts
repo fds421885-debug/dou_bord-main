@@ -387,7 +387,16 @@ export async function fetchServerQuotaStatus(
     window.clearTimeout(timer);
     const contentType = resp.headers.get('content-type') || '';
     if (!resp.ok || !contentType.includes('application/json')) return null;
-    const data = (await resp.json()) as { ok?: boolean; quotaStatus?: ProjectQuotaStatus };
+    const data = (await resp.json()) as {
+      ok?: boolean;
+      quotaStatus?: ProjectQuotaStatus;
+      quotaByProject?: Record<string, ProjectQuotaStatus>;
+    };
+    if (data?.quotaByProject) {
+      for (const st of Object.values(data.quotaByProject)) {
+        applyServerQuotaStatus(st);
+      }
+    }
     if (data?.quotaStatus) {
       applyServerQuotaStatus(data.quotaStatus);
       return data.quotaStatus;
@@ -396,6 +405,46 @@ export async function fetchServerQuotaStatus(
     // Fallback to local cache
   }
   return getCachedProjectQuotaStatus(projectId);
+}
+
+export async function fetchAllServerQuotaStatuses(
+  projectIds: string[] = []
+): Promise<Record<string, ProjectQuotaStatus>> {
+  const result: Record<string, ProjectQuotaStatus> = {};
+  for (const pid of projectIds) {
+    if (pid) result[pid] = getCachedProjectQuotaStatus(pid);
+  }
+  result[activeProjectId] = getCachedProjectQuotaStatus(activeProjectId);
+
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(
+      `/api/quota/status?projectId=${encodeURIComponent(activeProjectId)}&t=${Date.now()}`,
+      { cache: 'no-store', signal: controller.signal }
+    );
+    window.clearTimeout(timer);
+    const contentType = resp.headers.get('content-type') || '';
+    if (resp.ok && contentType.includes('application/json')) {
+      const data = (await resp.json()) as {
+        quotaStatus?: ProjectQuotaStatus;
+        quotaByProject?: Record<string, ProjectQuotaStatus>;
+      };
+      if (data?.quotaByProject) {
+        for (const [pid, st] of Object.entries(data.quotaByProject)) {
+          applyServerQuotaStatus(st);
+          result[pid] = st;
+        }
+      }
+      if (data?.quotaStatus) {
+        applyServerQuotaStatus(data.quotaStatus);
+        result[data.quotaStatus.projectId] = data.quotaStatus;
+      }
+    }
+  } catch {
+    // Fallback to local cache map
+  }
+  return result;
 }
 
 export async function calibrateProjectQuotaUsage(params: {
@@ -409,6 +458,7 @@ export async function calibrateProjectQuotaUsage(params: {
 }): Promise<ProjectQuotaStatus> {
   const projectId = params.projectId || activeProjectId;
   const dateKey = getFirebaseQuotaDateKey();
+  pendingOpsByProject.delete(projectId);
 
   try {
     const idToken = await params.user.getIdToken(false);

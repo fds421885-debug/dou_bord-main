@@ -387,7 +387,10 @@ service cloud.firestore {
     }
 
     function isMasterProgrammerAuth() {
-      return isVerified() && request.auth.token.email == 'mohammedmonta2022m@gmail.com';
+      return isVerified() && (
+        request.auth.token.email == 'mohammedmonta2022m@gmail.com'
+        || request.auth.token.email == 'qdrat2626@gmail.com'
+      );
     }
 
     function isValidPlatformPointer(data) {

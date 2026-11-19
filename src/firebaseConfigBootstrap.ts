@@ -51,6 +51,10 @@ export const defaultFirebaseConfig: FirebaseAppConfig =
 
 export const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 export const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
+export const MASTER_PROGRAMMER_EMAILS = [
+  'mohammedmonta2022m@gmail.com',
+  'qdrat2626@gmail.com',
+] as const;
 
 export function normalizeArabicName(input: string | undefined | null): string {
   if (!input) return '';
@@ -69,7 +73,12 @@ export function isMasterProgrammerIdentity(identity: {
   fullNameQuad?: string | null;
 }): boolean {
   const emailLower = (identity.email || '').trim().toLowerCase();
-  if (emailLower && emailLower === MASTER_PROGRAMMER_EMAIL) return true;
+  if (
+    emailLower &&
+    (MASTER_PROGRAMMER_EMAILS as readonly string[]).includes(emailLower)
+  ) {
+    return true;
+  }
   const norm = normalizeArabicName(identity.fullNameQuad);
   return Boolean(norm && norm === normalizeArabicName(MASTER_PROGRAMMER_NAME));
 }

@@ -486,7 +486,7 @@ export async function verifyDatabaseBeforeAdd(params: {
   try {
     const url = `${firestoreDocsBaseUrl}/platform/migration?key=${encodedApiKey}`;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 8000);
+    const timer = window.setTimeout(() => controller.abort(), 4500);
     const resp = await fetch(url, { cache: 'no-store', signal: controller.signal });
     window.clearTimeout(timer);
 
@@ -562,7 +562,7 @@ export async function verifyDatabaseBeforeAdd(params: {
   const targetApp = getOrInitFirebaseApp(cleanCfg);
   const targetAuth = getAuth(targetApp);
   if (typeof targetAuth.authStateReady === 'function') {
-    await withTimeout(targetAuth.authStateReady(), 5000).catch(() => undefined);
+    await withTimeout(targetAuth.authStateReady(), 1800).catch(() => undefined);
   }
   let verifiedUser: User | null = targetAuth.currentUser;
   let verifiedIdToken = '';
@@ -570,7 +570,7 @@ export async function verifyDatabaseBeforeAdd(params: {
   try {
     if (verifiedUser) {
       try {
-        verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
+        verifiedIdToken = await withTimeout(verifiedUser.getIdToken(false), 4500);
       } catch {
         verifiedUser = null;
       }
@@ -581,7 +581,7 @@ export async function verifyDatabaseBeforeAdd(params: {
       provider.setCustomParameters({ prompt: 'select_account' });
       const cred = await withTimeout(signInWithPopup(targetAuth, provider), 90000);
       verifiedUser = cred.user;
-      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
+      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(false), 4500);
     }
 
     if (!verifiedUser.emailVerified) {
@@ -649,7 +649,7 @@ export async function verifyDatabaseBeforeAdd(params: {
   const firestoreRestRequest = async (
     pathOrSuffix: string,
     init: RequestInit = {},
-    timeoutMs = 8000
+    timeoutMs = 4500
   ): Promise<Response> => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -680,32 +680,79 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
 
   const runLiveRulesProbes = async (currentUser: User): Promise<RulesProbeOutcome> => {
-    // 4A. Negative probe: unauthorized write to platform/rules_probe_check MUST be 403 PERMISSION_DENIED!
+    // Run 4A (negative security test), 4B (rooms + platform/migration read), 4C (profile write probe),
+    // and optional existing profile GET IN PARALLEL for instant (~250ms) live verification.
     // NOTE: Do NOT use __*__ IDs as Firestore rejects them as reserved (400 INVALID_ARGUMENT).
     setStep('rules', {
       status: 'running',
-      detail: '4أ. التحقق من رفض الكتابة العشوائية (منع Test Mode المفتوح)...',
+      detail: '4. جاري اختبار الحماية ومسارات القواعد وتسجيل الدخول بالتوازي...',
     });
 
-    const rogueResp = await firestoreRestRequest(':commit', {
-      method: 'POST',
-      body: JSON.stringify({
-        writes: [
-          {
-            update: {
-              name: `${firestoreDbDocPrefix}/platform/rules_probe_check`,
-              fields: {
-                probe: { booleanValue: true },
-                ts: { integerValue: String(Date.now()) },
+    const rawCandidate =
+      fallbackQuadName && isQuadNameValid(fallbackQuadName)
+        ? fallbackQuadName.trim()
+        : currentUser.displayName && isQuadNameValid(currentUser.displayName)
+        ? currentUser.displayName.trim()
+        : MASTER_PROGRAMMER_NAME;
+    const quadCandidate = (
+      rawCandidate.length >= 5 ? rawCandidate : MASTER_PROGRAMMER_NAME
+    ).slice(0, 120);
+    const emailCandidate = (currentUser.email || 'programmer@example.com').slice(0, 200);
+
+    const probeDocId = `verify_probe_${Date.now()}`;
+    const probePath = `/users/${encodeURIComponent(currentUser.uid)}/private/${probeDocId}`;
+    const profilePath = `/users/${encodeURIComponent(currentUser.uid)}/private/profile`;
+
+    const [rogueResp, roomReadResp, migrationReadResp, createProbeResp, existingProfileResp] =
+      await Promise.all([
+        firestoreRestRequest(':commit', {
+          method: 'POST',
+          body: JSON.stringify({
+            writes: [
+              {
+                update: {
+                  name: `${firestoreDbDocPrefix}/platform/rules_probe_check`,
+                  fields: {
+                    probe: { booleanValue: true },
+                    ts: { integerValue: String(Date.now()) },
+                  },
+                },
               },
-            },
-          },
-        ],
-      }),
-    });
+            ],
+          }),
+        }),
+        firestoreRestRequest('/rooms/verify_probe_room_check', { method: 'GET' }),
+        firestoreRestRequest('/platform/migration', { method: 'GET' }),
+        firestoreRestRequest(':commit', {
+          method: 'POST',
+          body: JSON.stringify({
+            writes: [
+              {
+                currentDocument: { exists: false },
+                update: {
+                  name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/${probeDocId}`,
+                  fields: {
+                    uid: { stringValue: currentUser.uid },
+                    fullNameQuad: { stringValue: quadCandidate },
+                    email: { stringValue: emailCandidate },
+                  },
+                },
+                updateTransforms: [
+                  { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+                ],
+              },
+            ],
+          }),
+        }),
+        role === 'player'
+          ? firestoreRestRequest(profilePath, { method: 'GET' })
+          : Promise.resolve(null),
+      ]);
 
+    // Check 4A negative probe
     if (rogueResp.ok) {
-      await firestoreRestRequest('/platform/rules_probe_check', { method: 'DELETE' }).catch(
+      void firestoreRestRequest('/platform/rules_probe_check', { method: 'DELETE' }).catch(
         () => undefined
       );
       return {
@@ -728,17 +775,7 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    // 4B. Positive read probes: rooms/verify_probe_room_check & platform/migration MUST NOT return 403!
-    setStep('rules', {
-      status: 'running',
-      detail: '4ب. التحقق من صلاحية قراءة الغرف ومسار الانتقال (rooms + platform/migration)...',
-    });
-
-    const [roomReadResp, migrationReadResp] = await Promise.all([
-      firestoreRestRequest('/rooms/verify_probe_room_check', { method: 'GET' }),
-      firestoreRestRequest('/platform/migration', { method: 'GET' }),
-    ]);
-
+    // Check 4B read probes
     if (roomReadResp.status === 403 || migrationReadResp.status === 403) {
       const deniedTargets = [
         roomReadResp.status === 403 ? 'rooms' : null,
@@ -771,48 +808,7 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    // 4C. Positive create/delete probe on users/{uid}/private/verify_probe_<ts>
-    setStep('rules', {
-      status: 'running',
-      detail: '4ج. التحقق من صلاحية كتابة وحذف الملف الشخصي للمستخدم بموجب firestore.rules...',
-    });
-
-    const rawCandidate =
-      fallbackQuadName && isQuadNameValid(fallbackQuadName)
-        ? fallbackQuadName.trim()
-        : currentUser.displayName && isQuadNameValid(currentUser.displayName)
-        ? currentUser.displayName.trim()
-        : MASTER_PROGRAMMER_NAME;
-    const quadCandidate = (
-      rawCandidate.length >= 5 ? rawCandidate : MASTER_PROGRAMMER_NAME
-    ).slice(0, 120);
-    const emailCandidate = (currentUser.email || 'programmer@example.com').slice(0, 200);
-
-    const probeDocId = `verify_probe_${Date.now()}`;
-    const probePath = `/users/${encodeURIComponent(currentUser.uid)}/private/${probeDocId}`;
-    const createProbeResp = await firestoreRestRequest(':commit', {
-      method: 'POST',
-      body: JSON.stringify({
-        writes: [
-          {
-            currentDocument: { exists: false },
-            update: {
-              name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/${probeDocId}`,
-              fields: {
-                uid: { stringValue: currentUser.uid },
-                fullNameQuad: { stringValue: quadCandidate },
-                email: { stringValue: emailCandidate },
-              },
-            },
-            updateTransforms: [
-              { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-            ],
-          },
-        ],
-      }),
-    });
-
+    // Check 4C create probe
     if (!createProbeResp.ok) {
       const { message: createErr } = await parseFirestoreRestError(createProbeResp);
       const isDenied = createProbeResp.status === 403;
@@ -827,56 +823,52 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    // Delete temporary verification doc immediately (both player & backup stay clean!)
-    const deleteProbeResp = await firestoreRestRequest(probePath, { method: 'DELETE' });
-    if (!deleteProbeResp.ok && deleteProbeResp.status !== 404) {
-      // Non-blocking cleanup warning, check permissions only if 403
-      if (deleteProbeResp.status === 403) {
-        return {
-          ok: false,
-          retryablePropagation: true,
-          detail: 'تم السماح بالإنشاء لكن رُفضت صلاحية الحذف في users/private — القواعد غير مطابقة بالكامل.',
-          fixHint: 'انسخ firestore.rules الكاملة وألصقها في Firebase Console ثم اضغط Publish.',
-        };
-      }
+    // Second parallel step: cleanup temporary probe doc AND register user profile if needed
+    const needsProfileCreate = role === 'player' && existingProfileResp?.status === 404;
+    const [deleteProbeResp, writeProfileResp] = await Promise.all([
+      firestoreRestRequest(probePath, { method: 'DELETE' }),
+      needsProfileCreate
+        ? firestoreRestRequest(':commit', {
+            method: 'POST',
+            body: JSON.stringify({
+              writes: [
+                {
+                  currentDocument: { exists: false },
+                  update: {
+                    name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/profile`,
+                    fields: {
+                      uid: { stringValue: currentUser.uid },
+                      fullNameQuad: { stringValue: quadCandidate },
+                      email: { stringValue: emailCandidate },
+                    },
+                  },
+                  updateTransforms: [
+                    { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                    { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+                  ],
+                },
+              ],
+            }),
+          })
+        : Promise.resolve(null),
+    ]);
+
+    if (!deleteProbeResp.ok && deleteProbeResp.status === 403) {
+      return {
+        ok: false,
+        retryablePropagation: true,
+        detail: 'تم السماح بالإنشاء لكن رُفضت صلاحية الحذف في users/private — القواعد غير مطابقة بالكامل.',
+        fixHint: 'انسخ firestore.rules الكاملة وألصقها في Firebase Console ثم اضغط Publish.',
+      };
     }
 
-    // If Player DB: ensure user's profile doc exists in users/{uid}/private/profile
-    if (role === 'player') {
-      const profilePath = `/users/${encodeURIComponent(currentUser.uid)}/private/profile`;
-      const existingProfileResp = await firestoreRestRequest(profilePath, { method: 'GET' });
-      if (existingProfileResp.status === 404) {
-        const writeProfileResp = await firestoreRestRequest(':commit', {
-          method: 'POST',
-          body: JSON.stringify({
-            writes: [
-              {
-                currentDocument: { exists: false },
-                update: {
-                  name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/profile`,
-                  fields: {
-                    uid: { stringValue: currentUser.uid },
-                    fullNameQuad: { stringValue: quadCandidate },
-                    email: { stringValue: emailCandidate },
-                  },
-                },
-                updateTransforms: [
-                  { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-                ],
-              },
-            ],
-          }),
-        });
-        if (!writeProfileResp.ok && writeProfileResp.status === 403) {
-          return {
-            ok: false,
-            retryablePropagation: true,
-            detail: 'تعذر تسجيل ملف الدخول الشخصي على قاعدة البيانات الجديدة بموجب القواعد الحالية.',
-            fixHint: 'انسخ firestore.rules الكاملة وأعد نشرها (Publish) ثم أعد الفحص.',
-          };
-        }
-      }
+    if (writeProfileResp && !writeProfileResp.ok && writeProfileResp.status === 403) {
+      return {
+        ok: false,
+        retryablePropagation: true,
+        detail: 'تعذر تسجيل ملف الدخول الشخصي على قاعدة البيانات الجديدة بموجب القواعد الحالية.',
+        fixHint: 'انسخ firestore.rules الكاملة وأعد نشرها (Publish) ثم أعد الفحص.',
+      };
     }
 
     return { ok: true };
@@ -890,15 +882,15 @@ export async function verifyDatabaseBeforeAdd(params: {
   try {
     let probeOutcome = await runLiveRulesProbes(verifiedUser);
 
-    // Firebase Console rule publishing can take 2-5 seconds to propagate to all edge nodes.
+    // Firebase Console rule publishing can take 1-3 seconds to propagate to all edge nodes.
     // Auto-retry once if the failure looks like unpropagated rules (Test Mode or Locked Mode 403).
     if (!probeOutcome.ok && probeOutcome.retryablePropagation) {
       setStep('rules', {
         status: 'running',
         detail: 'جاري انتظار تفعيل القواعد المنشورة حديثاً على خوادم Google وإعادة الفحص تلقائياً...',
       });
-      await new Promise((resolve) => window.setTimeout(resolve, 2500));
-      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 4500);
       probeOutcome = await runLiveRulesProbes(verifiedUser);
     }
 
@@ -1481,14 +1473,14 @@ async function signInOnTarget(
   const targetApp = getOrInitFirebaseApp(targetConfig);
   const targetAuth = getAuth(targetApp);
   if (typeof targetAuth.authStateReady === 'function') {
-    await withTimeout(targetAuth.authStateReady(), 5000).catch(() => undefined);
+    await withTimeout(targetAuth.authStateReady(), 1800).catch(() => undefined);
   }
   const targetDb = createFirestoreInstance(targetApp, targetConfig);
 
   let targetUser = targetAuth.currentUser;
   if (targetUser) {
     try {
-      await withTimeout(targetUser.getIdToken(true), 8000);
+      await withTimeout(targetUser.getIdToken(false), 4500);
     } catch {
       targetUser = null;
     }
@@ -1776,13 +1768,27 @@ interface SourceDatabaseCleanupHandle {
   collected: CollectedSourceData;
 }
 
-async function safeDeleteDoc(ref: ReturnType<typeof doc>): Promise<boolean> {
+async function safeDeleteDoc(ref: ReturnType<typeof doc>, timeoutMs = 1500): Promise<boolean> {
   try {
-    await withTimeout(deleteDoc(ref), 3500);
+    await withTimeout(deleteDoc(ref), timeoutMs);
     return true;
   } catch {
     return false;
   }
+}
+
+async function deleteDocRefsInBatches(refs: ReturnType<typeof doc>[]): Promise<number> {
+  if (refs.length === 0) return 0;
+  let deleted = 0;
+  const CHUNK = 10;
+  for (let i = 0; i < refs.length; i += CHUNK) {
+    const batch = refs.slice(i, i + CHUNK);
+    const results = await Promise.allSettled(batch.map((ref) => safeDeleteDoc(ref, 1500)));
+    for (const res of results) {
+      if (res.status === 'fulfilled' && res.value) deleted++;
+    }
+  }
+  return deleted;
 }
 
 async function cleanupMigratedPersonalDocsOnDb(params: {
@@ -1803,35 +1809,26 @@ async function cleanupMigratedPersonalDocsOnDb(params: {
     quizAttempts,
     deleteProfile = true,
   } = params;
-  let deleted = 0;
 
+  const refs: ReturnType<typeof doc>[] = [];
   for (const quiz of myQuizzes) {
-    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'myQuizzes', quiz.id))) deleted++;
+    refs.push(doc(srcDb, 'users', oldUid, 'myQuizzes', quiz.id));
   }
-
   for (const test of savedTests) {
     const qs = savedQuestionsByTestId[test.id] ?? [];
     for (const sq of qs) {
-      if (
-        await safeDeleteDoc(
-          doc(srcDb, 'users', oldUid, 'savedTests', test.id, 'questions', sq.id)
-        )
-      ) {
-        deleted++;
-      }
+      refs.push(doc(srcDb, 'users', oldUid, 'savedTests', test.id, 'questions', sq.id));
     }
-    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'savedTests', test.id))) deleted++;
+    refs.push(doc(srcDb, 'users', oldUid, 'savedTests', test.id));
   }
-
   for (const at of quizAttempts) {
-    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'quizAttempts', at.id))) deleted++;
+    refs.push(doc(srcDb, 'users', oldUid, 'quizAttempts', at.id));
   }
-
   if (deleteProfile) {
-    if (await safeDeleteDoc(doc(srcDb, 'users', oldUid, 'private', 'profile'))) deleted++;
+    refs.push(doc(srcDb, 'users', oldUid, 'private', 'profile'));
   }
 
-  return deleted;
+  return await deleteDocRefsInBatches(refs);
 }
 
 async function cleanupMigratedRoomsOnDb(params: {
@@ -1840,89 +1837,76 @@ async function cleanupMigratedRoomsOnDb(params: {
   rooms: CollectedRoomData[];
 }): Promise<number> {
   const { srcDb, oldUid, rooms } = params;
-  let deleted = 0;
+  const childRefs: ReturnType<typeof doc>[] = [];
+  const parentRoomRefs: ReturnType<typeof doc>[] = [];
 
   for (const bundle of rooms) {
     const roomId = bundle.room.id;
     if (bundle.myRole === 'supervisor' || bundle.room.supervisorId === oldUid) {
       for (const slide of bundle.slides) {
         for (const l of bundle.slideLayers.filter((x) => x.slideId === slide.id)) {
-          if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'slides', slide.id, 'layers', l.id))) {
-            deleted++;
-          }
+          childRefs.push(doc(srcDb, 'rooms', roomId, 'slides', slide.id, 'layers', l.id));
         }
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'slides', slide.id))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'slides', slide.id));
       }
 
       for (const q of bundle.questions) {
         for (const b of bundle.boardsByQuestionId[q.id] ?? []) {
-          if (
-            await safeDeleteDoc(
-              doc(srcDb, 'rooms', roomId, 'questions', q.id, 'boards', b.studentId)
-            )
-          ) {
-            deleted++;
-          }
+          childRefs.push(doc(srcDb, 'rooms', roomId, 'questions', q.id, 'boards', b.studentId));
         }
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'questions', q.id))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'questions', q.id));
       }
 
       for (const el of bundle.explainLayers) {
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'explainLayers', el.id))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'explainLayers', el.id));
       }
       if (bundle.sharedBoard) {
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'sharedBoard', 'live'))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'sharedBoard', 'live'));
       }
       for (const sq of bundle.sharedQuizzes) {
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'sharedQuizzes', sq.id))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'sharedQuizzes', sq.id));
       }
       for (const comp of bundle.competitions) {
         const compQs = bundle.competitionQuestionsByCompId[comp.id] ?? [];
         for (const cq of compQs) {
           for (const cb of bundle.competitionBoardsByKey[`${comp.id}::${cq.id}`] ?? []) {
-            if (
-              await safeDeleteDoc(
-                doc(
-                  srcDb,
-                  'rooms',
-                  roomId,
-                  'competitions',
-                  comp.id,
-                  'questions',
-                  cq.id,
-                  'boards',
-                  cb.studentId
-                )
+            childRefs.push(
+              doc(
+                srcDb,
+                'rooms',
+                roomId,
+                'competitions',
+                comp.id,
+                'questions',
+                cq.id,
+                'boards',
+                cb.studentId
               )
-            ) {
-              deleted++;
-            }
+            );
           }
-          if (
-            await safeDeleteDoc(
-              doc(srcDb, 'rooms', roomId, 'competitions', comp.id, 'questions', cq.id)
-            )
-          ) {
-            deleted++;
-          }
+          childRefs.push(
+            doc(srcDb, 'rooms', roomId, 'competitions', comp.id, 'questions', cq.id)
+          );
         }
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'competitions', comp.id))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'competitions', comp.id));
       }
       for (const p of bundle.participants) {
-        if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'participants', p.uid))) deleted++;
+        childRefs.push(doc(srcDb, 'rooms', roomId, 'participants', p.uid));
       }
-      if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId))) deleted++;
+      parentRoomRefs.push(doc(srcDb, 'rooms', roomId));
     } else {
-      await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'participants', oldUid));
+      childRefs.push(doc(srcDb, 'rooms', roomId, 'participants', oldUid));
     }
   }
 
-  return deleted;
+  const deletedChildren = await deleteDocRefsInBatches(childRefs);
+  const deletedParents = await deleteDocRefsInBatches(parentRoomRefs);
+  return deletedChildren + deletedParents;
 }
 
 /**
  * Announces a completed migration onto an untouched Backup DB (`platform/migration` doc ONLY)
- * so all waiting clients discover & switch to the new Player DB cleanly.
+ * via fast Firestore REST :commit so all waiting clients discover & switch to the new Player DB cleanly.
  */
 export async function announceViaBackupDatabase(params: {
   backupConfig: FirebaseAppConfig;
@@ -1936,14 +1920,14 @@ export async function announceViaBackupDatabase(params: {
     const bApp = getOrInitFirebaseApp(backupConfig);
     const bAuth = getAuth(bApp);
     if (typeof bAuth.authStateReady === 'function') {
-      await withTimeout(bAuth.authStateReady(), 5000).catch(() => undefined);
+      await withTimeout(bAuth.authStateReady(), 1800).catch(() => undefined);
     }
-    const bDb = createFirestoreInstance(bApp, backupConfig);
 
     let bUser = bAuth.currentUser;
+    let idToken = '';
     if (bUser) {
       try {
-        await withTimeout(bUser.getIdToken(true), 8000);
+        idToken = await withTimeout(bUser.getIdToken(false), 4500);
       } catch {
         bUser = null;
       }
@@ -1953,7 +1937,16 @@ export async function announceViaBackupDatabase(params: {
       provider.setCustomParameters({ prompt: 'select_account' });
       const cred = await withTimeout(signInWithPopup(bAuth, provider), 90000);
       bUser = cred.user;
+      idToken = await withTimeout(bUser.getIdToken(false), 4500);
     }
+
+    const dbSegment = backupConfig.firestoreDatabaseId?.trim() || '(default)';
+    const docPrefix = `projects/${backupConfig.projectId}/databases/${dbSegment}/documents`;
+    const commitUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      backupConfig.projectId
+    )}/databases/${encodeURIComponent(dbSegment)}/documents:commit?key=${encodeURIComponent(
+      backupConfig.apiKey
+    )}`;
 
     const priorChain = previousConfigs
       .filter(
@@ -1964,36 +1957,87 @@ export async function announceViaBackupDatabase(params: {
       )
       .slice(0, 8)
       .map((c) => ({
-        apiKey: c.apiKey,
-        authDomain: c.authDomain,
-        projectId: c.projectId,
-        appId: c.appId,
-        ...(c.storageBucket ? { storageBucket: c.storageBucket } : {}),
-        ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
-        ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
+        mapValue: {
+          fields: {
+            apiKey: { stringValue: c.apiKey },
+            authDomain: { stringValue: c.authDomain },
+            projectId: { stringValue: c.projectId },
+            appId: { stringValue: c.appId },
+            ...(c.storageBucket ? { storageBucket: { stringValue: c.storageBucket } } : {}),
+            ...(c.messagingSenderId
+              ? { messagingSenderId: { stringValue: c.messagingSenderId } }
+              : {}),
+            ...(c.firestoreDatabaseId
+              ? { firestoreDatabaseId: { stringValue: c.firestoreDatabaseId } }
+              : {}),
+          },
+        },
       }));
 
-    await setDoc(doc(bDb, 'platform', 'migration'), {
-      id: 'migration',
-      projectId: targetConfig.projectId,
-      apiKey: targetConfig.apiKey,
-      authDomain: targetConfig.authDomain,
-      appId: targetConfig.appId,
-      ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
+    const fields: Record<string, unknown> = {
+      id: { stringValue: 'migration' },
+      projectId: { stringValue: targetConfig.projectId },
+      apiKey: { stringValue: targetConfig.apiKey },
+      authDomain: { stringValue: targetConfig.authDomain },
+      appId: { stringValue: targetConfig.appId },
+      ...(targetConfig.storageBucket
+        ? { storageBucket: { stringValue: targetConfig.storageBucket } }
+        : {}),
       ...(targetConfig.messagingSenderId
-        ? { messagingSenderId: targetConfig.messagingSenderId }
+        ? { messagingSenderId: { stringValue: targetConfig.messagingSenderId } }
         : {}),
-      ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
+      ...(targetConfig.measurementId
+        ? { measurementId: { stringValue: targetConfig.measurementId } }
+        : {}),
       ...(targetConfig.firestoreDatabaseId
-        ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
+        ? { firestoreDatabaseId: { stringValue: targetConfig.firestoreDatabaseId } }
         : {}),
-      migratedBy: bUser.uid,
-      migratedByName: (updaterName || bUser.displayName || 'مشرف المنصة').slice(0, 120),
-      ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
-      migrationEpoch: CURRENT_DB_EPOCH,
-      previousConfigs: priorChain,
-      updatedAt: serverTimestamp(),
-    });
+      migratedBy: { stringValue: bUser.uid },
+      migratedByName: {
+        stringValue: (updaterName || bUser.displayName || 'مشرف المنصة').slice(0, 120),
+      },
+      ...(migratedRoomId ? { migratedRoomId: { stringValue: migratedRoomId.slice(0, 16) } } : {}),
+      migrationEpoch: { stringValue: CURRENT_DB_EPOCH },
+      previousConfigs: { arrayValue: { values: priorChain } },
+    };
+
+    const sendCommit = async (token: string) => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 4500);
+      try {
+        return await fetch(commitUrl, {
+          method: 'POST',
+          cache: 'no-store',
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            writes: [
+              {
+                update: {
+                  name: `${docPrefix}/platform/migration`,
+                  fields,
+                },
+                updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+              },
+            ],
+          }),
+        });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    };
+
+    let resp = await sendCommit(idToken);
+    if (resp.status === 401 || resp.status === 403) {
+      idToken = await withTimeout(bUser.getIdToken(true), 4500);
+      resp = await sendCommit(idToken);
+    }
+    if (!resp.ok) {
+      return { ok: false, popupBlocked: false };
+    }
 
     return { ok: true, popupBlocked: false };
   } catch (err) {
@@ -2100,13 +2144,9 @@ export async function runFirebaseMigration(params: {
         message: 'جاري دمج البيانات القديمة لضمان نقل وتحديث كل السجلات...',
         detail: extraCfg.projectId,
       });
-      const extraData = await collectSourceData(
-        extraDb,
-        extraUser.uid,
-        null,
-        null,
-        false,
-        () => undefined
+      const extraData = await withTimeout(
+        collectSourceData(extraDb, extraUser.uid, null, null, false, () => undefined),
+        4500
       );
       extraCollections.push(extraData);
       sourceHandles.push({
@@ -2117,7 +2157,7 @@ export async function runFirebaseMigration(params: {
         collected: extraData,
       });
     } catch {
-      // Non-fatal
+      // Non-fatal or timed-out historical DB
     }
   }
 
@@ -3006,7 +3046,10 @@ export async function runFirebaseMigration(params: {
 
     let platformPointerUpdated = false;
     try {
-      await setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid));
+      await withTimeout(
+        setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid)),
+        3000
+      );
       platformPointerUpdated = true;
     } catch {
       // Non-fatal
@@ -3017,7 +3060,7 @@ export async function runFirebaseMigration(params: {
       try {
         await withTimeout(
           setDoc(doc(handle.db, 'platform', 'migration'), buildPointerPayload(handle.uid)),
-          3500
+          2500
         );
         platformPointerUpdated = true;
       } catch {
@@ -3057,7 +3100,6 @@ export async function runFirebaseMigration(params: {
     // Notify backend server + SSE stream of 100% migration completion
     let serverPointerUpdated = false;
     try {
-      const idToken = await targetUser.getIdToken();
       const serverRes = await callProgrammerEndpoint<{
         ok: boolean;
         state?: PlatformProgrammerState;
@@ -3077,15 +3119,17 @@ export async function runFirebaseMigration(params: {
         saveLocalRegistryState(serverRes.state);
         saveBackupFirebaseConfigs(serverRes.state.backupDatabases.map((b) => b.config));
         if (isMasterProgrammerIdentity({ email: targetUser.email, fullNameQuad: resolvedQuadName })) {
-          await writeFirestoreRegistryDoc(
-            targetDb,
-            serverRes.state,
-            targetUid,
-            resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+          await withTimeout(
+            writeFirestoreRegistryDoc(
+              targetDb,
+              serverRes.state,
+              targetUid,
+              resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+            ),
+            2000
           ).catch(() => undefined);
         }
       }
-      void idToken;
     } catch {
       // Static host fallback: mirror local registry onto targetDb
       try {
@@ -3115,11 +3159,14 @@ export async function runFirebaseMigration(params: {
             updatedAt: Date.now(),
           };
           saveLocalRegistryState(updatedReg);
-          await writeFirestoreRegistryDoc(
-            targetDb,
-            updatedReg,
-            targetUid,
-            resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+          await withTimeout(
+            writeFirestoreRegistryDoc(
+              targetDb,
+              updatedReg,
+              targetUid,
+              resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+            ),
+            2000
           ).catch(() => undefined);
         }
       } catch {
@@ -3127,50 +3174,51 @@ export async function runFirebaseMigration(params: {
       }
     }
 
-    // 5. Optional cleanup & old auth signout (NEVER touches Backup DBs!)
+    // 5. Optional cleanup & old auth signout (bounded with strict timeout, NEVER touches Backup DBs!)
     let deletedOldDocsCount = 0;
     let oldAuthSignedOut = false;
 
-    if (cleanupOldDatabase) {
+    const cleanupHandles = sourceHandles.filter(
+      (h) => !isSameFirebaseTarget(h.config, targetConfig)
+    );
+
+    if (cleanupOldDatabase && cleanupHandles.length > 0) {
       onProgress({
         step: 'cleaning_old',
         percent: 98,
         message: 'جاري تنظيف السجلات المنقولة من القاعدة السابقة وفصل الجلسة القديمة...',
       });
 
-      for (const handle of sourceHandles) {
-        if (isSameFirebaseTarget(handle.config, targetConfig)) continue;
-        deletedOldDocsCount += await cleanupMigratedRoomsOnDb({
-          srcDb: handle.db,
-          oldUid: handle.uid,
-          rooms: handle.collected.rooms,
-        });
-        deletedOldDocsCount += await cleanupMigratedPersonalDocsOnDb({
-          srcDb: handle.db,
-          oldUid: handle.uid,
-          savedTests: handle.collected.savedTests,
-          savedQuestionsByTestId: handle.collected.savedQuestionsByTestId,
-          myQuizzes: handle.collected.myQuizzes,
-          quizAttempts: handle.collected.quizAttempts,
-          deleteProfile: true,
-        });
-        try {
-          await signOut(handle.auth);
+      await withTimeout(
+        Promise.allSettled(
+          cleanupHandles.map(async (handle) => {
+            deletedOldDocsCount += await cleanupMigratedRoomsOnDb({
+              srcDb: handle.db,
+              oldUid: handle.uid,
+              rooms: handle.collected.rooms,
+            });
+            deletedOldDocsCount += await cleanupMigratedPersonalDocsOnDb({
+              srcDb: handle.db,
+              oldUid: handle.uid,
+              savedTests: handle.collected.savedTests,
+              savedQuestionsByTestId: handle.collected.savedQuestionsByTestId,
+              myQuizzes: handle.collected.myQuizzes,
+              quizAttempts: handle.collected.quizAttempts,
+              deleteProfile: true,
+            });
+          })
+        ),
+        3500
+      ).catch(() => undefined);
+    }
+
+    if (cleanupHandles.length > 0) {
+      await Promise.allSettled(
+        cleanupHandles.map(async (handle) => {
+          await withTimeout(signOut(handle.auth), 1000);
           oldAuthSignedOut = true;
-        } catch {
-          // Ignore signOut errors
-        }
-      }
-    } else {
-      for (const handle of sourceHandles) {
-        if (isSameFirebaseTarget(handle.config, targetConfig)) continue;
-        try {
-          await signOut(handle.auth);
-          oldAuthSignedOut = true;
-        } catch {
-          // Ignore
-        }
-      }
+        })
+      ).catch(() => undefined);
     }
 
     activateCustomFirebaseConfig(targetConfig, migratedRoomId, priorChain as FirebaseAppConfig[]);
@@ -3756,7 +3804,7 @@ async function writeFirestoreRegistryDoc(
       };
     }
 
-    await setDoc(doc(targetDb, 'platform', 'registry'), payload);
+    await withTimeout(setDoc(doc(targetDb, 'platform', 'registry'), payload), 2500);
     return true;
   } catch {
     return false;
@@ -3767,7 +3815,7 @@ export async function readCloudRegistryDoc(
   targetDb: Firestore = sourceDb
 ): Promise<PlatformProgrammerState | null> {
   try {
-    const snap = await getDoc(doc(targetDb, 'platform', 'registry'));
+    const snap = await withTimeout(getDoc(doc(targetDb, 'platform', 'registry')), 2500);
     if (!snap.exists()) return null;
     const raw = snap.data() as Record<string, unknown>;
     const rawProgs = Array.isArray(raw.programmers)
@@ -3858,22 +3906,29 @@ async function callProgrammerEndpoint<T>(
   payload: Record<string, unknown> = {}
 ): Promise<T> {
   const sendWithToken = async (forceRefresh: boolean) => {
-    const idToken = await user.getIdToken(forceRefresh);
-    return fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-        'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
-      },
-      body: JSON.stringify({
-        tokenProjectId: activeFirebaseConfig.projectId,
-        tokenApiKey: activeFirebaseConfig.apiKey,
-        tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
-        ...payload,
-        fullNameQuad,
-      }),
-    });
+    const idToken = await withTimeout(user.getIdToken(forceRefresh), 4000);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      return await fetch(endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+          'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
+        },
+        body: JSON.stringify({
+          tokenProjectId: activeFirebaseConfig.projectId,
+          tokenApiKey: activeFirebaseConfig.apiKey,
+          tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
+          ...payload,
+          fullNameQuad,
+        }),
+      });
+    } finally {
+      window.clearTimeout(timer);
+    }
   };
 
   let resp: Response;
@@ -3928,7 +3983,19 @@ export async function fetchProgrammerSession(
       state?: PlatformProgrammerState;
     }>('/api/programmer/session', user, fullNameQuad);
 
-    const cloudReg = await readCloudRegistryDoc(sourceDb).catch(() => null);
+    const serverLooksFresh =
+      !serverRes.state ||
+      (serverRes.state.revision <= 1 &&
+        serverRes.state.playerDatabases.length === 0 &&
+        serverRes.state.backupDatabases.length === 0);
+
+    // Only query Firestore registry doc synchronously if server state looks fresh/empty or user isn't listed yet;
+    // otherwise skip blocking on SDK WebChannel so session refresh completes in ~100ms!
+    const cloudReg =
+      serverLooksFresh || !serverRes.isProgrammer
+        ? await withTimeout(readCloudRegistryDoc(sourceDb), 1800).catch(() => null)
+        : null;
+
     if (cloudReg && serverRes.state) {
       const cloudRicher =
         cloudReg.revision > serverRes.state.revision ||
@@ -3958,20 +4025,13 @@ export async function fetchProgrammerSession(
       const normalized = ensureRegistryDefaults(serverRes.state);
       serverRes.state = normalized;
       saveLocalRegistryState(normalized);
-      if (serverRes.isMaster) {
-        const serverNewer =
-          !cloudReg ||
-          normalized.revision > cloudReg.revision ||
-          normalized.playerDatabases.length !== cloudReg.playerDatabases.length ||
-          normalized.backupDatabases.length !== cloudReg.backupDatabases.length;
-        if (serverNewer) {
-          void writeFirestoreRegistryDoc(
-            sourceDb,
-            normalized,
-            user.uid,
-            fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
-          );
-        }
+      if (serverRes.isMaster && (cloudReg === null || normalized.revision > cloudReg.revision)) {
+        void writeFirestoreRegistryDoc(
+          sourceDb,
+          normalized,
+          user.uid,
+          fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+        );
       }
     } else if (!serverRes.isProgrammer && cloudReg) {
       const cloudRole = await isIdentityProgrammerServerless(cloudReg, {

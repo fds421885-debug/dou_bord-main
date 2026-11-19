@@ -92,6 +92,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [customDatabaseId, setCustomDatabaseId] = useState('');
   const [verifyingAndAdding, setVerifyingAndAdding] = useState(false);
   const [verifySteps, setVerifySteps] = useState<VerifyStepItem[] | null>(null);
+  const [addSuccessNotice, setAddSuccessNotice] = useState<string | null>(null);
 
   // Migration State
   const [selectedBackupByTarget, setSelectedBackupByTarget] = useState<Record<string, string>>({});
@@ -154,6 +155,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
     setErrorNotice(null);
     setStatusNotice(null);
     setSetupError(null);
+    setAddSuccessNotice(null);
 
     let parsedCfg: FirebaseAppConfig;
     try {
@@ -196,9 +198,9 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           verifyRes.summary
         );
         onPoolStateUpdated(res.state);
-        setStatusNotice(
-          `تم فحص القاعدة 100% وإضافتها إلى «قواعد البيانات» (#${res.added.order} — ${res.added.config.projectId}) وتسجيل الدخول عليها بنجاح!`
-        );
+        const okMsg = `تم فحص القاعدة 100% وإضافتها إلى «قواعد البيانات» (#${res.added.order} — ${res.added.config.projectId}) وتسجيل الدخول عليها بنجاح!`;
+        setStatusNotice(okMsg);
+        setAddSuccessNotice(okMsg);
       } else {
         const res = await addBackupDatabase(
           firebaseUser,
@@ -208,9 +210,9 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           verifyRes.summary
         );
         onPoolStateUpdated(res.state);
-        setStatusNotice(
-          `تم فحص القاعدة الاحتياطية 100% وإضافتها كقاعدة صامتة (#${res.added.order} — ${res.added.config.projectId}) بدون لمسها بتاتاً!`
-        );
+        const okMsg = `تم فحص القاعدة الاحتياطية 100% وإضافتها كقاعدة صامتة (#${res.added.order} — ${res.added.config.projectId}) بدون لمسها بتاتاً!`;
+        setStatusNotice(okMsg);
+        setAddSuccessNotice(okMsg);
       }
 
       playDuoSound('correct');
@@ -240,7 +242,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
       } else {
         window.location.replace(buildCleanPrimaryUrl());
       }
-    }, 950);
+    }, 350);
   };
 
   const handleMigrateToPlayerDb = async (
@@ -275,10 +277,10 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
         onProgress: (p) => setMigrationProgress(p),
       });
 
-      await onRefreshState();
       playDuoSound('correct');
 
       if (res.backupAuthPopupBlocked && backupEntry) {
+        void onRefreshState();
         setPendingPopupBackup({ result: res, backupEntry });
         setStatusNotice(
           `اكتمل نقل البيانات 100% إلى (${entry.config.projectId})! يرجى الضغط أدناه لتفعيل إعلان القاعدة الاحتياطية (${backupEntry.config.projectId}).`
@@ -292,7 +294,9 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           : `تم نقل ${res.migratedRoomsCount} غرف و${res.migratedMyQuizzesCount} اختباراتي و${res.migratedSavedTestsCount} محفوظات، واعتماد (${entry.config.projectId}) للجميع!`
       );
 
-      if (!allowSameTargetUpdate) {
+      if (allowSameTargetUpdate) {
+        void onRefreshState();
+      } else {
         reloadToMigratedTarget(res.migratedRoomId);
       }
     } catch (err) {
@@ -329,7 +333,6 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
         backupProjectId: backupEntry.config.projectId,
         fullNameQuad,
       });
-      await onRefreshState();
       if (announce.ok) {
         playDuoSound('correct');
         setPendingPopupBackup(null);
@@ -1048,6 +1051,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 onClick={() => {
                   setNewDbRole('player');
                   setVerifySteps(null);
+                  setAddSuccessNotice(null);
                   setErrorNotice(null);
                 }}
                 className={`p-3.5 rounded-2xl border-2 text-right flex items-start gap-3 cursor-pointer transition-colors ${
@@ -1077,6 +1081,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 onClick={() => {
                   setNewDbRole('backup');
                   setVerifySteps(null);
+                  setAddSuccessNotice(null);
                   setErrorNotice(null);
                 }}
                 className={`p-3.5 rounded-2xl border-2 text-right flex items-start gap-3 cursor-pointer transition-colors ${
@@ -1133,6 +1138,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 onChange={(e) => {
                   setConfigInput(e.target.value);
                   setVerifySteps(null);
+                  setAddSuccessNotice(null);
                 }}
                 disabled={verifyingAndAdding}
                 placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  authDomain: "project-x.firebaseapp.com",\n  projectId: "project-x",\n  appId: "..."\n};`}
@@ -1365,6 +1371,14 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Inline Completion Banner next to Add Form */}
+            {addSuccessNotice && (
+              <div className="p-3.5 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-[#46A302] text-xs sm:text-sm font-black flex items-center gap-2.5">
+                <CheckCircle2 className="w-5 h-5 shrink-0" />
+                <span>{addSuccessNotice}</span>
               </div>
             )}
 

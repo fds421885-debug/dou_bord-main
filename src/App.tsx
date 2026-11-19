@@ -810,28 +810,45 @@ export default function App() {
       // If arriving on a switched DB with previous DB configs in history, automatically import
       // personal profile + myQuizzes + savedTests + quizAttempts onto the current DB.
       if (user.emailVerified && getPreviousFirebaseConfigs().length > 0) {
-        try {
-          const syncRes = await syncPersonalAccountFromPreviousDbs({
-            targetUser: user,
-            interactiveAuthIfNeeded: false,
-            onProgress: (p) => setPersonalSyncProgress(p),
-          });
-          setNeedsInteractiveSync(syncRes.needsInteractiveSignIn);
-          if (syncRes.synced && syncRes.count > 0) {
-            setSyncSuccessNotice(
-              `تم استيراد ${syncRes.count} عنصر من بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة!`
-            );
+        const runSyncTask = async () => {
+          try {
+            const syncRes = await syncPersonalAccountFromPreviousDbs({
+              targetUser: user,
+              interactiveAuthIfNeeded: false,
+              onProgress: resolvedProfile ? undefined : (p) => setPersonalSyncProgress(p),
+            });
+            setNeedsInteractiveSync(syncRes.needsInteractiveSignIn);
+            if (syncRes.synced && syncRes.count > 0) {
+              setSyncSuccessNotice(
+                `تم استيراد ${syncRes.count} عنصر من بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة!`
+              );
+            }
+          } catch {
+            // Non-fatal
+          } finally {
+            setPersonalSyncProgress(null);
           }
-          if (!resolvedProfile) {
+        };
+
+        if (resolvedProfile) {
+          // Profile is already present on current DB -> enter immediately and sync history in background!
+          void runSyncTask();
+        } else {
+          // Missing profile -> bound sync at 4.5s so fullscreen login verification never stalls.
+          try {
+            await Promise.race([
+              runSyncTask(),
+              new Promise<void>((resolve) => window.setTimeout(resolve, 4500)),
+            ]);
             const refreshedSnap = await getDoc(profileRef);
             if (refreshedSnap.exists()) {
               resolvedProfile = refreshedSnap.data() as UserProfile;
             }
+          } catch {
+            // Non-fatal; fallback below
+          } finally {
+            setPersonalSyncProgress(null);
           }
-        } catch {
-          // Non-fatal; fallback below
-        } finally {
-          setPersonalSyncProgress(null);
         }
       }
 

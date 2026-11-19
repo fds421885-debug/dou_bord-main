@@ -147,7 +147,7 @@ export const QuickMigrateModal: React.FC<QuickMigrateModalProps> = ({
       if (!res.backupAuthPopupBlocked) {
         window.setTimeout(() => {
           reloadIntoMigratedRoom(res.migratedRoomId || currentRoom.id);
-        }, 1200);
+        }, 400);
       }
     } catch (err) {
       playDuoSound('wrong');

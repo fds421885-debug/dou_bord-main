@@ -680,7 +680,8 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
 
   const runLiveRulesProbes = async (currentUser: User): Promise<RulesProbeOutcome> => {
-    // 4A. Negative probe: unauthorized write to platform/__rules_probe__ MUST be 403 PERMISSION_DENIED!
+    // 4A. Negative probe: unauthorized write to platform/rules_probe_check MUST be 403 PERMISSION_DENIED!
+    // NOTE: Do NOT use __*__ IDs as Firestore rejects them as reserved (400 INVALID_ARGUMENT).
     setStep('rules', {
       status: 'running',
       detail: '4أ. التحقق من رفض الكتابة العشوائية (منع Test Mode المفتوح)...',
@@ -692,7 +693,7 @@ export async function verifyDatabaseBeforeAdd(params: {
         writes: [
           {
             update: {
-              name: `${firestoreDbDocPrefix}/platform/__rules_probe__`,
+              name: `${firestoreDbDocPrefix}/platform/rules_probe_check`,
               fields: {
                 probe: { booleanValue: true },
                 ts: { integerValue: String(Date.now()) },
@@ -704,7 +705,7 @@ export async function verifyDatabaseBeforeAdd(params: {
     });
 
     if (rogueResp.ok) {
-      await firestoreRestRequest('/platform/__rules_probe__', { method: 'DELETE' }).catch(
+      await firestoreRestRequest('/platform/rules_probe_check', { method: 'DELETE' }).catch(
         () => undefined
       );
       return {
@@ -727,14 +728,14 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    // 4B. Positive read probes: rooms/__verify_probe_room__ & platform/migration MUST NOT return 403!
+    // 4B. Positive read probes: rooms/verify_probe_room_check & platform/migration MUST NOT return 403!
     setStep('rules', {
       status: 'running',
       detail: '4ب. التحقق من صلاحية قراءة الغرف ومسار الانتقال (rooms + platform/migration)...',
     });
 
     const [roomReadResp, migrationReadResp] = await Promise.all([
-      firestoreRestRequest('/rooms/__verify_probe_room__', { method: 'GET' }),
+      firestoreRestRequest('/rooms/verify_probe_room_check', { method: 'GET' }),
       firestoreRestRequest('/platform/migration', { method: 'GET' }),
     ]);
 
@@ -770,7 +771,7 @@ export async function verifyDatabaseBeforeAdd(params: {
       };
     }
 
-    // 4C. Positive create/delete probe on users/{uid}/private/__verify_probe_<ts>
+    // 4C. Positive create/delete probe on users/{uid}/private/verify_probe_<ts>
     setStep('rules', {
       status: 'running',
       detail: '4ج. التحقق من صلاحية كتابة وحذف الملف الشخصي للمستخدم بموجب firestore.rules...',
@@ -787,7 +788,7 @@ export async function verifyDatabaseBeforeAdd(params: {
     ).slice(0, 120);
     const emailCandidate = (currentUser.email || 'programmer@example.com').slice(0, 200);
 
-    const probeDocId = `__verify_probe_${Date.now()}`;
+    const probeDocId = `verify_probe_${Date.now()}`;
     const probePath = `/users/${encodeURIComponent(currentUser.uid)}/private/${probeDocId}`;
     const createProbeResp = await firestoreRestRequest(':commit', {
       method: 'POST',

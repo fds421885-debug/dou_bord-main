@@ -1,5 +1,12 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, type Auth, type User } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  type Auth,
+  type User,
+} from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -27,11 +34,13 @@ import {
   defaultFirebaseConfig,
   encodeCompactFirebaseConfig,
   firebaseTargetKey,
+  getBackupFirebaseConfigs,
   getPreviousFirebaseConfigs,
   getSyncedSourceKeys,
   getTargetFirebaseAppName,
   getTimestampMillis,
   isMasterProgrammerIdentity,
+  isQuadNameValid,
   isSameFirebaseTarget,
   markSourceKeySynced,
   MASTER_PROGRAMMER_EMAIL,
@@ -39,6 +48,7 @@ import {
   normalizeArabicName,
   resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
+  saveBackupFirebaseConfigs,
   type FirebaseAppConfig,
   type ServerPlatformPointer,
 } from './firebase';
@@ -56,17 +66,20 @@ import {
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
 import type {
+  BackupAnnouncementInfo,
   Competition,
   CompetitionQuestion,
+  DatabaseRole,
+  DatabaseVerificationSummary,
   ExplainLayer,
   InteractiveSlide,
   MyQuiz,
   Participant,
   PlatformProgrammerState,
-  PoolDatabaseEntry,
   ProgrammerMember,
   Question,
   QuizAttempt,
+  RegisteredDatabaseEntry,
   Room,
   SavedQuestion,
   SavedTest,
@@ -87,6 +100,7 @@ export interface MigrationProgress {
     | 'migrating_saved'
     | 'migrating_quizzes'
     | 'migrating_attempts'
+    | 'announcing_backup'
     | 'cleaning_old'
     | 'finalizing'
     | 'done';
@@ -118,6 +132,9 @@ export interface MigrationResult {
   oldAuthSignedOut: boolean;
   platformPointerUpdated: boolean;
   serverPointerUpdated: boolean;
+  announcedBackupProjectId: string | null;
+  backupAnnouncementWritten: boolean;
+  backupAuthPopupBlocked: boolean;
 }
 
 export interface PlatformMigrationPointer {
@@ -154,6 +171,28 @@ export class MigrationNeedsSetupError extends Error {
   }
 }
 
+export type VerifyStepId = 'config' | 'firestore' | 'auth' | 'rules' | 'register';
+export type VerifyStepStatus = 'pending' | 'running' | 'passed' | 'failed';
+
+export interface VerifyStepItem {
+  id: VerifyStepId;
+  label: string;
+  status: VerifyStepStatus;
+  detail?: string;
+  fixHint?: string;
+  consoleUrl?: string;
+  actionType?: 'copy_rules' | 'copy_domain' | 'none';
+}
+
+export interface DatabaseVerificationResult {
+  ok: boolean;
+  config: FirebaseAppConfig;
+  role: DatabaseRole;
+  steps: VerifyStepItem[];
+  summary?: DatabaseVerificationSummary;
+  failureMessage?: string;
+}
+
 const KNOWN_CONFIG_KEYS = [
   'apiKey',
   'authDomain',
@@ -172,7 +211,7 @@ export function parseFirebaseConfigSnippet(
 ): FirebaseAppConfig {
   const trimmed = rawInput.trim();
   if (!trimmed) {
-    throw new Error('يرجى لصق كود إعدادات Firebase أو رابط النقل أولاً.');
+    throw new Error('يرجى لصق كود إعدادات Firebase (firebaseConfig) أولاً.');
   }
 
   let parsed: FirebaseAppConfig | null = null;
@@ -250,125 +289,26 @@ export function buildShareMigrationUrl(
 
 export function getOrInitFirebaseApp(config: FirebaseAppConfig): FirebaseApp {
   if (isSameFirebaseTarget(config, activeFirebaseConfig)) {
-    const primary = getApps().find((a) =>
-      a.name === '[DEFAULT]' ||
-      a.name === getTargetFirebaseAppName(activeFirebaseConfig.projectId, activeFirebaseConfig.firestoreDatabaseId)
+    const primary = getApps().find(
+      (a) =>
+        a.name === '[DEFAULT]' ||
+        a.name ===
+          getTargetFirebaseAppName(
+            activeFirebaseConfig.projectId,
+            activeFirebaseConfig.firestoreDatabaseId
+          )
     );
     if (primary) return primary;
   }
-  const appName = getTargetFirebaseAppName(config.projectId, config.firestoreDatabaseId);
+  const appName = getTargetFirebaseAppName(
+    config.projectId,
+    config.firestoreDatabaseId
+  );
   const existing = getApps().find((a) => a.name === appName);
   if (existing) {
     return existing;
   }
   return initializeApp(config, appName);
-}
-
-export async function publishServerPlatformPointer(params: {
-  config: FirebaseAppConfig;
-  idToken: string;
-  tokenProjectId: string;
-  tokenApiKey: string;
-  resetToDefault?: boolean;
-  migratedRoomId?: string | null;
-  previousConfigs?: FirebaseAppConfig[];
-}): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch('/api/platform-db', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${params.idToken}`,
-      },
-      body: JSON.stringify({
-        config: params.config,
-        tokenProjectId: params.tokenProjectId,
-        tokenApiKey: params.tokenApiKey,
-        resetToDefault: Boolean(params.resetToDefault),
-        migratedRoomId: params.migratedRoomId || null,
-        migrationEpoch: CURRENT_DB_EPOCH,
-        previousConfigs: params.previousConfigs ?? [],
-      }),
-      signal: controller.signal,
-    });
-    window.clearTimeout(timer);
-    return resp.ok;
-  } catch {
-    return false;
-  }
-}
-
-export async function publishServerResetToDefault(currentUser: User | null): Promise<boolean> {
-  try {
-    sessionStorage.setItem(
-      'duoboard_self_migrated_target',
-      firebaseTargetKey(defaultFirebaseConfig)
-    );
-  } catch {
-    // Ignore sessionStorage restrictions
-  }
-
-  const prevChain = [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]
-    .filter(
-      (c, idx, arr) =>
-        !isSameFirebaseTarget(c, defaultFirebaseConfig) &&
-        arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
-    )
-    .slice(0, 6);
-
-  if (!currentUser) {
-    return false;
-  }
-
-  // Update Firestore pointer on current custom DB if possible (for static-host fallback)
-  try {
-    await withTimeout(
-      setDoc(doc(sourceDb, 'platform', 'migration'), {
-        id: 'migration',
-        projectId: defaultFirebaseConfig.projectId,
-        apiKey: defaultFirebaseConfig.apiKey,
-        authDomain: defaultFirebaseConfig.authDomain,
-        appId: defaultFirebaseConfig.appId,
-        ...(defaultFirebaseConfig.storageBucket
-          ? { storageBucket: defaultFirebaseConfig.storageBucket }
-          : {}),
-        ...(defaultFirebaseConfig.messagingSenderId
-          ? { messagingSenderId: defaultFirebaseConfig.messagingSenderId }
-          : {}),
-        ...(defaultFirebaseConfig.measurementId
-          ? { measurementId: defaultFirebaseConfig.measurementId }
-          : {}),
-        ...(defaultFirebaseConfig.firestoreDatabaseId
-          ? { firestoreDatabaseId: defaultFirebaseConfig.firestoreDatabaseId }
-          : {}),
-        migratedBy: currentUser.uid,
-        migratedByName: 'مشرف المنصة',
-        migrationEpoch: CURRENT_DB_EPOCH,
-        previousConfigs: prevChain,
-        updatedAt: serverTimestamp(),
-      }),
-      2500
-    );
-  } catch {
-    // Ignore if rules/quota restrict
-  }
-
-  try {
-    const idToken = await currentUser.getIdToken();
-    const ok = await publishServerPlatformPointer({
-      config: defaultFirebaseConfig,
-      idToken,
-      tokenProjectId: activeFirebaseConfig.projectId,
-      tokenApiKey: activeFirebaseConfig.apiKey,
-      resetToDefault: true,
-      previousConfigs: prevChain,
-    });
-    return ok;
-  } catch {
-    return false;
-  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
@@ -396,7 +336,7 @@ function classifyMigrationError(err: unknown, projectId: string): Error {
     return new MigrationNeedsSetupError(
       'firestore_rules',
       projectId,
-      'قاعدة البيانات الجديدة ترفض الكتابة حالياً لأن قواعد الأمان (Firestore Rules) لم تُضف بعد.'
+      'قاعدة البيانات الهدف ترفض الكتابة لأن قواعد الأمان (Firestore Rules) غير منشورة أو غير مطابقة.'
     );
   }
   if (lower.includes('auth/unauthorized-domain')) {
@@ -426,10 +366,362 @@ function classifyMigrationError(err: unknown, projectId: string): Error {
   }
   if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
     return new Error(
-      'قاعدة البيانات الهدف التي أدخلتها بلغت حد الحصة أيضاً. يرجى استخدام مشروع Firebase آخر.'
+      `قاعدة البيانات (${projectId}) وصلت للحد اليومي (Quota). يرجى اختيار قاعدة أخرى.`
     );
   }
   return err instanceof Error ? err : new Error(raw);
+}
+
+/**
+ * Verifies a Firebase config 100% live BEFORE adding it to either:
+ *  - Player Databases (`role === 'player'`): leaves user's verified login profile registered.
+ *  - Backup Signaling Databases (`role === 'backup'`): removes temporary probe doc immediately so Backup DB stays untouched.
+ */
+export async function verifyDatabaseBeforeAdd(params: {
+  config: FirebaseAppConfig;
+  role: DatabaseRole;
+  existingPlayerDbs: RegisteredDatabaseEntry[];
+  existingBackupDbs: RegisteredDatabaseEntry[];
+  fallbackQuadName?: string;
+  onStepUpdate?: (steps: VerifyStepItem[]) => void;
+}): Promise<DatabaseVerificationResult> {
+  const {
+    config,
+    role,
+    existingPlayerDbs,
+    existingBackupDbs,
+    fallbackQuadName,
+    onStepUpdate,
+  } = params;
+
+  const projectId = config.projectId;
+  const dbSegment = (config.firestoreDatabaseId || '(default)').trim() || '(default)';
+
+  const steps: VerifyStepItem[] = [
+    { id: 'config', label: '1. التحقق من صيغة الإعدادات وعدم التكرار', status: 'running' },
+    { id: 'firestore', label: '2. فحص تفعيل Firestore API ووجود قاعدة البيانات', status: 'pending' },
+    { id: 'auth', label: '3. فحص Google Sign-In OAuth وإضافة النطاق الحالي', status: 'pending' },
+    {
+      id: 'rules',
+      label:
+        role === 'player'
+          ? '4. فحص قواعد الأمان (Firestore Rules) وتسجيل حساب الدخول'
+          : '4. فحص قواعد الأمان للقاعدة الاحتياطية (مع بقائها فارغة تماماً)',
+      status: 'pending',
+    },
+    {
+      id: 'register',
+      label:
+        role === 'player'
+          ? '5. حفظ القاعدة في قائمة قواعد البيانات للاعبين'
+          : '5. حفظ القاعدة في قائمة القواعد الاحتياطية الصامتة',
+      status: 'pending',
+    },
+  ];
+
+  const emit = () => onStepUpdate?.(steps.map((s) => ({ ...s })));
+  const setStep = (id: VerifyStepId, patch: Partial<VerifyStepItem>) => {
+    const item = steps.find((s) => s.id === id);
+    if (item) Object.assign(item, patch);
+    emit();
+  };
+
+  emit();
+
+  // Step 1: Config & Duplicate check
+  const cleanCfg = sanitizeFirebaseConfig(config);
+  if (!cleanCfg) {
+    const msg = 'كود إعدادات Firebase غير مكتمل أو غير صالح.';
+    setStep('config', { status: 'failed', detail: msg });
+    return { ok: false, config, role, steps, failureMessage: msg };
+  }
+  if (existingPlayerDbs.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    const msg = `المشروع (${projectId}) مضاف بالفعل في قائمة قواعد البيانات.`;
+    setStep('config', { status: 'failed', detail: msg });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+  if (existingBackupDbs.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    const msg = `المشروع (${projectId}) مضاف بالفعل في قائمة القواعد الاحتياطية.`;
+    setStep('config', { status: 'failed', detail: msg });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+  if (
+    role === 'backup' &&
+    (isSameFirebaseTarget(cleanCfg, defaultFirebaseConfig) ||
+      isSameFirebaseTarget(cleanCfg, activeFirebaseConfig))
+  ) {
+    const msg = 'القاعدة النشطة أو الأساسية لا يمكن إضافتها كقاعدة احتياطية صامتة لا تُمس.';
+    setStep('config', { status: 'failed', detail: msg });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+  setStep('config', {
+    status: 'passed',
+    detail: `تم التحقق من ${projectId} (${dbSegment})`,
+  });
+
+  // Step 2: Live Firestore REST check
+  setStep('firestore', { status: 'running', detail: 'جاري الاتصال بخدمة Cloud Firestore...' });
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(dbSegment)}/documents/platform/migration?key=${encodeURIComponent(
+      cleanCfg.apiKey
+    )}`;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    window.clearTimeout(timer);
+
+    if (!resp.ok) {
+      let errMsg = '';
+      try {
+        const body = (await resp.json()) as { error?: { message?: string; status?: string } };
+        errMsg = body?.error?.message || '';
+      } catch {
+        errMsg = '';
+      }
+      const lowerErr = errMsg.toLowerCase();
+
+      if (
+        resp.status === 400 &&
+        (lowerErr.includes('api key not valid') || lowerErr.includes('api_key_invalid'))
+      ) {
+        const msg = `مفتاح apiKey غير صحيح للمشروع ${projectId}. تأكد من نسخ الإعدادات كاملة.`;
+        setStep('firestore', {
+          status: 'failed',
+          detail: msg,
+          fixHint: 'افتح Project Settings في Firebase Console وانسخ firebaseConfig بدقة.',
+          consoleUrl: `https://console.firebase.google.com/project/${projectId}/settings/general`,
+        });
+        return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+      }
+
+      if (
+        lowerErr.includes('service_disabled') ||
+        lowerErr.includes('cloud firestore api has not been used') ||
+        lowerErr.includes('firestore.googleapis.com')
+      ) {
+        const msg = `خدمة Cloud Firestore API غير مفعّلة بعد في المشروع ${projectId}.`;
+        setStep('firestore', {
+          status: 'failed',
+          detail: msg,
+          fixHint: 'افتح رابط إنشاء قاعدة البيانات واضغط Create database في Firebase Console.',
+          consoleUrl: `https://console.firebase.google.com/project/${projectId}/firestore`,
+        });
+        return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+      }
+
+      if (
+        resp.status === 404 &&
+        (lowerErr.includes('database') && lowerErr.includes('does not exist')) ||
+        lowerErr.includes('not have a default cloud firestore')
+      ) {
+        const msg = `لم يتم إنشاء قاعدة Firestore Database (${dbSegment}) داخل المشروع ${projectId} حتى الآن.`;
+        setStep('firestore', {
+          status: 'failed',
+          detail: msg,
+          fixHint: 'اضغط "إنشاء قاعدة Firestore" ثم اختر Production Mode واختر الموقع واضغط Enable.',
+          consoleUrl: `https://console.firebase.google.com/project/${projectId}/firestore`,
+        });
+        return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+      }
+      // 404 Document not found OR 403 PERMISSION_DENIED (non-SERVICE_DISABLED) confirms Firestore DB exists!
+    }
+    setStep('firestore', {
+      status: 'passed',
+      detail: `Cloud Firestore مفعّلة وتستجيب (${dbSegment})`,
+    });
+  } catch {
+    const msg = 'تعذر الوصول إلى خوادم Firestore — تحقق من اتصال الإنترنت أو إعدادات المشروع.';
+    setStep('firestore', { status: 'failed', detail: msg });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+
+  // Step 3: Google OAuth & Domain Check + Authentication Sign-In
+  setStep('auth', {
+    status: 'running',
+    detail: 'جاري التحقق من Google Sign-In OAuth والنطاق المصرّح به...',
+  });
+
+  const targetApp = getOrInitFirebaseApp(cleanCfg);
+  const targetAuth = getAuth(targetApp);
+  const targetDb = createFirestoreInstance(targetApp, cleanCfg);
+  let verifiedUser: User | null = targetAuth.currentUser;
+
+  try {
+    if (!verifiedUser) {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const cred = await signInWithPopup(targetAuth, provider);
+      verifiedUser = cred.user;
+    } else {
+      await verifiedUser.getIdToken(true);
+    }
+
+    if (!verifiedUser.emailVerified) {
+      const msg = 'حساب Google المختار غير مُفعّل البريد الإلكتروني (email_verified).';
+      setStep('auth', {
+        status: 'failed',
+        detail: msg,
+        fixHint: 'استخدم حساب Google موثّق البريد الإلكتروني ثم أعد الفحص.',
+      });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
+
+    setStep('auth', {
+      status: 'passed',
+      detail: `تم التحقق من Google OAuth بنجاح (${verifiedUser.email || verifiedUser.uid})`,
+    });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const lower = raw.toLowerCase();
+    if (
+      lower.includes('auth/operation-not-allowed') ||
+      lower.includes('auth/configuration-not-found')
+    ) {
+      const msg = `تسجيل الدخول عبر Google غير مفعّل في المشروع ${projectId}.`;
+      setStep('auth', {
+        status: 'failed',
+        detail: msg,
+        fixHint:
+          'ادخل إلى Authentication -> Sign-in method -> Add new provider -> Google -> Enable ثم Save.',
+        consoleUrl: `https://console.firebase.google.com/project/${projectId}/authentication/providers`,
+      });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
+    if (lower.includes('auth/unauthorized-domain')) {
+      const msg = `النطاق الحالي (${window.location.hostname}) غير مضاف ضمن Authorized domains في ${projectId}.`;
+      setStep('auth', {
+        status: 'failed',
+        detail: msg,
+        fixHint:
+          'انسخ النطاق أدناه وأضفه داخل Authentication -> Settings -> Authorized domains -> Add domain.',
+        consoleUrl: `https://console.firebase.google.com/project/${projectId}/authentication/settings`,
+        actionType: 'copy_domain',
+      });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
+    if (lower.includes('auth/popup-blocked')) {
+      const msg = 'تم حظر نافذة تسجيل الدخول المنبثقة. اسمح بالنوافذ المنبثقة وأعد المحاولة.';
+      setStep('auth', { status: 'failed', detail: msg });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
+    const msg =
+      lower.includes('auth/popup-closed-by-user')
+        ? 'تم إغلاق نافذة تسجيل الدخول قبل إتمام التحقق.'
+        : `فشل التحقق من المصادقة: ${raw}`;
+    setStep('auth', { status: 'failed', detail: msg });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+
+  // Step 4: Hardened Firestore Rules Probe & Player Account Registration
+  setStep('rules', {
+    status: 'running',
+    detail: 'جاري اختبار قواعد الأمان (Firestore Rules) ومنع وضع الاختبار المفتوح...',
+  });
+
+  try {
+    // 4A. Negative probe: must FAIL permission-denied under hardened firestore.rules (catches Test Mode allow write: if true!)
+    let openedTestMode = false;
+    const rogueProbeRef = doc(targetDb, 'platform', '__rules_probe__');
+    try {
+      await withTimeout(setDoc(rogueProbeRef, { probe: true, ts: Date.now() }), 4500);
+      openedTestMode = true;
+      await deleteDoc(rogueProbeRef).catch(() => undefined);
+    } catch {
+      // Expected: hardened firestore.rules rejects unauthorized platform doc
+    }
+
+    if (openedTestMode) {
+      const msg = `قاعدة ${projectId} ما زالت على وضع الاختبار المفتوح (Test Mode) ولم تُنشر قواعد firestore.rules الآمنة بعد!`;
+      setStep('rules', {
+        status: 'failed',
+        detail: msg,
+        fixHint: 'انسخ قواعد firestore.rules الكاملة وألصقها في Firebase Console -> Firestore -> Rules ثم اضغط Publish.',
+        consoleUrl: `https://console.firebase.google.com/project/${projectId}/firestore/rules`,
+        actionType: 'copy_rules',
+      });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
+
+    // 4B. Positive probe: verify rooms read & platform/migration read + user profile write under rules
+    await withTimeout(getDoc(doc(targetDb, 'rooms', '__verify_probe_room__')), 4500);
+    await withTimeout(getDoc(doc(targetDb, 'platform', 'migration')), 4500);
+
+    const profileRef = doc(targetDb, 'users', verifiedUser.uid, 'private', 'profile');
+    const existingProfile = await withTimeout(getDoc(profileRef), 4500);
+    const quadCandidate =
+      fallbackQuadName && isQuadNameValid(fallbackQuadName)
+        ? fallbackQuadName.trim().slice(0, 120)
+        : verifiedUser.displayName && isQuadNameValid(verifiedUser.displayName)
+        ? verifiedUser.displayName.trim().slice(0, 120)
+        : MASTER_PROGRAMMER_NAME;
+
+    if (!existingProfile.exists()) {
+      await withTimeout(
+        setDoc(profileRef, {
+          uid: verifiedUser.uid,
+          fullNameQuad: quadCandidate,
+          email: verifiedUser.email || 'programmer@example.com',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        4500
+      );
+      // If Backup DB: remove the temporary probe doc immediately so the Backup DB remains untouched & empty!
+      if (role === 'backup') {
+        await withTimeout(deleteDoc(profileRef), 4000).catch(() => undefined);
+      }
+    }
+
+    setStep('rules', {
+      status: 'passed',
+      detail:
+        role === 'player'
+          ? 'قواعد الأمان مطبّقة 100% وتم تسجيل حساب الدخول على القاعدة'
+          : 'قواعد الأمان مطبّقة 100% والقاعدة الاحتياطية فارغة وجاهزة للإعلان فقط',
+    });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const lower = raw.toLowerCase();
+    const isPerm = lower.includes('permission-denied') || lower.includes('permission_denied');
+    const msg = isPerm
+      ? `قواعد الأمان (Firestore Rules) في المشروع ${projectId} ناقصة أو مغلقة ولا تطابق نظام المنصة.`
+      : `تعذر فحص قواعد الأمان في ${projectId}: ${raw}`;
+    setStep('rules', {
+      status: 'failed',
+      detail: msg,
+      fixHint: 'انسخ firestore.rules الرسمية للمنصة وألصقها في قسم Rules ثم اضغط Publish وأعد الفحص.',
+      consoleUrl: `https://console.firebase.google.com/project/${projectId}/firestore/rules`,
+      actionType: 'copy_rules',
+    });
+    return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+  }
+
+  // Step 5: Ready to register
+  setStep('register', { status: 'running', detail: 'جاري تسجيل القاعدة واعتمادها...' });
+  const summary: DatabaseVerificationSummary = {
+    firestoreReady: true,
+    googleAuthReady: true,
+    rulesReady: true,
+    verifiedAt: Date.now(),
+    verifiedByEmail: verifiedUser.email || undefined,
+  };
+  setStep('register', {
+    status: 'passed',
+    detail:
+      role === 'player'
+        ? 'تم اعتماد القاعدة وإضافتها لقواعد اللاعبين وتسجيل الدخول'
+        : 'تم اعتماد القاعدة الاحتياطية الصامتة بنجاح',
+  });
+
+  return {
+    ok: true,
+    config: cleanCfg,
+    role,
+    steps,
+    summary,
+  };
 }
 
 interface CollectedRoomData {
@@ -543,7 +835,9 @@ async function collectRoomDetails(
   let participants: Participant[] = useCached?.participants ?? [];
   try {
     const pSnap = await withTimeout(
-      getDocs(query(collection(fromDb, 'rooms', room.id, 'participants'), where('roomId', '==', room.id)))
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'participants'), where('roomId', '==', room.id))
+      )
     );
     const list: Participant[] = [];
     pSnap.forEach((d) => list.push(d.data() as Participant));
@@ -555,7 +849,9 @@ async function collectRoomDetails(
   let questions: Question[] = useCached?.questions ?? [];
   try {
     const qSnap = await withTimeout(
-      getDocs(query(collection(fromDb, 'rooms', room.id, 'questions'), where('roomId', '==', room.id)))
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'questions'), where('roomId', '==', room.id))
+      )
     );
     const list: Question[] = [];
     qSnap.forEach((d) => list.push(d.data() as Question));
@@ -565,7 +861,6 @@ async function collectRoomDetails(
     // Keep cached
   }
 
-  // Collect student boards for ALL questions (not just currentQuestionId!)
   const boardsByQuestionId: Record<string, StudentBoard[]> = {};
   if (useCached?.boards?.length && room.currentQuestionId) {
     boardsByQuestionId[room.currentQuestionId] = useCached.boards;
@@ -587,14 +882,16 @@ async function collectRoomDetails(
         boardsByQuestionId[q.id] = list;
       }
     } catch {
-      // Keep cached fallback if available
+      // Keep cached
     }
   }
 
   let slides: InteractiveSlide[] = useCached?.slides ?? [];
   try {
     const sSnap = await withTimeout(
-      getDocs(query(collection(fromDb, 'rooms', room.id, 'slides'), where('roomId', '==', room.id)))
+      getDocs(
+        query(collection(fromDb, 'rooms', room.id, 'slides'), where('roomId', '==', room.id))
+      )
     );
     const list: InteractiveSlide[] = [];
     sSnap.forEach((d) => list.push(d.data() as InteractiveSlide));
@@ -604,7 +901,6 @@ async function collectRoomDetails(
     // Keep cached
   }
 
-  // Collect layers across ALL slides!
   const slideLayersMap = new Map<string, SlideLayer>();
   (useCached?.slideLayers ?? []).forEach((l) => {
     slideLayersMap.set(`${l.slideId}::${l.id}`, l);
@@ -625,7 +921,7 @@ async function collectRoomDetails(
         slideLayersMap.set(`${l.slideId}::${l.id}`, l);
       });
     } catch {
-      // Ignore individual slide layer fetch failures
+      // Ignore
     }
   }
   const slideLayers = Array.from(slideLayersMap.values());
@@ -654,7 +950,7 @@ async function collectRoomDetails(
     // Keep cached
   }
 
-  let sharedQuizzes: SharedQuiz[] = [];
+  const sharedQuizzes: SharedQuiz[] = [];
   try {
     const sqSnap = await withTimeout(
       getDocs(
@@ -663,10 +959,10 @@ async function collectRoomDetails(
     );
     sqSnap.forEach((d) => sharedQuizzes.push(d.data() as SharedQuiz));
   } catch {
-    // Ignore if unavailable
+    // Ignore
   }
 
-  let competitions: Competition[] = [];
+  const competitions: Competition[] = [];
   const competitionQuestionsByCompId: Record<string, CompetitionQuestion[]> = {};
   const competitionBoardsByKey: Record<string, StudentBoard[]> = {};
   try {
@@ -718,15 +1014,15 @@ async function collectRoomDetails(
               competitionBoardsByKey[`${comp.id}::${cq.id}`] = cbList;
             }
           } catch {
-            // Ignore board read errors
+            // Ignore
           }
         }
       } catch {
-        // Ignore competition questions read errors
+        // Ignore
       }
     }
   } catch {
-    // Ignore competitions read errors
+    // Ignore
   }
 
   return {
@@ -806,10 +1102,9 @@ async function collectSourceData(
   onProgress({
     step: 'collecting',
     percent: 16,
-    message: 'جاري فحص الغرف والملفات والشرائح على القاعدة الحالية...',
+    message: 'جاري تجميع الغرف والشرائح والصبورات والأسئلة من القاعدة الحالية...',
   });
 
-  // Collect ALL rooms accessible to the user: currentRoom, cachedRoom, plus ALL supervisor-owned rooms
   const candidateRoomsMap = new Map<string, Room>();
   if (currentRoom) candidateRoomsMap.set(currentRoom.id, currentRoom);
   if (cachedRoom?.room && !candidateRoomsMap.has(cachedRoom.room.id)) {
@@ -826,14 +1121,13 @@ async function collectSourceData(
         candidateRoomsMap.set(r.id, r);
       });
     } catch {
-      // Keep active/cached rooms if list fails (e.g. quota exceeded)
+      // Keep active/cached rooms if list fails
     }
   }
 
   const candidateRooms = Array.from(candidateRoomsMap.values());
   const rooms: CollectedRoomData[] = [];
-  for (let i = 0; i < candidateRooms.length; i++) {
-    const r = candidateRooms[i];
+  for (const r of candidateRooms) {
     const isSupHint =
       (currentRoom && r.id === currentRoom.id && isSupervisorInCurrentRoom) ||
       Boolean(oldUid && r.supervisorId === oldUid);
@@ -847,7 +1141,6 @@ async function collectSourceData(
     message: 'جاري تجميع الاختبارات المحفوظة واختباراتي والمحاولات...',
   });
 
-  // ALL Saved Tests + questions (no 15-test truncation!)
   let savedTests: SavedTest[] = cachedSaved?.tests ?? [];
   const savedQuestionsByTestId: Record<string, SavedQuestion[]> = {
     ...(cachedSaved?.questionsByTestId ?? {}),
@@ -881,7 +1174,7 @@ async function collectSourceData(
             tqList.sort((a, b) => a.orderIndex - b.orderIndex);
             savedQuestionsByTestId[t.id] = tqList;
           } catch {
-            // Keep cached questions for this test if quota hits mid-way
+            // Keep cached questions for this test
           }
         }
       }
@@ -890,7 +1183,6 @@ async function collectSourceData(
     }
   }
 
-  // ALL My Quizzes
   let myQuizzes: MyQuiz[] =
     cachedQuizzes && (!oldUid || cachedQuizzes.ownerId === oldUid) ? cachedQuizzes.quizzes : [];
   if (oldUid) {
@@ -909,7 +1201,6 @@ async function collectSourceData(
     }
   }
 
-  // ALL Quiz Attempts
   let quizAttempts: QuizAttempt[] =
     cachedAttempts && (!oldUid || cachedAttempts.ownerId === oldUid)
       ? cachedAttempts.attempts
@@ -977,8 +1268,7 @@ async function migrateUserProfileToDb(params: {
   const targetUid = targetUser.uid;
   const resolvedQuadName =
     fallbackProfile?.fullNameQuad ||
-    (targetUser.displayName &&
-    targetUser.displayName.trim().split(/\s+/).length >= 4
+    (targetUser.displayName && targetUser.displayName.trim().split(/\s+/).length >= 4
       ? targetUser.displayName.trim()
       : '');
 
@@ -1062,20 +1352,32 @@ async function writePersonalCollectionsToDb(params: {
     const savedQuestions = savedQuestionsByTestId[test.id] ?? [];
 
     if (existingSaved.exists()) {
-      const existingData = existingSaved.data() as SavedTest;
-      if (savedQuestions.length > (existingData.totalQuestions || 0)) {
-        for (const sq of savedQuestions) {
-          const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
-          const sqSnap = await getDoc(sqRef);
-          if (!sqSnap.exists()) {
+      // Explicitly update existing savedTest metadata + sync any missing or updated savedQuestions
+      for (const sq of savedQuestions) {
+        const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
+        const sqSnap = await getDoc(sqRef);
+        if (!sqSnap.exists()) {
+          await setDoc(sqRef, cleanSavedQuestionForFirestore(sq, targetUid));
+        } else {
+          const oldSq = sqSnap.data() as SavedQuestion;
+          const needsReplace =
+            oldSq.status !== sq.status ||
+            (sq.boards?.length ?? 0) > (oldSq.boards?.length ?? 0);
+          if (needsReplace) {
+            await deleteDoc(sqRef).catch(() => undefined);
             await setDoc(sqRef, cleanSavedQuestionForFirestore(sq, targetUid));
           }
         }
-        await updateDoc(testRef, {
-          totalQuestions: Math.min(200, Math.max(0, savedQuestions.length)),
-          updatedAt: serverTimestamp(),
-        });
       }
+      await updateDoc(testRef, {
+        title: (test.title || 'اختبار محفوظ').slice(0, 120),
+        totalQuestions: Math.min(
+          200,
+          Math.max(0, savedQuestions.length || test.totalQuestions || 0)
+        ),
+        participantsSummary: (test.participantsSummary || []).slice(0, 100),
+        updatedAt: serverTimestamp(),
+      });
       migratedSavedTestsCount++;
       onItemDone?.('saved', test.title);
       continue;
@@ -1097,7 +1399,10 @@ async function writePersonalCollectionsToDb(params: {
       title: (test.title || 'اختبار محفوظ').slice(0, 120),
       userRole: test.userRole || 'student',
       supervisorName: safeSupervisorName,
-      totalQuestions: Math.min(200, Math.max(0, savedQuestions.length || test.totalQuestions || 0)),
+      totalQuestions: Math.min(
+        200,
+        Math.max(0, savedQuestions.length || test.totalQuestions || 0)
+      ),
       participantsSummary: (test.participantsSummary || []).slice(0, 100),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -1129,15 +1434,13 @@ async function writePersonalCollectionsToDb(params: {
     const existingQuiz = await getDoc(quizRef);
     const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
     if (existingQuiz.exists()) {
-      const existingData = existingQuiz.data() as MyQuiz;
-      if (questions.length > (existingData.questionCount || existingData.questions?.length || 0)) {
-        await updateDoc(quizRef, {
-          title: (quiz.title || 'اختبار').slice(0, 120),
-          questions,
-          questionCount: questions.length,
-          updatedAt: serverTimestamp(),
-        });
-      }
+      // Always update existing quiz on target DB so edits/additions sync completely
+      await updateDoc(quizRef, {
+        title: (quiz.title || 'اختبار').slice(0, 120),
+        questions,
+        questionCount: questions.length,
+        updatedAt: serverTimestamp(),
+      });
       migratedMyQuizzesCount++;
       onItemDone?.('quiz', quiz.title);
       continue;
@@ -1358,7 +1661,6 @@ async function cleanupMigratedRoomsOnDb(params: {
       }
       if (await safeDeleteDoc(doc(srcDb, 'rooms', roomId))) deleted++;
     } else {
-      // Student cleanly leaves old room participation
       await safeDeleteDoc(doc(srcDb, 'rooms', roomId, 'participants', oldUid));
     }
   }
@@ -1366,35 +1668,113 @@ async function cleanupMigratedRoomsOnDb(params: {
   return deleted;
 }
 
+/**
+ * Announces a completed migration onto an untouched Backup DB (`platform/migration` doc ONLY)
+ * so all waiting clients discover & switch to the new Player DB cleanly.
+ */
+export async function announceViaBackupDatabase(params: {
+  backupConfig: FirebaseAppConfig;
+  targetConfig: FirebaseAppConfig;
+  migratedRoomId?: string | null;
+  updaterName?: string;
+  previousConfigs?: FirebaseAppConfig[];
+}): Promise<{ ok: boolean; popupBlocked: boolean }> {
+  const { backupConfig, targetConfig, migratedRoomId, updaterName, previousConfigs = [] } = params;
+  try {
+    const bApp = getOrInitFirebaseApp(backupConfig);
+    const bAuth = getAuth(bApp);
+    const bDb = createFirestoreInstance(bApp, backupConfig);
+
+    let bUser = bAuth.currentUser;
+    if (!bUser) {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const cred = await signInWithPopup(bAuth, provider);
+      bUser = cred.user;
+    }
+
+    const priorChain = previousConfigs
+      .filter(
+        (c, idx, arr) =>
+          !isSameFirebaseTarget(c, targetConfig) &&
+          !isSameFirebaseTarget(c, backupConfig) &&
+          arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
+      )
+      .slice(0, 8)
+      .map((c) => ({
+        apiKey: c.apiKey,
+        authDomain: c.authDomain,
+        projectId: c.projectId,
+        appId: c.appId,
+        ...(c.storageBucket ? { storageBucket: c.storageBucket } : {}),
+        ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
+        ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
+      }));
+
+    await setDoc(doc(bDb, 'platform', 'migration'), {
+      id: 'migration',
+      projectId: targetConfig.projectId,
+      apiKey: targetConfig.apiKey,
+      authDomain: targetConfig.authDomain,
+      appId: targetConfig.appId,
+      ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
+      ...(targetConfig.messagingSenderId
+        ? { messagingSenderId: targetConfig.messagingSenderId }
+        : {}),
+      ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
+      ...(targetConfig.firestoreDatabaseId
+        ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
+        : {}),
+      migratedBy: bUser.uid,
+      migratedByName: (updaterName || bUser.displayName || 'مشرف المنصة').slice(0, 120),
+      ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
+      migrationEpoch: CURRENT_DB_EPOCH,
+      previousConfigs: priorChain,
+      updatedAt: serverTimestamp(),
+    });
+
+    return { ok: true, popupBlocked: false };
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const lower = raw.toLowerCase();
+    return {
+      ok: false,
+      popupBlocked: lower.includes('auth/popup-blocked'),
+    };
+  }
+}
+
 export async function runFirebaseMigration(params: {
   targetConfig: FirebaseAppConfig;
+  backupEntry?: RegisteredDatabaseEntry | null;
   currentProfile: UserProfile | null;
   currentRoom: Room | null;
   isSupervisorInCurrentRoom: boolean;
   cleanupOldDatabase?: boolean;
-  poolState?: PlatformProgrammerState | null;
+  allowSameTargetUpdate?: boolean;
   onProgress: (p: MigrationProgress) => void;
 }): Promise<MigrationResult> {
   const {
     targetConfig,
+    backupEntry = null,
     currentProfile,
     currentRoom,
     isSupervisorInCurrentRoom,
     cleanupOldDatabase = true,
-    poolState = null,
+    allowSameTargetUpdate = false,
     onProgress,
   } = params;
 
-  if (isSameFirebaseTarget(targetConfig, activeFirebaseConfig)) {
+  if (!allowSameTargetUpdate && isSameFirebaseTarget(targetConfig, activeFirebaseConfig)) {
     throw new Error(
-      'أنت متصل بالفعل بقاعدة البيانات هذه. الصق إعدادات مشروع أو قاعدة بيانات أخرى.'
+      'أنت متصل بالفعل بهذه القاعدة. اختر قاعدة بيانات أخرى من القائمة لنقل وتحديث البيانات إليها.'
     );
   }
 
   onProgress({
     step: 'signing_in',
     percent: 8,
-    message: 'جاري تسجيل الدخول وربط قاعدة البيانات الجديدة...',
+    message: 'جاري تسجيل الدخول وربط قاعدة البيانات الهدف...',
   });
 
   let targetDb: Firestore;
@@ -1410,7 +1790,7 @@ export async function runFirebaseMigration(params: {
   onProgress({
     step: 'collecting',
     percent: 13,
-    message: 'جاري فحص وتجميع بيانات جميع القواعد (القديمة والحالية) والمحفوظات المحلية...',
+    message: 'جاري فحص وتجميع بيانات الغرف، السوابير، الاختبارات، والملفات...',
   });
 
   const cachedProfile = await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile');
@@ -1426,7 +1806,6 @@ export async function runFirebaseMigration(params: {
     onProgress
   );
 
-  // Also collect from every previously linked database that still has an active session so OLD + NEW merge completely!
   const sourceHandles: SourceDatabaseCleanupHandle[] = [];
   if (oldUid) {
     sourceHandles.push({
@@ -1456,7 +1835,7 @@ export async function runFirebaseMigration(params: {
       onProgress({
         step: 'collecting',
         percent: 20,
-        message: 'جاري دمج البيانات من القواعد السابقة لضمان نقل الجديد والقديم...',
+        message: 'جاري دمج البيانات القديمة لضمان نقل وتحديث كل السجلات...',
         detail: extraCfg.projectId,
       });
       const extraData = await collectSourceData(
@@ -1476,11 +1855,10 @@ export async function runFirebaseMigration(params: {
         collected: extraData,
       });
     } catch {
-      // Non-fatal if a prior DB is offline or quota-limited
+      // Non-fatal
     }
   }
 
-  // Merge primary + extra database collections (deduplicated, keeping most complete items)
   const mergedRoomsMap = new Map<string, CollectedRoomData>();
   const mergedSavedTestsMap = new Map<string, SavedTest>();
   const mergedSavedQuestionsMap: Record<string, SavedQuestion[]> = {
@@ -1494,7 +1872,7 @@ export async function runFirebaseMigration(params: {
       const existing = mergedRoomsMap.get(r.room.id);
       if (
         !existing ||
-        r.questions.length + r.slides.length > existing.questions.length + existing.slides.length
+        r.questions.length + r.slides.length >= existing.questions.length + existing.slides.length
       ) {
         mergedRoomsMap.set(r.room.id, r);
       }
@@ -1503,7 +1881,7 @@ export async function runFirebaseMigration(params: {
       const existing = mergedSavedTestsMap.get(st.id);
       const qs = bundle.savedQuestionsByTestId[st.id] ?? [];
       const prevQs = mergedSavedQuestionsMap[st.id] ?? [];
-      if (qs.length > prevQs.length) {
+      if (qs.length >= prevQs.length) {
         mergedSavedQuestionsMap[st.id] = qs;
       }
       if (!existing || (st.totalQuestions || 0) >= (existing.totalQuestions || 0)) {
@@ -1542,8 +1920,6 @@ export async function runFirebaseMigration(params: {
   );
 
   const targetUid = targetUser.uid;
-
-  // Compute total units for smooth real percentage reporting (25% -> 95%)
   const totalRoomUnits = source.rooms.reduce(
     (sum, r) =>
       sum +
@@ -1563,14 +1939,14 @@ export async function runFirebaseMigration(params: {
       source.quizAttempts.length
   );
   let completedUnits = 0;
-  const calcPercent = () => Math.min(93, 25 + Math.round((completedUnits / totalUnits) * 68));
+  const calcPercent = () => Math.min(91, 25 + Math.round((completedUnits / totalUnits) * 66));
 
   try {
-    // 1. Migrate User Profile
+    // 1. User Profile
     onProgress({
       step: 'migrating_profile',
       percent: 25,
-      message: 'جاري نقل بيانات الحساب الشخصي وتثبيت تسجيل الدخول...',
+      message: 'جاري نقل وتحديث بيانات الحساب الشخصي على القاعدة الجديدة...',
     });
 
     const resolvedQuadName = await migrateUserProfileToDb({
@@ -1580,7 +1956,7 @@ export async function runFirebaseMigration(params: {
     });
     completedUnits++;
 
-    // Re-key ALL local drafts & session snapshots to targetUid (PDFs, selected pages, exams, unsaved quizzes)
+    // Re-key ALL local drafts & session snapshots to targetUid
     const allDrafts = await loadAllQuizDrafts();
     for (const d of allDrafts) {
       const matchedOld = allOldUids.find((u) => u !== targetUid && d.key.endsWith(`_${u}`));
@@ -1631,8 +2007,8 @@ export async function runFirebaseMigration(params: {
       // Non-fatal IndexedDB re-key
     }
 
-    // 2. Migrate ALL Collected Rooms (Questions, ALL Boards, ALL Slides, ALL Layers, SharedQuizzes, Competitions)
-    let migratedRoomId: string | null = source.primaryRoomId;
+    // 2. Migrate & Update Rooms (Questions, Boards, Slides, Layers, SharedQuizzes, Competitions)
+    const migratedRoomId: string | null = source.primaryRoomId;
     let migratedRoomsCount = 0;
     let roomCreatedAsSupervisor = false;
     let roomRejoinedAsStudent = false;
@@ -1651,7 +2027,7 @@ export async function runFirebaseMigration(params: {
       onProgress({
         step: 'migrating_rooms',
         percent: calcPercent(),
-        message: `جاري نقل الغرفة (${srcRoom.id}) وكل ملفاتها وأسئلتها...`,
+        message: `جاري نقل وتحديث الغرفة (${srcRoom.id}) وكل سوابيرها وأسئلتها...`,
         detail: `${srcRoom.title}`,
       });
 
@@ -1726,7 +2102,7 @@ export async function runFirebaseMigration(params: {
             });
           }
 
-          // Migrate ALL Slides & Current User's Layers on every slide
+          // Slides + Layers (updates strokes if layer already exists!)
           for (const slide of roomBundle.slides) {
             if (!slide.imageData || slide.imageData.length > 480000) {
               completedUnits++;
@@ -1765,15 +2141,23 @@ export async function runFirebaseMigration(params: {
                 'layers',
                 targetUid
               );
-              await setDoc(layerRef, {
-                id: targetUid,
-                roomId: srcRoom.id,
-                slideId: slide.id,
-                authorId: targetUid,
-                authorName: supervisorDisplayName.slice(0, 120),
-                strokes: mySlideLayer.strokes.slice(-400),
-                updatedAt: serverTimestamp(),
-              });
+              const existingLayerSnap = await getDoc(layerRef);
+              if (existingLayerSnap.exists()) {
+                await updateDoc(layerRef, {
+                  strokes: mySlideLayer.strokes.slice(-400),
+                  updatedAt: serverTimestamp(),
+                });
+              } else {
+                await setDoc(layerRef, {
+                  id: targetUid,
+                  roomId: srcRoom.id,
+                  slideId: slide.id,
+                  authorId: targetUid,
+                  authorName: supervisorDisplayName.slice(0, 120),
+                  strokes: mySlideLayer.strokes.slice(-400),
+                  updatedAt: serverTimestamp(),
+                });
+              }
               migratedLayersCount++;
             }
 
@@ -1781,7 +2165,7 @@ export async function runFirebaseMigration(params: {
             onProgress({
               step: 'migrating_rooms',
               percent: calcPercent(),
-              message: `جاري نقل الشرائح والملفات (${srcRoom.id})...`,
+              message: `جاري نقل وتحديث الشرائح والسوابير (${srcRoom.id})...`,
               detail: slide.fileName || `شريحة ${slide.pageIndex}`,
             });
           }
@@ -1797,30 +2181,56 @@ export async function runFirebaseMigration(params: {
             });
           }
 
-          // Migrate blank-board explain layer & sharedBoard
+          // Blank-board explain layer & sharedBoard (updates strokes if already exists!)
           const myExplainLayer = roomBundle.explainLayers.find(
             (l) => allOldUids.includes(l.authorId) || l.authorId === targetUid
           );
           if (myExplainLayer && (myExplainLayer.strokes?.length ?? 0) > 0) {
-            await setDoc(doc(targetDb, 'rooms', srcRoom.id, 'explainLayers', targetUid), {
-              id: targetUid,
-              roomId: srcRoom.id,
-              authorId: targetUid,
-              authorName: supervisorDisplayName.slice(0, 120),
-              strokes: myExplainLayer.strokes.slice(-400),
-              updatedAt: serverTimestamp(),
-            });
+            const explainLayerRef = doc(
+              targetDb,
+              'rooms',
+              srcRoom.id,
+              'explainLayers',
+              targetUid
+            );
+            const existingExplainSnap = await getDoc(explainLayerRef);
+            if (existingExplainSnap.exists()) {
+              await updateDoc(explainLayerRef, {
+                strokes: myExplainLayer.strokes.slice(-400),
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              await setDoc(explainLayerRef, {
+                id: targetUid,
+                roomId: srcRoom.id,
+                authorId: targetUid,
+                authorName: supervisorDisplayName.slice(0, 120),
+                strokes: myExplainLayer.strokes.slice(-400),
+                updatedAt: serverTimestamp(),
+              });
+            }
             migratedLayersCount++;
           }
 
           if (roomBundle.sharedBoard && (roomBundle.sharedBoard.strokes?.length ?? 0) > 0) {
-            await setDoc(doc(targetDb, 'rooms', srcRoom.id, 'sharedBoard', 'live'), {
-              roomId: srcRoom.id,
-              strokes: roomBundle.sharedBoard.strokes.slice(-400),
-              updatedBy: targetUid,
-              updatedByName: supervisorDisplayName.slice(0, 120),
-              updatedAt: serverTimestamp(),
-            });
+            const sbRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedBoard', 'live');
+            const sbSnap = await getDoc(sbRef);
+            if (sbSnap.exists()) {
+              await updateDoc(sbRef, {
+                strokes: roomBundle.sharedBoard.strokes.slice(-400),
+                updatedBy: targetUid,
+                updatedByName: supervisorDisplayName.slice(0, 120),
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              await setDoc(sbRef, {
+                roomId: srcRoom.id,
+                strokes: roomBundle.sharedBoard.strokes.slice(-400),
+                updatedBy: targetUid,
+                updatedByName: supervisorDisplayName.slice(0, 120),
+                updatedAt: serverTimestamp(),
+              });
+            }
           }
 
           if (needsExplainForSlides && (srcRoom.mode || 'quiz') === 'quiz') {
@@ -1832,7 +2242,7 @@ export async function runFirebaseMigration(params: {
             });
           }
 
-          // Migrate ALL Room Questions (preserving choices, chart, figure, sourceQuizTitle!)
+          // Migrate & update Room Questions
           for (const q of roomBundle.questions) {
             const qRef = doc(targetDb, 'rooms', srcRoom.id, 'questions', q.id);
             const qSnap = await getDoc(qRef);
@@ -1887,6 +2297,32 @@ export async function runFirebaseMigration(params: {
                 });
               }
               migratedQuestionsCount++;
+            } else {
+              // Update older existing question state on target if source progressed further
+              const existingQ = qSnap.data() as Question;
+              if (existingQ.status === 'solving') {
+                if (q.status === 'correct') {
+                  await updateDoc(qRef, {
+                    status: 'correct',
+                    winnerId: q.winnerId || targetUid,
+                    winnerName: (q.winnerName || 'طالب').slice(0, 120),
+                    updatedAt: serverTimestamp(),
+                  });
+                } else if (q.status === 'unanswered') {
+                  await updateDoc(qRef, {
+                    status: 'unanswered',
+                    attemptsUsed: Math.min(2, Math.max(0, q.attemptsUsed || 0)),
+                    wrongStudentIds: (q.wrongStudentIds || []).slice(0, 2),
+                    updatedAt: serverTimestamp(),
+                  });
+                } else if (q.status === 'solving' && q.attemptsUsed === 1 && existingQ.attemptsUsed === 0) {
+                  await updateDoc(qRef, {
+                    attemptsUsed: 1,
+                    wrongStudentIds: (q.wrongStudentIds || []).slice(0, 1),
+                    updatedAt: serverTimestamp(),
+                  });
+                }
+              }
             }
             completedUnits++;
           }
@@ -1902,7 +2338,7 @@ export async function runFirebaseMigration(params: {
             });
           }
 
-          // Migrate Room Shared Quizzes (supervisor preserves room quiz bank)
+          // Migrate & update Room Shared Quizzes
           for (const sq of roomBundle.sharedQuizzes) {
             if (!sq?.id || !Array.isArray(sq.questions) || sq.questions.length === 0) {
               completedUnits++;
@@ -1910,8 +2346,8 @@ export async function runFirebaseMigration(params: {
             }
             const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
             const sqSnap = await getDoc(sqRef);
+            const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
             if (!sqSnap.exists()) {
-              const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
               await setDoc(sqRef, {
                 id: sq.id,
                 roomId: srcRoom.id,
@@ -1924,11 +2360,21 @@ export async function runFirebaseMigration(params: {
                 updatedAt: serverTimestamp(),
               });
               migratedSharedQuizzesCount++;
+            } else if ((sqSnap.data() as SharedQuiz).authorId === targetUid) {
+              await updateDoc(sqRef, {
+                authorName: (sq.authorName || supervisorDisplayName).slice(0, 120),
+                authorRole: 'supervisor',
+                title: (sq.title || 'نموذج مشترك').slice(0, 120),
+                questions: cleanedQs,
+                questionCount: cleanedQs.length,
+                updatedAt: serverTimestamp(),
+              });
+              migratedSharedQuizzesCount++;
             }
             completedUnits++;
           }
 
-          // Migrate Competitions + Competition Questions
+          // Migrate Competitions
           for (const comp of roomBundle.competitions) {
             const compRef = doc(targetDb, 'rooms', srcRoom.id, 'competitions', comp.id);
             const cSnap = await getDoc(compRef);
@@ -1936,7 +2382,7 @@ export async function runFirebaseMigration(params: {
               const competitorsList =
                 Array.isArray(comp.competitors) && comp.competitors.length > 0
                   ? comp.competitors.slice(0, 100)
-                  : [{ uid: targetUid, name: supervisorDisplayName.slice(0, 120) }];
+                  : [{ uid: targetUid, name: supervisorDisplayName.slice(0, 120), role: 'supervisor' }];
               const competitorIdsList =
                 Array.isArray(comp.competitorIds) && comp.competitorIds.length > 0
                   ? Array.from(new Set([targetUid, ...comp.competitorIds])).slice(0, 100)
@@ -2010,7 +2456,7 @@ export async function runFirebaseMigration(params: {
                       updatedAt: serverTimestamp(),
                     });
                   } catch {
-                    // Fallback gracefully if competitor check rejects historical owner mismatch
+                    // Ignore historical owner mismatch
                   }
                 }
 
@@ -2045,7 +2491,7 @@ export async function runFirebaseMigration(params: {
                     );
                     migratedBoardsCount++;
                   } catch {
-                    // Ignore competition board lock
+                    // Ignore board lock
                   }
                 }
               }
@@ -2087,7 +2533,7 @@ export async function runFirebaseMigration(params: {
         migratedRoomsCount++;
         if (isPrimary) roomCreatedAsSupervisor = true;
       } else {
-        // Student path: rejoin room if created by supervisor on targetDb + restore student's boards & layers
+        // Student path
         if (existingRoomSnap.exists()) {
           const targetRoomData = existingRoomSnap.data() as Room;
           if (targetRoomData.status !== 'finished') {
@@ -2109,7 +2555,6 @@ export async function runFirebaseMigration(params: {
               });
             }
 
-            // Restore student's boards across ALL solving questions
             for (const q of roomBundle.questions) {
               if (q.status !== 'solving') continue;
               const qBoards = roomBundle.boardsByQuestionId[q.id] ?? [];
@@ -2148,33 +2593,44 @@ export async function runFirebaseMigration(params: {
                   }
                 }
               } catch {
-                // Skip if board locked on target
+                // Skip if locked
               }
             }
 
-            // Restore student's sharedQuizzes authored by them
             for (const sq of roomBundle.sharedQuizzes) {
               if (sq.authorId !== source.oldUid && sq.authorId !== targetUid) continue;
               try {
                 const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
                 const sqSnap = await getDoc(sqRef);
-                if (!sqSnap.exists() && Array.isArray(sq.questions) && sq.questions.length > 0) {
+                if (Array.isArray(sq.questions) && sq.questions.length > 0) {
                   const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
-                  await setDoc(sqRef, {
-                    id: sq.id,
-                    roomId: srcRoom.id,
-                    authorId: targetUid,
-                    authorName: studentName.slice(0, 120),
-                    authorRole: 'student',
-                    title: (sq.title || 'نموذج').slice(0, 120),
-                    questions: cleanedQs,
-                    questionCount: cleanedQs.length,
-                    updatedAt: serverTimestamp(),
-                  });
-                  migratedSharedQuizzesCount++;
+                  if (!sqSnap.exists()) {
+                    await setDoc(sqRef, {
+                      id: sq.id,
+                      roomId: srcRoom.id,
+                      authorId: targetUid,
+                      authorName: studentName.slice(0, 120),
+                      authorRole: 'student',
+                      title: (sq.title || 'نموذج').slice(0, 120),
+                      questions: cleanedQs,
+                      questionCount: cleanedQs.length,
+                      updatedAt: serverTimestamp(),
+                    });
+                    migratedSharedQuizzesCount++;
+                  } else if ((sqSnap.data() as SharedQuiz).authorId === targetUid) {
+                    await updateDoc(sqRef, {
+                      authorName: studentName.slice(0, 120),
+                      authorRole: 'student',
+                      title: (sq.title || 'نموذج').slice(0, 120),
+                      questions: cleanedQs,
+                      questionCount: cleanedQs.length,
+                      updatedAt: serverTimestamp(),
+                    });
+                    migratedSharedQuizzesCount++;
+                  }
                 }
               } catch {
-                // Skip if unavailable
+                // Skip
               }
             }
           }
@@ -2186,11 +2642,11 @@ export async function runFirebaseMigration(params: {
       completedUnits++;
     }
 
-    // 3. Migrate ALL Saved Tests, MyQuizzes, QuizAttempts
+    // 3. Personal Collections (creates + updates older target docs!)
     onProgress({
       step: 'migrating_saved',
       percent: calcPercent(),
-      message: `جاري نقل الاختبارات المحفوظة (${source.savedTests.length}) واختباراتي (${source.myQuizzes.length}) والمحاولات (${source.quizAttempts.length})...`,
+      message: `جاري نقل وتحديث المحفوظات (${source.savedTests.length}) واختباراتي (${source.myQuizzes.length}) والمحاولات (${source.quizAttempts.length})...`,
     });
 
     const { migratedSavedTestsCount, migratedMyQuizzesCount, migratedAttemptsCount } =
@@ -2211,9 +2667,9 @@ export async function runFirebaseMigration(params: {
               : 'migrating_attempts';
           const msg =
             kind === 'saved'
-              ? 'جاري نقل أرشيف الاختبارات المحفوظة...'
+              ? 'جاري نقل وتحديث أرشيف الاختبارات المحفوظة...'
               : kind === 'quiz'
-              ? 'جاري نقل نماذج «اختباراتي» مع الأشكال والرسوم...'
+              ? 'جاري نقل وتحديث نماذج «اختباراتي»...'
               : 'جاري نقل سجل المحاولات والتقارير...';
           onProgress({
             step,
@@ -2224,20 +2680,27 @@ export async function runFirebaseMigration(params: {
         },
       });
 
-    // 4. Write Global Platform Pointer across ALL connected source DBs so EVERY user on EVERY old DB jumps to targetConfig!
+    // 4. Write platform/migration on target DB + old source DBs, then WAKE UP chosen untouched Backup DB!
     onProgress({
-      step: 'finalizing',
-      percent: 94,
-      message: 'جاري اعتماد القاعدة الجديدة لجميع المستخدمين على كل القواعد وتوحيد تسجيل الدخول...',
+      step: 'announcing_backup',
+      percent: 93,
+      message: backupEntry
+        ? `اكتمل نقل البيانات 100%! جاري تشغيل القاعدة الاحتياطية (${backupEntry.config.projectId}) لتجهيز وإعلان القاعدة الجديدة للجميع...`
+        : 'اكتمل نقل البيانات 100%! جاري اعتماد القاعدة الجديدة وتجهيز انتقال الجميع...',
+      detail: targetConfig.projectId,
     });
 
-    const priorChain = [activeFirebaseConfig, defaultFirebaseConfig, ...getPreviousFirebaseConfigs()]
+    const priorChain = [
+      activeFirebaseConfig,
+      defaultFirebaseConfig,
+      ...getPreviousFirebaseConfigs(),
+    ]
       .filter(
         (c, idx, arr) =>
           !isSameFirebaseTarget(c, targetConfig) &&
           arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
       )
-      .slice(0, 6)
+      .slice(0, 8)
       .map((c) => ({
         apiKey: c.apiKey,
         authDomain: c.authDomain,
@@ -2247,6 +2710,15 @@ export async function runFirebaseMigration(params: {
         ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
         ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
       }));
+
+    try {
+      sessionStorage.setItem(
+        'duoboard_self_migrated_target',
+        firebaseTargetKey(targetConfig)
+      );
+    } catch {
+      // Ignore sessionStorage
+    }
 
     const buildPointerPayload = (uidValue: string) => ({
       id: 'migration',
@@ -2263,88 +2735,19 @@ export async function runFirebaseMigration(params: {
         ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
         : {}),
       migratedBy: uidValue,
-      migratedByName: 'مشرف المنصة',
+      migratedByName: (resolvedQuadName || targetUser.displayName || 'مشرف المنصة').slice(0, 120),
       ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
       migrationEpoch: CURRENT_DB_EPOCH,
       previousConfigs: priorChain,
       updatedAt: serverTimestamp(),
     });
 
-    // Mark this tab as the initiator so it shows the 100% summary instead of mid-modal auto-reloading
-    try {
-      sessionStorage.setItem(
-        'duoboard_self_migrated_target',
-        firebaseTargetKey(targetConfig)
-      );
-    } catch {
-      // Ignore sessionStorage restrictions
-    }
-
-    let serverPointerUpdated = false;
-    try {
-      const idToken = await targetUser.getIdToken();
-      serverPointerUpdated = await publishServerPlatformPointer({
-        config: targetConfig,
-        idToken,
-        tokenProjectId: targetConfig.projectId,
-        tokenApiKey: targetConfig.apiKey,
-        migratedRoomId,
-        previousConfigs: priorChain as FirebaseAppConfig[],
-      });
-    } catch {
-      // Fallback gracefully on static hosts without backend server
-    }
-
     let platformPointerUpdated = false;
     try {
       await setDoc(doc(targetDb, 'platform', 'migration'), buildPointerPayload(targetUid));
       platformPointerUpdated = true;
     } catch {
-      // Non-fatal if target project uses older rules
-    }
-
-    // Mirror pool metadata onto targetDb & current local cache so all programmers stay synced on targetDb
-    try {
-      const cloudPool = await readCloudPoolDoc(sourceDb).catch(() => null);
-      const localPool = loadLocalServerlessPool();
-      const basePool = poolState || cloudPool || localPool || ensurePoolDefaults(null);
-      const dbsWithTarget = [...basePool.databases];
-      if (!dbsWithTarget.some((d) => isSameFirebaseTarget(d.config, targetConfig))) {
-        dbsWithTarget.push({
-          id: `db_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          order: dbsWithTarget.length + 1,
-          label: targetConfig.projectId,
-          config: targetConfig,
-          exhaustedAt: null,
-          exhaustedUntil: null,
-          addedByEmail: targetUser.email || undefined,
-          addedAt: Date.now(),
-        });
-      }
-      const syncedPool = ensurePoolDefaults({
-        ...basePool,
-        databases: dbsWithTarget,
-        revision: basePool.revision + 1,
-        updatedAt: Date.now(),
-      });
-      const matchedTarget = syncedPool.databases.find((d) =>
-        isSameFirebaseTarget(d.config, targetConfig)
-      );
-      if (matchedTarget) {
-        syncedPool.activeDatabaseId = matchedTarget.id;
-        syncedPool.allExhausted = false;
-        matchedTarget.exhaustedAt = null;
-        matchedTarget.exhaustedUntil = null;
-      }
-      saveLocalServerlessPool(syncedPool);
-      await writeFirestorePoolDoc(
-        targetDb,
-        syncedPool,
-        targetUid,
-        resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
-      ).catch(() => undefined);
-    } catch {
-      // Non-fatal pool mirror
+      // Non-fatal
     }
 
     for (const handle of sourceHandles) {
@@ -2356,19 +2759,121 @@ export async function runFirebaseMigration(params: {
         );
         platformPointerUpdated = true;
       } catch {
-        // Older project rules or quota limit on one DB — continue smoothly
+        // Continue
       }
     }
 
-    // 5. Verified Old Database Cleanup & Unbind Old Login Auth (ONLY after 100% target writes succeed!)
+    // Wake up the selected untouched Backup DB AFTER 100% of target writes succeed!
+    let announcedBackupProjectId: string | null = null;
+    let backupAnnouncementWritten = false;
+    let backupAuthPopupBlocked = false;
+
+    if (backupEntry) {
+      const announceRes = await announceViaBackupDatabase({
+        backupConfig: backupEntry.config,
+        targetConfig,
+        migratedRoomId,
+        updaterName: resolvedQuadName || targetUser.displayName || 'مشرف المنصة',
+        previousConfigs: priorChain as FirebaseAppConfig[],
+      });
+      backupAnnouncementWritten = announceRes.ok;
+      backupAuthPopupBlocked = announceRes.popupBlocked;
+      if (announceRes.ok) {
+        announcedBackupProjectId = backupEntry.config.projectId;
+      }
+    }
+
+    onProgress({
+      step: 'finalizing',
+      percent: 96,
+      message: 'جاري إرسال إشارة التحميل والانتقال لجميع اللاعبين والمشرفين...',
+      detail: announcedBackupProjectId
+        ? `عبر الاحتياطية: ${announcedBackupProjectId}`
+        : targetConfig.projectId,
+    });
+
+    // Notify backend server + SSE stream of 100% migration completion
+    let serverPointerUpdated = false;
+    try {
+      const idToken = await targetUser.getIdToken();
+      const serverRes = await callProgrammerEndpoint<{
+        ok: boolean;
+        state?: PlatformProgrammerState;
+        backupConfigs?: FirebaseAppConfig[];
+      }>('/api/programmer/migrate-complete', targetUser, resolvedQuadName || targetUser.displayName || '', {
+        targetConfig,
+        migratedRoomId,
+        backupDbId: backupEntry?.id || '',
+        backupProjectId: announcedBackupProjectId || backupEntry?.config.projectId || '',
+        previousConfigs: priorChain,
+        tokenProjectId: targetConfig.projectId,
+        tokenApiKey: targetConfig.apiKey,
+        tokenFirestoreDatabaseId: targetConfig.firestoreDatabaseId || '',
+      });
+      serverPointerUpdated = Boolean(serverRes?.ok);
+      if (serverRes?.state) {
+        saveLocalRegistryState(serverRes.state);
+        saveBackupFirebaseConfigs(serverRes.state.backupDatabases.map((b) => b.config));
+        if (isMasterProgrammerIdentity({ email: targetUser.email, fullNameQuad: resolvedQuadName })) {
+          await writeFirestoreRegistryDoc(
+            targetDb,
+            serverRes.state,
+            targetUid,
+            resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+          ).catch(() => undefined);
+        }
+      }
+      void idToken;
+    } catch {
+      // Static host fallback: mirror local registry onto targetDb
+      try {
+        const localReg = loadLocalRegistryState();
+        if (localReg) {
+          const matchedPlayer = localReg.playerDatabases.find((d) =>
+            isSameFirebaseTarget(d.config, targetConfig)
+          );
+          const updatedReg: PlatformProgrammerState = {
+            ...localReg,
+            revision: localReg.revision + 1,
+            activeTargetConfig: targetConfig,
+            activePlayerDatabaseId: matchedPlayer?.id || localReg.activePlayerDatabaseId,
+            migratedRoomId: migratedRoomId || null,
+            lastBackupAnnouncement: backupEntry
+              ? {
+                  backupDbId: backupEntry.id,
+                  backupProjectId: backupEntry.config.projectId,
+                  targetProjectId: targetConfig.projectId,
+                  targetConfig,
+                  migratedRoomId,
+                  announcedAt: Date.now(),
+                  announcedByEmail: targetUser.email || undefined,
+                }
+              : localReg.lastBackupAnnouncement,
+            updatedByEmail: targetUser.email || undefined,
+            updatedAt: Date.now(),
+          };
+          saveLocalRegistryState(updatedReg);
+          await writeFirestoreRegistryDoc(
+            targetDb,
+            updatedReg,
+            targetUid,
+            resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+          ).catch(() => undefined);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    // 5. Optional cleanup & old auth signout (NEVER touches Backup DBs!)
     let deletedOldDocsCount = 0;
     let oldAuthSignedOut = false;
 
     if (cleanupOldDatabase) {
       onProgress({
         step: 'cleaning_old',
-        percent: 97,
-        message: 'جاري حذف البيانات المنقولة من القواعد القديمة وفك ربط تسجيل الدخول بها...',
+        percent: 98,
+        message: 'جاري تنظيف السجلات المنقولة من القاعدة السابقة وفصل الجلسة القديمة...',
       });
 
       for (const handle of sourceHandles) {
@@ -2391,7 +2896,7 @@ export async function runFirebaseMigration(params: {
           await signOut(handle.auth);
           oldAuthSignedOut = true;
         } catch {
-          // Ignore signOut errors on detached DB
+          // Ignore signOut errors
         }
       }
     } else {
@@ -2406,7 +2911,6 @@ export async function runFirebaseMigration(params: {
       }
     }
 
-    // Activate target database locally and mark all merged source DBs as synced for targetUid
     activateCustomFirebaseConfig(targetConfig, migratedRoomId, priorChain as FirebaseAppConfig[]);
     for (const handle of sourceHandles) {
       markSourceKeySynced(targetUid, firebaseTargetKey(handle.config));
@@ -2415,7 +2919,7 @@ export async function runFirebaseMigration(params: {
           localStorage.removeItem(`duoboard_active_room_${handle.uid}`);
         }
       } catch {
-        // Ignore storage errors
+        // Ignore storage
       }
     }
 
@@ -2423,7 +2927,7 @@ export async function runFirebaseMigration(params: {
       try {
         localStorage.setItem(`duoboard_active_room_${targetUid}`, migratedRoomId);
       } catch {
-        // Ignore storage errors
+        // Ignore storage
       }
     }
 
@@ -2432,7 +2936,9 @@ export async function runFirebaseMigration(params: {
     onProgress({
       step: 'done',
       percent: 100,
-      message: 'اكتمل النقل 100% وتم ربط القاعدة الجديدة بتسجيل الدخول وكافة البيانات!',
+      message: announcedBackupProjectId
+        ? `اكتمل النقل 100% وأعلنت القاعدة الاحتياطية (${announcedBackupProjectId}) للجميع للانتقال وتسجيل الدخول!`
+        : 'اكتمل النقل 100% وتحديث كافة البيانات وتجهيز تسجيل الدخول على القاعدة الجديدة!',
     });
 
     return {
@@ -2458,17 +2964,15 @@ export async function runFirebaseMigration(params: {
       oldAuthSignedOut,
       platformPointerUpdated,
       serverPointerUpdated,
+      announcedBackupProjectId,
+      backupAnnouncementWritten,
+      backupAuthPopupBlocked,
     };
   } catch (err) {
     throw classifyMigrationError(err, targetConfig.projectId);
   }
 }
 
-/**
- * Automatically syncs a user's personal account data (profile, myQuizzes, savedTests, quizAttempts)
- * from any previous Firebase databases in the migration chain (or IndexedDB snapshots) onto the
- * newly activated database when that user arrives via auto-switch or migration link.
- */
 export async function syncPersonalAccountFromPreviousDbs(params: {
   targetUser: User;
   interactiveAuthIfNeeded?: boolean;
@@ -2494,8 +2998,7 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
   let totalSyncedItems = 0;
   let needsInteractiveSignIn = false;
 
-  for (let i = 0; i < pendingConfigs.length; i++) {
-    const srcCfg = pendingConfigs[i];
+  for (const srcCfg of pendingConfigs) {
     const srcKey = firebaseTargetKey(srcCfg);
     try {
       const srcApp = getOrInitFirebaseApp(srcCfg);
@@ -2518,7 +3021,7 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
       onProgress?.({
         step: 'collecting',
         percent: 25,
-        message: 'جاري استيراد بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة...',
+        message: 'جاري استيراد بياناتك واختباراتك إلى القاعدة الجديدة...',
         detail: srcCfg.projectId,
       });
 
@@ -2551,8 +3054,12 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         counts.migratedMyQuizzesCount +
         counts.migratedAttemptsCount;
 
-      // Also clean up migrated personal docs from the old DB and disconnect old Auth
-      if (counts.migratedSavedTestsCount > 0 || counts.migratedMyQuizzesCount > 0 || counts.migratedAttemptsCount > 0 || srcData.profile) {
+      if (
+        counts.migratedSavedTestsCount > 0 ||
+        counts.migratedMyQuizzesCount > 0 ||
+        counts.migratedAttemptsCount > 0 ||
+        srcData.profile
+      ) {
         await cleanupMigratedPersonalDocsOnDb({
           srcDb,
           oldUid: srcUser.uid,
@@ -2566,16 +3073,15 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
       try {
         await signOut(srcAuth);
       } catch {
-        // Ignore signOut errors on detached old DB
+        // Ignore
       }
 
       markSourceKeySynced(targetUid, srcKey);
     } catch {
-      // Could be quota exceeded on old DB; try fallback from local IndexedDB below
+      // Fallback below
     }
   }
 
-  // Fallback: always push any local IndexedDB personal snapshots belonging to user onto the active DB
   if (totalSyncedItems === 0) {
     try {
       const cachedSaved = await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
@@ -2607,10 +3113,6 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
   };
 }
 
-/**
- * Restores a supervisor's active room & cached questions/slides from IndexedDB
- * onto the newly rotated database when auto-failover happens mid-session.
- */
 export async function restoreActiveSupervisorRoomFromSnapshot(params: {
   targetUser: User;
   resolvedQuadName: string;
@@ -2710,8 +3212,9 @@ export async function restoreActiveSupervisorRoomFromSnapshot(params: {
   }
 }
 
-const STATIC_POOL_STORAGE_KEY = 'duoboard_static_programmer_pool_v1';
-const STATIC_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/* ===================== Split Registry State (Player DBs + Untouched Backup DBs) ===================== */
+
+const DUOBOARD_LOCAL_REGISTRY_KEY = 'duoboard_clean_registry_v3';
 
 class ApiUnavailableError extends Error {
   constructor(message = 'Backend server unavailable') {
@@ -2735,7 +3238,7 @@ async function sha256Hex(value: string): Promise<string> {
         .join('');
     }
   } catch {
-    // Fallback if subtle crypto unavailable
+    // Fallback
   }
   return '';
 }
@@ -2748,92 +3251,93 @@ function maskEmailAddress(email: string): string {
   return `${visible}***@${domain}`;
 }
 
-function loadLocalServerlessPool(): PlatformProgrammerState | null {
-  try {
-    const raw = localStorage.getItem(STATIC_POOL_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<PlatformProgrammerState>;
-    if (!parsed || !Array.isArray(parsed.databases) || parsed.databases.length === 0) {
-      return null;
-    }
-    return parsed as PlatformProgrammerState;
-  } catch {
-    return null;
-  }
+function renumberEntries(list: RegisteredDatabaseEntry[]): RegisteredDatabaseEntry[] {
+  return list.map((d, idx) => ({ ...d, order: idx + 1 }));
 }
 
-function saveLocalServerlessPool(state: PlatformProgrammerState): void {
-  try {
-    localStorage.setItem(STATIC_POOL_STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-function ensurePoolDefaults(raw: Partial<PlatformProgrammerState> | null): PlatformProgrammerState {
+function ensureRegistryDefaults(
+  raw: Partial<PlatformProgrammerState> | null
+): PlatformProgrammerState {
   const now = Date.now();
-  const dbs: PoolDatabaseEntry[] = [];
-  const rawDbs = Array.isArray(raw?.databases) ? raw!.databases : [];
 
-  for (const item of rawDbs) {
-    if (!item || typeof item !== 'object') continue;
-    const cfg = sanitizeFirebaseConfig(item.config);
-    if (!cfg) continue;
-    if (dbs.some((x) => isSameFirebaseTarget(x.config, cfg))) continue;
-    const exhaustedUntil =
-      typeof item.exhaustedUntil === 'number' && item.exhaustedUntil > now
-        ? item.exhaustedUntil
-        : null;
-    const exhaustedAt = exhaustedUntil ? item.exhaustedAt ?? now : null;
-    dbs.push({
-      id: typeof item.id === 'string' && item.id ? item.id : `db_${dbs.length + 1}`,
-      order: dbs.length + 1,
-      label:
-        typeof item.label === 'string' && item.label.trim()
-          ? item.label.trim().slice(0, 80)
-          : isSameFirebaseTarget(cfg, defaultFirebaseConfig)
-          ? 'القاعدة الأساسية (#1)'
-          : cfg.projectId,
-      config: cfg,
-      exhaustedAt,
-      exhaustedUntil,
-      addedByEmail: typeof item.addedByEmail === 'string' ? item.addedByEmail : undefined,
-      addedAt: typeof item.addedAt === 'number' ? item.addedAt : now,
-    });
-  }
-
-  if (!dbs.some((d) => isSameFirebaseTarget(d.config, defaultFirebaseConfig))) {
-    dbs.unshift({
-      id: 'primary_default',
-      order: 1,
-      label: 'القاعدة الأساسية (#1)',
-      config: defaultFirebaseConfig,
-      exhaustedAt: null,
-      exhaustedUntil: null,
-      addedAt: now,
-    });
-  }
-
-  // Ensure any previously visited / active configs are also present in the pool
-  for (const extraCfg of [activeFirebaseConfig, ...getPreviousFirebaseConfigs()]) {
-    if (extraCfg && !dbs.some((d) => isSameFirebaseTarget(d.config, extraCfg))) {
-      dbs.push({
-        id: `db_${dbs.length + 1}_${extraCfg.projectId}`,
-        order: dbs.length + 1,
-        label: extraCfg.projectId,
-        config: extraCfg,
-        exhaustedAt: null,
-        exhaustedUntil: null,
-        addedAt: now,
+  const normalizeEntries = (
+    items: unknown,
+    role: DatabaseRole
+  ): RegisteredDatabaseEntry[] => {
+    if (!Array.isArray(items)) return [];
+    const out: RegisteredDatabaseEntry[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const d = item as Record<string, unknown>;
+      const cfg = sanitizeFirebaseConfig(d.config);
+      if (!cfg) continue;
+      if (out.some((x) => isSameFirebaseTarget(x.config, cfg))) continue;
+      const vf =
+        d.verification && typeof d.verification === 'object'
+          ? (d.verification as Record<string, unknown>)
+          : {};
+      out.push({
+        id:
+          typeof d.id === 'string' && d.id
+            ? d.id
+            : `${role}_${out.length + 1}_${cfg.projectId}`,
+        order: typeof d.order === 'number' ? d.order : out.length + 1,
+        role,
+        label:
+          typeof d.label === 'string' && d.label.trim()
+            ? d.label.trim().slice(0, 80)
+            : cfg.projectId,
+        config: cfg,
+        verification: {
+          firestoreReady: Boolean(vf.firestoreReady ?? true),
+          googleAuthReady: Boolean(vf.googleAuthReady ?? true),
+          rulesReady: Boolean(vf.rulesReady ?? true),
+          verifiedAt: typeof vf.verifiedAt === 'number' ? vf.verifiedAt : now,
+          verifiedByEmail:
+            typeof vf.verifiedByEmail === 'string' ? vf.verifiedByEmail : undefined,
+        },
+        lastUsedAt: typeof d.lastUsedAt === 'number' ? d.lastUsedAt : null,
+        lastAnnouncedToProjectId:
+          typeof d.lastAnnouncedToProjectId === 'string'
+            ? d.lastAnnouncedToProjectId
+            : null,
+        addedByEmail: typeof d.addedByEmail === 'string' ? d.addedByEmail : undefined,
+        addedAt: typeof d.addedAt === 'number' ? d.addedAt : now,
       });
     }
-  }
+    return renumberEntries(out);
+  };
 
-  const renumbered = dbs.map((d, idx) => ({ ...d, order: idx + 1 }));
-  const matchedActive =
-    renumbered.find((d) => d.id === raw?.activeDatabaseId) ||
-    renumbered.find((d) => isSameFirebaseTarget(d.config, activeFirebaseConfig)) ||
-    renumbered[0];
+  const playerDatabases = normalizeEntries(raw?.playerDatabases, 'player');
+  const backupDatabases = renumberEntries(
+    normalizeEntries(raw?.backupDatabases, 'backup').filter(
+      (b) => !playerDatabases.some((p) => isSameFirebaseTarget(p.config, b.config))
+    )
+  );
+
+  const activeTargetConfig =
+    sanitizeFirebaseConfig(raw?.activeTargetConfig) || activeFirebaseConfig;
+  const activePlayerMatch = playerDatabases.find((p) =>
+    isSameFirebaseTarget(p.config, activeTargetConfig)
+  );
+
+  let lastBackupAnnouncement: BackupAnnouncementInfo | null = null;
+  if (raw?.lastBackupAnnouncement && typeof raw.lastBackupAnnouncement === 'object') {
+    const a = raw.lastBackupAnnouncement;
+    const tCfg = sanitizeFirebaseConfig(a.targetConfig);
+    if (tCfg && typeof a.backupProjectId === 'string') {
+      lastBackupAnnouncement = {
+        backupDbId: typeof a.backupDbId === 'string' ? a.backupDbId : '',
+        backupProjectId: a.backupProjectId,
+        targetProjectId: tCfg.projectId,
+        targetConfig: tCfg,
+        migratedRoomId: typeof a.migratedRoomId === 'string' ? a.migratedRoomId : null,
+        announcedAt: typeof a.announcedAt === 'number' ? a.announcedAt : now,
+        announcedByEmail:
+          typeof a.announcedByEmail === 'string' ? a.announcedByEmail : undefined,
+      };
+    }
+  }
 
   const rawProgs = Array.isArray(raw?.programmers) ? raw!.programmers : [];
   const programmers: StoredProgrammerWithHash[] = [];
@@ -2842,9 +3346,13 @@ function ensurePoolDefaults(raw: Partial<PlatformProgrammerState> | null): Platf
     programmers.push({
       id: typeof p.id === 'string' && p.id ? p.id : `prog_${programmers.length + 1}`,
       fullNameQuad: typeof p.fullNameQuad === 'string' ? p.fullNameQuad.trim() : '',
-      ...(typeof p.email === 'string' && p.email.trim() ? { email: p.email.trim().toLowerCase() } : {}),
+      ...(typeof p.email === 'string' && p.email.trim()
+        ? { email: p.email.trim().toLowerCase() }
+        : {}),
       ...(typeof p.emailHash === 'string' && p.emailHash ? { emailHash: p.emailHash } : {}),
-      ...(typeof p.emailMasked === 'string' && p.emailMasked ? { emailMasked: p.emailMasked } : {}),
+      ...(typeof p.emailMasked === 'string' && p.emailMasked
+        ? { emailMasked: p.emailMasked }
+        : {}),
       isMaster: Boolean(p.isMaster),
       promotedBy: typeof p.promotedBy === 'string' ? p.promotedBy : undefined,
       promotedAt: typeof p.promotedAt === 'number' ? p.promotedAt : now,
@@ -2864,45 +3372,85 @@ function ensurePoolDefaults(raw: Partial<PlatformProgrammerState> | null): Platf
     });
   }
 
-  const allExhausted = renumbered.every((d) => d.exhaustedAt !== null);
-
   return {
     revision: typeof raw?.revision === 'number' && raw.revision >= 1 ? raw.revision : 1,
-    databases: renumbered,
-    activeDatabaseId: matchedActive.id,
-    allExhausted: Boolean(raw?.allExhausted) && allExhausted,
+    playerDatabases,
+    backupDatabases,
+    activeTargetConfig,
+    activePlayerDatabaseId: activePlayerMatch ? activePlayerMatch.id : null,
+    lastBackupAnnouncement,
     programmers,
+    migratedRoomId: typeof raw?.migratedRoomId === 'string' ? raw.migratedRoomId : null,
     updatedByEmail: typeof raw?.updatedByEmail === 'string' ? raw.updatedByEmail : undefined,
     updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : now,
   };
 }
 
-async function writeFirestorePoolDoc(
+function loadLocalRegistryState(): PlatformProgrammerState | null {
+  try {
+    const raw = localStorage.getItem(DUOBOARD_LOCAL_REGISTRY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PlatformProgrammerState>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return ensureRegistryDefaults(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function saveLocalRegistryState(state: PlatformProgrammerState): void {
+  try {
+    localStorage.setItem(DUOBOARD_LOCAL_REGISTRY_KEY, JSON.stringify(state));
+    saveBackupFirebaseConfigs(state.backupDatabases.map((b) => b.config));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function cleanConfigObject(cfg: FirebaseAppConfig): Record<string, unknown> {
+  return {
+    apiKey: cfg.apiKey,
+    authDomain: cfg.authDomain,
+    projectId: cfg.projectId,
+    appId: cfg.appId,
+    ...(cfg.storageBucket ? { storageBucket: cfg.storageBucket } : {}),
+    ...(cfg.messagingSenderId ? { messagingSenderId: cfg.messagingSenderId } : {}),
+    ...(cfg.measurementId ? { measurementId: cfg.measurementId } : {}),
+    ...(cfg.firestoreDatabaseId ? { firestoreDatabaseId: cfg.firestoreDatabaseId } : {}),
+  };
+}
+
+function cleanEntryObject(d: RegisteredDatabaseEntry): Record<string, unknown> {
+  return {
+    id: d.id,
+    order: d.order,
+    role: d.role,
+    label: (d.label || d.config.projectId).slice(0, 80),
+    config: cleanConfigObject(d.config as FirebaseAppConfig),
+    verification: {
+      firestoreReady: Boolean(d.verification?.firestoreReady ?? true),
+      googleAuthReady: Boolean(d.verification?.googleAuthReady ?? true),
+      rulesReady: Boolean(d.verification?.rulesReady ?? true),
+      verifiedAt: d.verification?.verifiedAt || Date.now(),
+      ...(d.verification?.verifiedByEmail
+        ? { verifiedByEmail: d.verification.verifiedByEmail }
+        : {}),
+    },
+    ...(typeof d.lastUsedAt === 'number' ? { lastUsedAt: d.lastUsedAt } : {}),
+    ...(d.lastAnnouncedToProjectId
+      ? { lastAnnouncedToProjectId: d.lastAnnouncedToProjectId }
+      : {}),
+    addedAt: d.addedAt || Date.now(),
+  };
+}
+
+async function writeFirestoreRegistryDoc(
   targetDb: Firestore,
   state: PlatformProgrammerState,
   uid: string,
   updaterName: string
 ): Promise<boolean> {
   try {
-    const cleanDbs = state.databases.slice(0, 25).map((d) => ({
-      id: d.id,
-      order: d.order,
-      label: (d.label || d.config.projectId).slice(0, 80),
-      config: {
-        apiKey: d.config.apiKey,
-        authDomain: d.config.authDomain,
-        projectId: d.config.projectId,
-        appId: d.config.appId,
-        ...(d.config.storageBucket ? { storageBucket: d.config.storageBucket } : {}),
-        ...(d.config.messagingSenderId ? { messagingSenderId: d.config.messagingSenderId } : {}),
-        ...(d.config.measurementId ? { measurementId: d.config.measurementId } : {}),
-        ...(d.config.firestoreDatabaseId
-          ? { firestoreDatabaseId: d.config.firestoreDatabaseId }
-          : {}),
-      },
-      addedAt: d.addedAt || Date.now(),
-    }));
-
     const cleanProgrammers = await Promise.all(
       (state.programmers as StoredProgrammerWithHash[]).slice(0, 25).map(async (p) => {
         const emailHash = p.emailHash || (p.email ? await sha256Hex(p.email) : '');
@@ -2918,107 +3466,51 @@ async function writeFirestorePoolDoc(
       })
     );
 
-    const exhaustedDatabaseIds = state.databases
-      .filter((d) => d.exhaustedAt !== null)
-      .map((d) => d.id)
-      .slice(0, 25);
-
-    await setDoc(doc(targetDb, 'platform', 'pool'), {
-      id: 'pool',
+    const payload: Record<string, unknown> = {
+      id: 'registry',
       revision: Math.min(1000000, Math.max(1, state.revision || 1)),
-      activeDatabaseId: state.activeDatabaseId,
-      allExhausted: Boolean(state.allExhausted),
-      databases: cleanDbs,
-      exhaustedDatabaseIds,
+      activePlayerDatabaseId: (state.activePlayerDatabaseId || '').slice(0, 128),
+      activeTargetConfig: cleanConfigObject(state.activeTargetConfig as FirebaseAppConfig),
+      playerDatabases: state.playerDatabases.slice(0, 25).map(cleanEntryObject),
+      backupDatabases: state.backupDatabases.slice(0, 25).map(cleanEntryObject),
       programmers: cleanProgrammers,
       updatedBy: uid,
       updatedByName: (updaterName || 'مبرمج المنصة').slice(0, 120),
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    if (state.lastBackupAnnouncement) {
+      payload.lastBackupAnnouncement = {
+        backupDbId: state.lastBackupAnnouncement.backupDbId,
+        backupProjectId: state.lastBackupAnnouncement.backupProjectId,
+        targetProjectId: state.lastBackupAnnouncement.targetProjectId,
+        targetConfig: cleanConfigObject(
+          state.lastBackupAnnouncement.targetConfig as FirebaseAppConfig
+        ),
+        ...(state.lastBackupAnnouncement.migratedRoomId
+          ? { migratedRoomId: state.lastBackupAnnouncement.migratedRoomId }
+          : {}),
+        announcedAt: state.lastBackupAnnouncement.announcedAt,
+      };
+    }
+
+    await setDoc(doc(targetDb, 'platform', 'registry'), payload);
     return true;
   } catch {
     return false;
   }
 }
 
-async function writeFirestoreMigrationPointerDoc(
-  targetDb: Firestore,
-  targetConfig: FirebaseAppConfig,
-  poolDbs: PoolDatabaseEntry[],
-  uid: string,
-  updaterName: string,
-  migratedRoomId?: string | null
-): Promise<boolean> {
+export async function readCloudRegistryDoc(
+  targetDb: Firestore = sourceDb
+): Promise<PlatformProgrammerState | null> {
   try {
-    const priorChain = [
-      ...poolDbs.map((d) => d.config as FirebaseAppConfig),
-      defaultFirebaseConfig,
-      activeFirebaseConfig,
-      ...getPreviousFirebaseConfigs(),
-    ]
-      .filter(
-        (c, idx, arr) =>
-          !isSameFirebaseTarget(c, targetConfig) &&
-          arr.findIndex((x) => isSameFirebaseTarget(x, c)) === idx
-      )
-      .slice(0, 10)
-      .map((c) => ({
-        apiKey: c.apiKey,
-        authDomain: c.authDomain,
-        projectId: c.projectId,
-        appId: c.appId,
-        ...(c.storageBucket ? { storageBucket: c.storageBucket } : {}),
-        ...(c.messagingSenderId ? { messagingSenderId: c.messagingSenderId } : {}),
-        ...(c.firestoreDatabaseId ? { firestoreDatabaseId: c.firestoreDatabaseId } : {}),
-      }));
-
-    await setDoc(doc(targetDb, 'platform', 'migration'), {
-      id: 'migration',
-      projectId: targetConfig.projectId,
-      apiKey: targetConfig.apiKey,
-      authDomain: targetConfig.authDomain,
-      appId: targetConfig.appId,
-      ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
-      ...(targetConfig.messagingSenderId
-        ? { messagingSenderId: targetConfig.messagingSenderId }
-        : {}),
-      ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
-      ...(targetConfig.firestoreDatabaseId
-        ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
-        : {}),
-      migratedBy: uid,
-      migratedByName: (updaterName || 'مبرمج المنصة').slice(0, 120),
-      ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
-      migrationEpoch: CURRENT_DB_EPOCH,
-      previousConfigs: priorChain,
-      updatedAt: serverTimestamp(),
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function readCloudPoolDoc(targetDb: Firestore = sourceDb): Promise<PlatformProgrammerState | null> {
-  try {
-    const snap = await getDoc(doc(targetDb, 'platform', 'pool'));
+    const snap = await getDoc(doc(targetDb, 'platform', 'registry'));
     if (!snap.exists()) return null;
     const raw = snap.data() as Record<string, unknown>;
-    const exhaustedIds = Array.isArray(raw.exhaustedDatabaseIds)
-      ? (raw.exhaustedDatabaseIds as string[])
-      : [];
-    const rawDbs = Array.isArray(raw.databases) ? (raw.databases as PoolDatabaseEntry[]) : [];
-    const hydratedDbs = rawDbs.map((d) => ({
-      ...d,
-      exhaustedAt: exhaustedIds.includes(d.id) ? Date.now() : null,
-      exhaustedUntil: exhaustedIds.includes(d.id)
-        ? Date.now() + STATIC_QUOTA_COOLDOWN_MS
-        : null,
-    }));
     const rawProgs = Array.isArray(raw.programmers)
       ? (raw.programmers as StoredProgrammerWithHash[])
       : [];
-
     const hydratedProgs = rawProgs.map((p) => ({
       ...p,
       email:
@@ -3028,11 +3520,20 @@ export async function readCloudPoolDoc(targetDb: Firestore = sourceDb): Promise<
           : p.emailMasked),
     }));
 
-    return ensurePoolDefaults({
+    return ensureRegistryDefaults({
       revision: typeof raw.revision === 'number' ? raw.revision : 1,
-      databases: hydratedDbs,
-      activeDatabaseId: typeof raw.activeDatabaseId === 'string' ? raw.activeDatabaseId : undefined,
-      allExhausted: Boolean(raw.allExhausted),
+      playerDatabases: Array.isArray(raw.playerDatabases)
+        ? (raw.playerDatabases as RegisteredDatabaseEntry[])
+        : [],
+      backupDatabases: Array.isArray(raw.backupDatabases)
+        ? (raw.backupDatabases as RegisteredDatabaseEntry[])
+        : [],
+      activeTargetConfig: raw.activeTargetConfig as FirebaseAppConfig,
+      activePlayerDatabaseId:
+        typeof raw.activePlayerDatabaseId === 'string' && raw.activePlayerDatabaseId
+          ? raw.activePlayerDatabaseId
+          : null,
+      lastBackupAnnouncement: raw.lastBackupAnnouncement as BackupAnnouncementInfo | null,
       programmers: hydratedProgs,
       updatedAt: getTimestampMillis(raw.updatedAt) || Date.now(),
     });
@@ -3041,9 +3542,9 @@ export async function readCloudPoolDoc(targetDb: Firestore = sourceDb): Promise<
   }
 }
 
-async function loadServerlessPoolState(): Promise<PlatformProgrammerState> {
-  const local = loadLocalServerlessPool();
-  const cloud = await readCloudPoolDoc(sourceDb);
+async function loadServerlessRegistryState(): Promise<PlatformProgrammerState> {
+  const local = loadLocalRegistryState();
+  const cloud = await readCloudRegistryDoc(sourceDb);
   const rest = await resolveLatestFirestoreMigrationRest().catch(() => null);
 
   let base: PlatformProgrammerState;
@@ -3052,38 +3553,19 @@ async function loadServerlessPoolState(): Promise<PlatformProgrammerState> {
   } else if (local) {
     base = local;
   } else {
-    base = ensurePoolDefaults(null);
+    base = ensureRegistryDefaults(null);
   }
 
-  if (rest) {
-    const extraCfgs = [rest.config, ...rest.previousConfigs];
-    const dbs = [...base.databases];
-    for (const c of extraCfgs) {
-      if (!dbs.some((d) => isSameFirebaseTarget(d.config, c))) {
-        dbs.push({
-          id: `db_${dbs.length + 1}_${c.projectId}`,
-          order: dbs.length + 1,
-          label: isSameFirebaseTarget(c, defaultFirebaseConfig)
-            ? 'القاعدة الأساسية (#1)'
-            : c.projectId,
-          config: c,
-          exhaustedAt: null,
-          exhaustedUntil: null,
-          addedAt: Date.now(),
-        });
-      }
-    }
-    const activeEntry = dbs.find((d) => isSameFirebaseTarget(d.config, rest.config));
-    base = ensurePoolDefaults({
+  if (rest && !isSameFirebaseTarget(rest.config, base.activeTargetConfig)) {
+    base = ensureRegistryDefaults({
       ...base,
-      databases: dbs,
-      activeDatabaseId: activeEntry ? activeEntry.id : base.activeDatabaseId,
+      activeTargetConfig: rest.config,
     });
   } else {
-    base = ensurePoolDefaults(base);
+    base = ensureRegistryDefaults(base);
   }
 
-  saveLocalServerlessPool(base);
+  saveLocalRegistryState(base);
   return base;
 }
 
@@ -3107,128 +3589,6 @@ async function isIdentityProgrammerServerless(
   return { isProgrammer: matched, isMaster: false };
 }
 
-function buildPointerFromEntry(
-  entry: PoolDatabaseEntry,
-  state: PlatformProgrammerState,
-  migratedRoomId?: string | null
-): ServerPlatformPointer {
-  return {
-    id: 'migration',
-    config: entry.config as FirebaseAppConfig,
-    resetToDefault: isSameFirebaseTarget(entry.config, defaultFirebaseConfig),
-    migratedRoomId: migratedRoomId || null,
-    migrationEpoch: CURRENT_DB_EPOCH,
-    previousConfigs: state.databases
-      .filter((d) => d.id !== entry.id)
-      .map((d) => d.config as FirebaseAppConfig)
-      .slice(0, 10),
-    activeDatabaseId: entry.id,
-    activeOrder: entry.order,
-    totalDatabases: state.databases.length,
-    allExhausted: state.allExhausted,
-    revision: state.revision,
-    updatedAt: state.updatedAt,
-  };
-}
-
-export async function triggerAutomaticQuotaFailover(params: {
-  failedProjectId: string;
-  failedFirestoreDatabaseId?: string;
-}): Promise<{
-  rotated: boolean;
-  allExhausted: boolean;
-  pointer?: ServerPlatformPointer | null;
-} | null> {
-  try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch('/api/platform-db/failover', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        failedProjectId: params.failedProjectId,
-        failedFirestoreDatabaseId: params.failedFirestoreDatabaseId || '',
-      }),
-      signal: controller.signal,
-    });
-    window.clearTimeout(timer);
-    const contentType = resp.headers.get('content-type') || '';
-    if (resp.ok && contentType.includes('application/json')) {
-      return (await resp.json()) as {
-        rotated: boolean;
-        allExhausted: boolean;
-        pointer?: ServerPlatformPointer | null;
-      };
-    }
-  } catch {
-    // Static host (GitHub Pages / Netlify) — run serverless circular failover below
-  }
-
-  // Serverless circular failover across pool
-  try {
-    const state = await loadServerlessPoolState();
-    const now = Date.now();
-    const currentIdx = Math.max(
-      0,
-      state.databases.findIndex((d) => d.id === state.activeDatabaseId)
-    );
-    const currentEntry = state.databases[currentIdx];
-    if (!currentEntry) return null;
-
-    currentEntry.exhaustedAt = now;
-    currentEntry.exhaustedUntil = now + STATIC_QUOTA_COOLDOWN_MS;
-
-    const total = state.databases.length;
-    let nextEntry: PoolDatabaseEntry | null = null;
-    for (let offset = 1; offset < total; offset++) {
-      const candidate = state.databases[(currentIdx + offset) % total];
-      if (candidate.exhaustedAt === null) {
-        nextEntry = candidate;
-        break;
-      }
-    }
-
-    if (nextEntry) {
-      state.activeDatabaseId = nextEntry.id;
-      state.allExhausted = false;
-    } else {
-      state.allExhausted = true;
-    }
-    state.revision += 1;
-    state.updatedAt = now;
-    saveLocalServerlessPool(state);
-
-    const uid = sourceAuth.currentUser?.uid;
-    if (uid) {
-      await writeFirestorePoolDoc(
-        sourceDb,
-        state,
-        uid,
-        sourceAuth.currentUser?.displayName || 'تبديل تلقائي'
-      ).catch(() => undefined);
-      if (nextEntry) {
-        await writeFirestoreMigrationPointerDoc(
-          sourceDb,
-          nextEntry.config as FirebaseAppConfig,
-          state.databases,
-          uid,
-          sourceAuth.currentUser?.displayName || 'تبديل تلقائي'
-        ).catch(() => undefined);
-      }
-    }
-
-    const active =
-      state.databases.find((d) => d.id === state.activeDatabaseId) || state.databases[0];
-    return {
-      rotated: Boolean(nextEntry),
-      allExhausted: state.allExhausted,
-      pointer: active ? buildPointerFromEntry(active, state) : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function callProgrammerEndpoint<T>(
   endpoint: string,
   user: User,
@@ -3245,11 +3605,11 @@ async function callProgrammerEndpoint<T>(
         'X-DuoBoard-Name': encodeURIComponent(fullNameQuad || ''),
       },
       body: JSON.stringify({
-        ...payload,
-        fullNameQuad,
         tokenProjectId: activeFirebaseConfig.projectId,
         tokenApiKey: activeFirebaseConfig.apiKey,
         tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
+        ...payload,
+        fullNameQuad,
       }),
     });
   };
@@ -3306,12 +3666,13 @@ export async function fetchProgrammerSession(
       state?: PlatformProgrammerState;
     }>('/api/programmer/session', user, fullNameQuad);
 
-    const cloudPool = await readCloudPoolDoc(sourceDb).catch(() => null);
-    if (cloudPool && serverRes.state) {
+    const cloudReg = await readCloudRegistryDoc(sourceDb).catch(() => null);
+    if (cloudReg && serverRes.state) {
       const cloudRicher =
-        cloudPool.revision > serverRes.state.revision ||
-        cloudPool.databases.length > serverRes.state.databases.length ||
-        cloudPool.programmers.length > serverRes.state.programmers.length;
+        cloudReg.revision > serverRes.state.revision ||
+        cloudReg.playerDatabases.length > serverRes.state.playerDatabases.length ||
+        cloudReg.backupDatabases.length > serverRes.state.backupDatabases.length ||
+        cloudReg.programmers.length > serverRes.state.programmers.length;
 
       if (cloudRicher) {
         try {
@@ -3326,54 +3687,42 @@ export async function fetchProgrammerSession(
             serverRes = hydrated;
           }
         } catch {
-          // Keep serverRes if hydrate unavailable
+          // Keep serverRes
         }
       }
     }
 
     if (serverRes.state) {
-      saveLocalServerlessPool(serverRes.state);
-      const serverNewerThanCloud =
-        !cloudPool ||
-        serverRes.state.revision > cloudPool.revision ||
-        serverRes.state.databases.length > cloudPool.databases.length ||
-        serverRes.state.programmers.length > cloudPool.programmers.length;
-
-      if (serverRes.isMaster && serverNewerThanCloud) {
-        void writeFirestorePoolDoc(
-          sourceDb,
-          serverRes.state,
-          user.uid,
-          fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
-        );
+      const normalized = ensureRegistryDefaults(serverRes.state);
+      serverRes.state = normalized;
+      saveLocalRegistryState(normalized);
+      if (serverRes.isMaster) {
+        const serverNewer =
+          !cloudReg ||
+          normalized.revision > cloudReg.revision ||
+          normalized.playerDatabases.length !== cloudReg.playerDatabases.length ||
+          normalized.backupDatabases.length !== cloudReg.backupDatabases.length;
+        if (serverNewer) {
+          void writeFirestoreRegistryDoc(
+            sourceDb,
+            normalized,
+            user.uid,
+            fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+          );
+        }
       }
-    } else if (!serverRes.isProgrammer && cloudPool) {
-      // Check if user was promoted in cloudPool even before server hydrated
-      const cloudRole = await isIdentityProgrammerServerless(cloudPool, {
+    } else if (!serverRes.isProgrammer && cloudReg) {
+      const cloudRole = await isIdentityProgrammerServerless(cloudReg, {
         email: user.email,
         fullNameQuad,
       });
       if (cloudRole.isProgrammer) {
-        try {
-          const hydrated = await callProgrammerEndpoint<{
-            isProgrammer: boolean;
-            isMaster: boolean;
-            state?: PlatformProgrammerState;
-          }>('/api/programmer/hydrate', user, fullNameQuad, {
-            poolConfig: activeFirebaseConfig,
-          });
-          if (hydrated.isProgrammer) {
-            if (hydrated.state) saveLocalServerlessPool(hydrated.state);
-            return { ...hydrated, mode: 'server' };
-          }
-        } catch {
-          return {
-            isProgrammer: true,
-            isMaster: cloudRole.isMaster,
-            state: cloudPool,
-            mode: 'serverless',
-          };
-        }
+        return {
+          isProgrammer: true,
+          isMaster: cloudRole.isMaster,
+          state: cloudReg,
+          mode: 'serverless',
+        };
       }
     }
 
@@ -3382,13 +3731,13 @@ export async function fetchProgrammerSession(
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
-  const state = await loadServerlessPoolState();
+  const state = await loadServerlessRegistryState();
   const role = await isIdentityProgrammerServerless(state, {
     email: user.email,
     fullNameQuad,
   });
   if (role.isMaster) {
-    void writeFirestorePoolDoc(
+    void writeFirestoreRegistryDoc(
       sourceDb,
       state,
       user.uid,
@@ -3403,255 +3752,254 @@ export async function fetchProgrammerSession(
   };
 }
 
-export async function addDatabaseToPool(
+export async function addPlayerDatabase(
   user: User,
   fullNameQuad: string,
   config: FirebaseAppConfig,
-  label: string
-): Promise<{ ok: boolean; added: PoolDatabaseEntry; state: PlatformProgrammerState }> {
+  label: string,
+  verification: DatabaseVerificationSummary
+): Promise<{ ok: boolean; added: RegisteredDatabaseEntry; state: PlatformProgrammerState }> {
+  if (!verification.firestoreReady || !verification.googleAuthReady || !verification.rulesReady) {
+    throw new Error('يجب إتمام الفحص الشامل (100%) أولاً قبل إضافة القاعدة.');
+  }
+
   try {
     const res = await callProgrammerEndpoint<{
       ok: boolean;
-      added: PoolDatabaseEntry;
+      added: RegisteredDatabaseEntry;
       state: PlatformProgrammerState;
-    }>('/api/programmer/databases/add', user, fullNameQuad, { config, label });
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
+    }>('/api/programmer/player-dbs/add', user, fullNameQuad, {
+      config,
+      label,
+      verification,
+    });
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, added: res.added, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
-  const state = await loadServerlessPoolState();
+  const state = await loadServerlessRegistryState();
   const cleanCfg = sanitizeFirebaseConfig(config);
   if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
-  if (state.databases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
-    throw new Error('قاعدة البيانات هذه مضافة بالفعل في القائمة.');
+  if (state.playerDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    throw new Error('قاعدة البيانات هذه مضافة بالفعل في قائمة قواعد البيانات.');
+  }
+  if (state.backupDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    throw new Error('هذه القاعدة مسجلة بالفعل كقاعدة احتياطية صامتة.');
   }
 
   const now = Date.now();
-  const added: PoolDatabaseEntry = {
-    id: `db_${now}_${Math.random().toString(36).slice(2, 6)}`,
-    order: state.databases.length + 1,
-    label: label.trim() || `قاعدة #${state.databases.length + 1} — ${cleanCfg.projectId}`,
+  const nextOrder = state.playerDatabases.length + 1;
+  const added: RegisteredDatabaseEntry = {
+    id: `player_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    order: nextOrder,
+    role: 'player',
+    label: label.trim() || `قاعدة بيانات #${nextOrder} — ${cleanCfg.projectId}`,
     config: cleanCfg,
-    exhaustedAt: null,
-    exhaustedUntil: null,
+    verification,
+    lastUsedAt: isSameFirebaseTarget(cleanCfg, activeFirebaseConfig) ? now : null,
     addedByEmail: user.email || undefined,
     addedAt: now,
   };
-  const next = ensurePoolDefaults({
+  const next = ensureRegistryDefaults({
     ...state,
-    databases: [...state.databases, added],
+    playerDatabases: [...state.playerDatabases, added],
     revision: state.revision + 1,
     updatedByEmail: user.email || undefined,
     updatedAt: now,
   });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
   return { ok: true, added, state: next };
 }
 
-export async function reorderDatabasePool(
-  user: User,
-  fullNameQuad: string,
-  orderedIds: string[]
-): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  try {
-    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
-      '/api/programmer/databases/reorder',
-      user,
-      fullNameQuad,
-      { orderedIds }
-    );
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
-  } catch (err) {
-    if (!(err instanceof ApiUnavailableError)) throw err;
-  }
-
-  const state = await loadServerlessPoolState();
-  const byId = new Map(state.databases.map((d) => [d.id, d]));
-  const reordered: PoolDatabaseEntry[] = [];
-  for (const id of orderedIds) {
-    const found = byId.get(id);
-    if (found) {
-      reordered.push(found);
-      byId.delete(id);
-    }
-  }
-  for (const rest of byId.values()) reordered.push(rest);
-
-  const next = ensurePoolDefaults({
-    ...state,
-    databases: reordered,
-    revision: state.revision + 1,
-    updatedByEmail: user.email || undefined,
-    updatedAt: Date.now(),
-  });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
-  return { ok: true, state: next };
-}
-
-export async function activateDatabaseFromPool(
-  user: User,
-  fullNameQuad: string,
-  databaseId: string,
-  migratedRoomId?: string | null
-): Promise<{ ok: boolean; state: PlatformProgrammerState; pointer: ServerPlatformPointer }> {
-  try {
-    const res = await callProgrammerEndpoint<{
-      ok: boolean;
-      state: PlatformProgrammerState;
-      pointer: ServerPlatformPointer;
-    }>('/api/programmer/databases/activate', user, fullNameQuad, {
-      databaseId,
-      migratedRoomId: migratedRoomId || null,
-    });
-    saveLocalServerlessPool(res.state);
-    const chosen =
-      res.state.databases.find((d) => d.id === res.state.activeDatabaseId) ||
-      res.state.databases[0];
-    if (chosen) {
-      await Promise.all([
-        writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME),
-        writeFirestoreMigrationPointerDoc(
-          sourceDb,
-          chosen.config as FirebaseAppConfig,
-          res.state.databases,
-          user.uid,
-          fullNameQuad || MASTER_PROGRAMMER_NAME,
-          migratedRoomId
-        ),
-      ]);
-    }
-    return res;
-  } catch (err) {
-    if (!(err instanceof ApiUnavailableError)) throw err;
-  }
-
-  const state = await loadServerlessPoolState();
-  const target = state.databases.find((d) => d.id === databaseId);
-  if (!target) throw new Error('القاعدة المطلوبة غير موجودة');
-
-  const now = Date.now();
-  target.exhaustedAt = null;
-  target.exhaustedUntil = null;
-  const next = ensurePoolDefaults({
-    ...state,
-    activeDatabaseId: target.id,
-    allExhausted: false,
-    revision: state.revision + 1,
-    updatedByEmail: user.email || undefined,
-    updatedAt: now,
-  });
-  saveLocalServerlessPool(next);
-
-  await Promise.all([
-    writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME),
-    writeFirestoreMigrationPointerDoc(
-      sourceDb,
-      target.config as FirebaseAppConfig,
-      next.databases,
-      user.uid,
-      fullNameQuad || MASTER_PROGRAMMER_NAME,
-      migratedRoomId
-    ),
-  ]);
-
-  return {
-    ok: true,
-    state: next,
-    pointer: buildPointerFromEntry(target, next, migratedRoomId),
-  };
-}
-
-export async function reactivatePoolDatabase(
-  user: User,
-  fullNameQuad: string,
-  databaseId: string | 'ALL'
-): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
-  try {
-    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
-      '/api/programmer/databases/reactivate',
-      user,
-      fullNameQuad,
-      { databaseId }
-    );
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
-  } catch (err) {
-    if (!(err instanceof ApiUnavailableError)) throw err;
-  }
-
-  const state = await loadServerlessPoolState();
-  const now = Date.now();
-  const updatedDbs = state.databases.map((d) =>
-    databaseId === 'ALL' || d.id === databaseId
-      ? { ...d, exhaustedAt: null, exhaustedUntil: null }
-      : d
-  );
-  const firstHealthy = updatedDbs.find((d) => d.exhaustedAt === null) || updatedDbs[0];
-  const next = ensurePoolDefaults({
-    ...state,
-    databases: updatedDbs,
-    activeDatabaseId: state.allExhausted ? firstHealthy.id : state.activeDatabaseId,
-    allExhausted: updatedDbs.every((d) => d.exhaustedAt !== null),
-    revision: state.revision + 1,
-    updatedByEmail: user.email || undefined,
-    updatedAt: now,
-  });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
-  return { ok: true, state: next };
-}
-
-export async function removeDatabaseFromPool(
+export async function removePlayerDatabase(
   user: User,
   fullNameQuad: string,
   databaseId: string
 ): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
   try {
     const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
-      '/api/programmer/databases/remove',
+      '/api/programmer/player-dbs/remove',
       user,
       fullNameQuad,
       { databaseId }
     );
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
-  const state = await loadServerlessPoolState();
-  if (state.databases.length <= 1) {
-    throw new Error('يجب الإبقاء على قاعدة بيانات واحدة على الأقل.');
-  }
-  const remaining = state.databases.filter((d) => d.id !== databaseId);
-  if (remaining.length === state.databases.length) {
+  const state = await loadServerlessRegistryState();
+  const remaining = state.playerDatabases.filter((d) => d.id !== databaseId);
+  if (remaining.length === state.playerDatabases.length) {
     throw new Error('القاعدة غير موجودة');
   }
-  const nextActive =
-    state.activeDatabaseId === databaseId
-      ? (remaining.find((d) => d.exhaustedAt === null) || remaining[0]).id
-      : state.activeDatabaseId;
 
-  const next = ensurePoolDefaults({
+  const next = ensureRegistryDefaults({
     ...state,
-    databases: remaining,
-    activeDatabaseId: nextActive,
+    playerDatabases: remaining,
+    activePlayerDatabaseId:
+      state.activePlayerDatabaseId === databaseId ? null : state.activePlayerDatabaseId,
     revision: state.revision + 1,
     updatedByEmail: user.email || undefined,
     updatedAt: Date.now(),
   });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
   return { ok: true, state: next };
+}
+
+export async function addBackupDatabase(
+  user: User,
+  fullNameQuad: string,
+  config: FirebaseAppConfig,
+  label: string,
+  verification: DatabaseVerificationSummary
+): Promise<{ ok: boolean; added: RegisteredDatabaseEntry; state: PlatformProgrammerState }> {
+  if (!verification.firestoreReady || !verification.googleAuthReady || !verification.rulesReady) {
+    throw new Error('يجب إتمام الفحص الشامل (100%) أولاً قبل إضافة القاعدة الاحتياطية.');
+  }
+
+  try {
+    const res = await callProgrammerEndpoint<{
+      ok: boolean;
+      added: RegisteredDatabaseEntry;
+      state: PlatformProgrammerState;
+    }>('/api/programmer/backup-dbs/add', user, fullNameQuad, {
+      config,
+      label,
+      verification,
+    });
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, added: res.added, state: normalized };
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessRegistryState();
+  const cleanCfg = sanitizeFirebaseConfig(config);
+  if (!cleanCfg) throw new Error('إعدادات Firebase غير صالحة');
+  if (state.backupDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    throw new Error('هذه القاعدة الاحتياطية مضافة بالفعل.');
+  }
+  if (state.playerDatabases.some((d) => isSameFirebaseTarget(d.config, cleanCfg))) {
+    throw new Error('هذه القاعدة مسجلة كقاعدة للاعبين، لا يمكن إضافتها كاحتياطية صامتة.');
+  }
+  if (
+    isSameFirebaseTarget(cleanCfg, defaultFirebaseConfig) ||
+    isSameFirebaseTarget(cleanCfg, activeFirebaseConfig)
+  ) {
+    throw new Error('القاعدة النشطة حالياً لا يمكن استخدامها كقاعدة احتياطية صامتة.');
+  }
+
+  const now = Date.now();
+  const nextOrder = state.backupDatabases.length + 1;
+  const added: RegisteredDatabaseEntry = {
+    id: `backup_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    order: nextOrder,
+    role: 'backup',
+    label: label.trim() || `احتياطية #${nextOrder} — ${cleanCfg.projectId}`,
+    config: cleanCfg,
+    verification,
+    lastAnnouncedToProjectId: null,
+    addedByEmail: user.email || undefined,
+    addedAt: now,
+  };
+  const next = ensureRegistryDefaults({
+    ...state,
+    backupDatabases: [...state.backupDatabases, added],
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: now,
+  });
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, added, state: next };
+}
+
+export async function removeBackupDatabase(
+  user: User,
+  fullNameQuad: string,
+  databaseId: string
+): Promise<{ ok: boolean; state: PlatformProgrammerState }> {
+  try {
+    const res = await callProgrammerEndpoint<{ ok: boolean; state: PlatformProgrammerState }>(
+      '/api/programmer/backup-dbs/remove',
+      user,
+      fullNameQuad,
+      { databaseId }
+    );
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, state: normalized };
+  } catch (err) {
+    if (!(err instanceof ApiUnavailableError)) throw err;
+  }
+
+  const state = await loadServerlessRegistryState();
+  const remaining = state.backupDatabases.filter((d) => d.id !== databaseId);
+  if (remaining.length === state.backupDatabases.length) {
+    throw new Error('القاعدة الاحتياطية غير موجودة');
+  }
+
+  const next = ensureRegistryDefaults({
+    ...state,
+    backupDatabases: remaining,
+    revision: state.revision + 1,
+    updatedByEmail: user.email || undefined,
+    updatedAt: Date.now(),
+  });
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  return { ok: true, state: next };
+}
+
+export async function publishMigrationCompleteSignal(params: {
+  targetConfig: FirebaseAppConfig;
+  migratedRoomId?: string | null;
+  backupDbId?: string;
+  backupProjectId?: string;
+  fullNameQuad: string;
+}): Promise<{ ok: boolean; state?: PlatformProgrammerState }> {
+  const tApp = getOrInitFirebaseApp(params.targetConfig);
+  const tAuth = getAuth(tApp);
+  const tUser = tAuth.currentUser || sourceAuth.currentUser;
+  if (!tUser) return { ok: false };
+
+  try {
+    const res = await callProgrammerEndpoint<{
+      ok: boolean;
+      state?: PlatformProgrammerState;
+    }>('/api/programmer/migrate-complete', tUser, params.fullNameQuad, {
+      targetConfig: params.targetConfig,
+      migratedRoomId: params.migratedRoomId || null,
+      backupDbId: params.backupDbId || '',
+      backupProjectId: params.backupProjectId || '',
+      tokenProjectId: tAuth.currentUser ? params.targetConfig.projectId : activeFirebaseConfig.projectId,
+      tokenApiKey: tAuth.currentUser ? params.targetConfig.apiKey : activeFirebaseConfig.apiKey,
+      tokenFirestoreDatabaseId: tAuth.currentUser
+        ? params.targetConfig.firestoreDatabaseId || ''
+        : activeFirebaseConfig.firestoreDatabaseId || '',
+    });
+    if (res.state) {
+      const normalized = ensureRegistryDefaults(res.state);
+      saveLocalRegistryState(normalized);
+      return { ok: true, state: normalized };
+    }
+    return { ok: Boolean(res.ok) };
+  } catch {
+    return { ok: false };
+  }
 }
 
 export async function promoteProgrammerMember(
@@ -3669,9 +4017,10 @@ export async function promoteProgrammerMember(
       fullNameQuad: targetFullNameQuad,
       email: targetEmail,
     });
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, member: res.member, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
@@ -3682,7 +4031,7 @@ export async function promoteProgrammerMember(
     throw new Error('أدخل الاسم الرباعي أو البريد الإلكتروني للمستخدم.');
   }
 
-  const state = await loadServerlessPoolState();
+  const state = await loadServerlessRegistryState();
   const normNew = normalizeArabicName(cleanName);
   const newHash = cleanEmail ? await sha256Hex(cleanEmail) : '';
   const dup = (state.programmers as StoredProgrammerWithHash[]).some(
@@ -3698,20 +4047,22 @@ export async function promoteProgrammerMember(
   const member: StoredProgrammerWithHash = {
     id: `prog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     fullNameQuad: cleanName || cleanEmail,
-    ...(cleanEmail ? { email: cleanEmail, emailHash: newHash, emailMasked: maskEmailAddress(cleanEmail) } : {}),
+    ...(cleanEmail
+      ? { email: cleanEmail, emailHash: newHash, emailMasked: maskEmailAddress(cleanEmail) }
+      : {}),
     isMaster: false,
     promotedBy: fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME,
     promotedAt: Date.now(),
   };
 
-  const next = ensurePoolDefaults({
+  const next = ensureRegistryDefaults({
     ...state,
     programmers: [...state.programmers, member],
     revision: state.revision + 1,
     updatedAt: Date.now(),
   });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
   return { ok: true, member, state: next };
 }
 
@@ -3727,27 +4078,28 @@ export async function removeProgrammerMember(
       fullNameQuad,
       { memberId }
     );
-    saveLocalServerlessPool(res.state);
-    void writeFirestorePoolDoc(sourceDb, res.state, user.uid, fullNameQuad);
-    return res;
+    const normalized = ensureRegistryDefaults(res.state);
+    saveLocalRegistryState(normalized);
+    void writeFirestoreRegistryDoc(sourceDb, normalized, user.uid, fullNameQuad);
+    return { ok: true, state: normalized };
   } catch (err) {
     if (!(err instanceof ApiUnavailableError)) throw err;
   }
 
-  const state = await loadServerlessPoolState();
+  const state = await loadServerlessRegistryState();
   const target = state.programmers.find((m) => m.id === memberId);
   if (!target) throw new Error('العضو غير موجود');
   if (target.isMaster) throw new Error('لا يمكن إزالة المبرمج الأساسي للمنصة.');
 
-  const next = ensurePoolDefaults({
+  const next = ensureRegistryDefaults({
     ...state,
     programmers: state.programmers.filter((m) => m.id !== memberId),
     revision: state.revision + 1,
     updatedAt: Date.now(),
   });
-  saveLocalServerlessPool(next);
-  await writeFirestorePoolDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
+  saveLocalRegistryState(next);
+  await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
   return { ok: true, state: next };
 }
 
-
+export { getBackupFirebaseConfigs };

@@ -1,10 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { signOut, type User } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, type User } from 'firebase/auth';
 import {
   AlertCircle,
-  ArrowDown,
   ArrowRightLeft,
-  ArrowUp,
   Check,
   CheckCircle2,
   Code2,
@@ -14,44 +12,45 @@ import {
   ExternalLink,
   Loader2,
   Plus,
+  Radio,
   RefreshCw,
-  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Trash2,
   UserPlus,
   Users,
-  Zap,
+  XCircle,
 } from 'lucide-react';
 import firestoreRulesRaw from '../../firestore.rules?raw';
 import {
-  activateCustomFirebaseConfig,
   activeFirebaseConfig,
   activeProjectId,
-  auth,
   buildCleanPrimaryUrl,
-  defaultFirebaseConfig,
   isSameFirebaseTarget,
-  markSwitchRequiresLogin,
-  resetToDefaultFirebaseConfig,
   type FirebaseAppConfig,
 } from '../firebase';
 import {
-  activateDatabaseFromPool,
-  addDatabaseToPool,
+  addBackupDatabase,
+  addPlayerDatabase,
+  announceViaBackupDatabase,
+  getOrInitFirebaseApp,
   MigrationNeedsSetupError,
   parseFirebaseConfigSnippet,
   promoteProgrammerMember,
-  reactivatePoolDatabase,
-  removeDatabaseFromPool,
+  publishMigrationCompleteSignal,
+  removeBackupDatabase,
+  removePlayerDatabase,
   removeProgrammerMember,
-  reorderDatabasePool,
   runFirebaseMigration,
+  verifyDatabaseBeforeAdd,
   type MigrationProgress,
+  type MigrationResult,
+  type VerifyStepItem,
 } from '../firebaseMigration';
 import type {
+  DatabaseRole,
   PlatformProgrammerState,
-  PoolDatabaseEntry,
+  RegisteredDatabaseEntry,
   Room,
   UserProfile,
 } from '../types';
@@ -85,22 +84,28 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
 
   const [subTab, setSubTab] = useState<'databases' | 'programmers'>('databases');
 
-  // Add Database Form State
+  // Add & Verify Form State
+  const [newDbRole, setNewDbRole] = useState<DatabaseRole>('player');
   const [newDbLabel, setNewDbLabel] = useState('');
   const [configInput, setConfigInput] = useState('');
   const [showAdvancedDb, setShowAdvancedDb] = useState(false);
   const [customDatabaseId, setCustomDatabaseId] = useState('');
-  const [addingDb, setAddingDb] = useState(false);
+  const [verifyingAndAdding, setVerifyingAndAdding] = useState(false);
+  const [verifySteps, setVerifySteps] = useState<VerifyStepItem[] | null>(null);
 
-  // Migration / Switching State
+  // Migration State
+  const [selectedBackupByTarget, setSelectedBackupByTarget] = useState<Record<string, string>>({});
   const [migratingEntryId, setMigratingEntryId] = useState<string | null>(null);
   const [migrationProgress, setMigrationProgress] = useState<MigrationProgress | null>(null);
   const [cleanupOldDatabase, setCleanupOldDatabase] = useState(true);
   const [setupError, setSetupError] = useState<MigrationNeedsSetupError | null>(null);
+  const [pendingPopupBackup, setPendingPopupBackup] = useState<{
+    result: MigrationResult;
+    backupEntry: RegisteredDatabaseEntry;
+  } | null>(null);
+
   const [copiedRules, setCopiedRules] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
-
-  // Confirm delete DB
   const [confirmDeleteDbId, setConfirmDeleteDbId] = useState<string | null>(null);
 
   // Promote Programmer State
@@ -108,14 +113,8 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [promoEmail, setPromoEmail] = useState('');
   const [promoting, setPromoting] = useState(false);
 
-  // Banners
+  // Banners & Action Busy
   const [actionBusy, setActionBusy] = useState(false);
-  const [directSwitchProgress, setDirectSwitchProgress] = useState<{
-    percent: number;
-    title: string;
-    subtitle: string;
-    detail?: string;
-  } | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
@@ -135,11 +134,21 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
     }
   }, [configInput, showAdvancedDb, customDatabaseId]);
 
-  const activeEntry =
-    poolState.databases.find((d) => d.id === poolState.activeDatabaseId) ||
-    poolState.databases[0];
+  const activePlayerEntry = poolState.playerDatabases.find((d) =>
+    isSameFirebaseTarget(d.config, activeFirebaseConfig)
+  );
 
-  const handleAddDatabase = async (e: React.FormEvent) => {
+  const getChosenBackupForTarget = (targetId: string): RegisteredDatabaseEntry | null => {
+    if (poolState.backupDatabases.length === 0) return null;
+    const chosenId = selectedBackupByTarget[targetId];
+    return (
+      poolState.backupDatabases.find((b) => b.id === chosenId) ||
+      poolState.backupDatabases[0] ||
+      null
+    );
+  };
+
+  const handleVerifyAndAddDatabase = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorNotice(null);
     setStatusNotice(null);
@@ -156,119 +165,135 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
       return;
     }
 
-    setAddingDb(true);
+    setVerifyingAndAdding(true);
+    setVerifySteps(null);
     try {
-      const res = await addDatabaseToPool(
-        firebaseUser,
-        fullNameQuad,
-        parsedCfg,
-        newDbLabel.trim()
-      );
-      onPoolStateUpdated(res.state);
+      const verifyRes = await verifyDatabaseBeforeAdd({
+        config: parsedCfg,
+        role: newDbRole,
+        existingPlayerDbs: poolState.playerDatabases,
+        existingBackupDbs: poolState.backupDatabases,
+        fallbackQuadName: fullNameQuad,
+        onStepUpdate: (steps) => setVerifySteps(steps),
+      });
+
+      if (!verifyRes.ok || !verifyRes.summary) {
+        playDuoSound('wrong');
+        setErrorNotice(
+          verifyRes.failureMessage ||
+            'فشل الفحص الشامل للقاعدة — أصلح الخطوة المحددة بالأسفل ثم أعد الفحص.'
+        );
+        return;
+      }
+
+      if (newDbRole === 'player') {
+        const res = await addPlayerDatabase(
+          firebaseUser,
+          fullNameQuad,
+          verifyRes.config,
+          newDbLabel.trim(),
+          verifyRes.summary
+        );
+        onPoolStateUpdated(res.state);
+        setStatusNotice(
+          `تم فحص القاعدة 100% وإضافتها إلى «قواعد البيانات» (#${res.added.order} — ${res.added.config.projectId}) وتسجيل الدخول عليها بنجاح!`
+        );
+      } else {
+        const res = await addBackupDatabase(
+          firebaseUser,
+          fullNameQuad,
+          verifyRes.config,
+          newDbLabel.trim(),
+          verifyRes.summary
+        );
+        onPoolStateUpdated(res.state);
+        setStatusNotice(
+          `تم فحص القاعدة الاحتياطية 100% وإضافتها كقاعدة صامتة (#${res.added.order} — ${res.added.config.projectId}) بدون لمسها بتاتاً!`
+        );
+      }
+
+      playDuoSound('correct');
       setConfigInput('');
       setNewDbLabel('');
       setCustomDatabaseId('');
-      playDuoSound('correct');
-      setStatusNotice(
-        `تمت إضافة القاعدة #${res.added.order} (${res.added.config.projectId}) إلى القائمة بنجاح!`
-      );
     } catch (err) {
       playDuoSound('wrong');
-      setErrorNotice(err instanceof Error ? err.message : 'تعذر إضافة قاعدة البيانات.');
+      setErrorNotice(err instanceof Error ? err.message : 'تعذر فحص وإضافة قاعدة البيانات.');
     } finally {
-      setAddingDb(false);
+      setVerifyingAndAdding(false);
     }
   };
 
-  const handleMoveOrder = async (index: number, direction: 'up' | 'down') => {
-    const targetIdx = direction === 'up' ? index - 1 : index + 1;
-    if (targetIdx < 0 || targetIdx >= poolState.databases.length) return;
-    setActionBusy(true);
-    setErrorNotice(null);
-    try {
-      const nextList = [...poolState.databases];
-      const [moved] = nextList.splice(index, 1);
-      nextList.splice(targetIdx, 0, moved);
-      const res = await reorderDatabasePool(
-        firebaseUser,
-        fullNameQuad,
-        nextList.map((d) => d.id)
-      );
-      onPoolStateUpdated(res.state);
-      playDuoSound('pop');
-    } catch (err) {
-      setErrorNotice(err instanceof Error ? err.message : 'تعذر تعديل ترتيب القواعد.');
-    } finally {
-      setActionBusy(false);
-    }
+  const reloadToMigratedTarget = (migratedRoomId: string | null) => {
+    window.setTimeout(() => {
+      try {
+        sessionStorage.removeItem('duoboard_self_migrated_target');
+      } catch {
+        // Ignore
+      }
+      if (migratedRoomId) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('fb');
+        url.searchParams.set('room', migratedRoomId);
+        window.location.replace(url.toString());
+      } else {
+        window.location.replace(buildCleanPrimaryUrl());
+      }
+    }, 950);
   };
 
-  const handleMigrateAndActivate = async (entry: PoolDatabaseEntry) => {
+  const handleMigrateToPlayerDb = async (
+    entry: RegisteredDatabaseEntry,
+    allowSameTargetUpdate = false
+  ) => {
     setErrorNotice(null);
     setStatusNotice(null);
     setSetupError(null);
+    setPendingPopupBackup(null);
 
-    if (isSameFirebaseTarget(entry.config, activeFirebaseConfig)) {
-      // Same DB currently running locally — just make sure server points to it and clear exhausted
-      setActionBusy(true);
-      try {
-        const res = await activateDatabaseFromPool(
-          firebaseUser,
-          fullNameQuad,
-          entry.id,
-          currentRoom?.id || null
-        );
-        onPoolStateUpdated(res.state);
-        playDuoSound('correct');
-        setStatusNotice(`تم اعتماد القاعدة #${entry.order} (${entry.config.projectId}) للجميع!`);
-      } catch (err) {
-        setErrorNotice(err instanceof Error ? err.message : 'تعذر تفعيل القاعدة.');
-      } finally {
-        setActionBusy(false);
-      }
-      return;
-    }
+    const backupEntry = getChosenBackupForTarget(entry.id);
 
     setMigratingEntryId(entry.id);
     setMigrationProgress({
       step: 'signing_in',
       percent: 5,
-      message: `جاري البدء بنقل المنصة كاملة إلى القاعدة #${entry.order} (${entry.config.projectId})...`,
+      message: allowSameTargetUpdate
+        ? `جاري تحديث ومزامنة البيانات إلى #${entry.order} (${entry.config.projectId})...`
+        : `جاري نقل كل الغرف والسوابير والاختبارات إلى #${entry.order} (${entry.config.projectId})...`,
     });
 
     try {
       const res = await runFirebaseMigration({
         targetConfig: entry.config,
+        backupEntry,
         currentProfile: profile,
         currentRoom,
         isSupervisorInCurrentRoom,
-        cleanupOldDatabase,
-        poolState,
+        cleanupOldDatabase: allowSameTargetUpdate ? false : cleanupOldDatabase,
+        allowSameTargetUpdate,
         onProgress: (p) => setMigrationProgress(p),
       });
 
       await onRefreshState();
       playDuoSound('correct');
+
+      if (res.backupAuthPopupBlocked && backupEntry) {
+        setPendingPopupBackup({ result: res, backupEntry });
+        setStatusNotice(
+          `اكتمل نقل البيانات 100% إلى (${entry.config.projectId})! يرجى الضغط أدناه لتفعيل إعلان القاعدة الاحتياطية (${backupEntry.config.projectId}).`
+        );
+        return;
+      }
+
       setStatusNotice(
-        `تم نقل ${res.migratedRoomsCount} غرف و${res.migratedMyQuizzesCount} اختباراتي و${res.migratedSavedTestsCount} محفوظات، واعتماد القاعدة #${entry.order} (${entry.config.projectId}) تلقائياً لجميع المستخدمين!`
+        res.announcedBackupProjectId
+          ? `تم نقل ${res.migratedRoomsCount} غرف و${res.migratedMyQuizzesCount} اختباراتي و${res.migratedSavedTestsCount} محفوظات، واستيقظت القاعدة الاحتياطية (${res.announcedBackupProjectId}) لإعلان وتجهيز (${entry.config.projectId}) للجميع!`
+          : `تم نقل ${res.migratedRoomsCount} غرف و${res.migratedMyQuizzesCount} اختباراتي و${res.migratedSavedTestsCount} محفوظات، واعتماد (${entry.config.projectId}) للجميع!`
       );
 
-      // Reload programmer tab smoothly onto the newly activated DB after a moment
-      window.setTimeout(() => {
-        try {
-          sessionStorage.removeItem('duoboard_self_migrated_target');
-        } catch {
-          // Ignore storage errors
-        }
-        if (res.migratedRoomId) {
-          const url = new URL(window.location.href);
-          url.searchParams.delete('fb');
-          url.searchParams.set('room', res.migratedRoomId);
-          window.location.replace(url.toString());
-        } else {
-          window.location.replace(buildCleanPrimaryUrl());
-        }
-      }, 950);
+      if (!allowSameTargetUpdate) {
+        reloadToMigratedTarget(res.migratedRoomId);
+      }
     } catch (err) {
       playDuoSound('wrong');
       if (err instanceof MigrationNeedsSetupError) {
@@ -284,103 +309,84 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
     }
   };
 
-  const handleDirectActivateWithoutCopy = async (entry: PoolDatabaseEntry) => {
-    setErrorNotice(null);
-    setStatusNotice(null);
+  const handleRetryPendingBackupAnnounce = async () => {
+    if (!pendingPopupBackup) return;
     setActionBusy(true);
-    setDirectSwitchProgress({
-      percent: 20,
-      title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
-      subtitle: `جاري اعتماد القاعدة #${entry.order} (${entry.config.projectId}) لجميع المستخدمين...`,
-      detail: 'تحديث الخادم والروابط المعتمدة',
-    });
+    setErrorNotice(null);
     try {
-      try {
-        sessionStorage.setItem(
-          'duoboard_self_migrated_target',
-          `${entry.config.projectId}::${(entry.config.firestoreDatabaseId || '(default)').trim()}`
-        );
-      } catch {
-        // Ignore storage restrictions
-      }
-      const res = await activateDatabaseFromPool(
-        firebaseUser,
+      const { result, backupEntry } = pendingPopupBackup;
+      const announce = await announceViaBackupDatabase({
+        backupConfig: backupEntry.config,
+        targetConfig: result.targetConfig,
+        migratedRoomId: result.migratedRoomId,
+        updaterName: fullNameQuad,
+      });
+      await publishMigrationCompleteSignal({
+        targetConfig: result.targetConfig,
+        migratedRoomId: result.migratedRoomId,
+        backupDbId: backupEntry.id,
+        backupProjectId: backupEntry.config.projectId,
         fullNameQuad,
-        entry.id,
-        currentRoom?.id || null
-      );
-      onPoolStateUpdated(res.state);
-      playDuoSound('correct');
-
-      setDirectSwitchProgress({
-        percent: 62,
-        title: 'جاري التحميل، الرجاء الانتظار قليلاً...',
-        subtitle: 'يتم الآن تسجيل الخروج من القاعدة السابقة وتجهيز القاعدة المعتمدة الجديدة',
-        detail: entry.config.projectId,
       });
-
-      markSwitchRequiresLogin(entry.config);
-      await signOut(auth).catch(() => {});
-      if (isSameFirebaseTarget(entry.config, defaultFirebaseConfig)) {
-        resetToDefaultFirebaseConfig();
-      } else {
-        activateCustomFirebaseConfig(
-          entry.config,
-          currentRoom?.id || null,
-          poolState.databases.map((d) => d.config as FirebaseAppConfig)
+      await onRefreshState();
+      if (announce.ok) {
+        playDuoSound('correct');
+        setPendingPopupBackup(null);
+        setStatusNotice(
+          `استيقظت القاعدة الاحتياطية (${backupEntry.config.projectId}) وأعلنت القاعدة الجديدة للجميع!`
         );
+        reloadToMigratedTarget(result.migratedRoomId);
+      } else if (announce.popupBlocked) {
+        setErrorNotice('ما زالت النافذة المنبثقة محظورة. اسمح بها في المتصفح ثم حاول مجدداً.');
+      } else {
+        reloadToMigratedTarget(result.migratedRoomId);
       }
-
-      setDirectSwitchProgress({
-        percent: 100,
-        title: 'تم تحديث القاعدة المعتمدة للجميع!',
-        subtitle: 'جاري الانتقال الآن لتسجيل الدخول على القاعدة الجديدة...',
-        detail: entry.config.projectId,
-      });
-
-      window.setTimeout(() => {
-        try {
-          sessionStorage.removeItem('duoboard_self_migrated_target');
-        } catch {
-          // Ignore
-        }
-        window.location.replace(buildCleanPrimaryUrl());
-      }, 480);
-    } catch (err) {
-      setErrorNotice(err instanceof Error ? err.message : 'تعذر التبديل الفوري للقاعدة.');
-      setDirectSwitchProgress(null);
-      setActionBusy(false);
-    }
-  };
-
-  const handleReactivateDb = async (databaseId: string | 'ALL') => {
-    setActionBusy(true);
-    setErrorNotice(null);
-    try {
-      const res = await reactivatePoolDatabase(firebaseUser, fullNameQuad, databaseId);
-      onPoolStateUpdated(res.state);
-      playDuoSound('correct');
-      setStatusNotice(
-        databaseId === 'ALL'
-          ? 'تم تصفير حالة الامتلاء لجميع القواعد وإعادة تشغيل المنصة!'
-          : 'تمت إعادة تفعيل القاعدة وهي جاهزة للعمل والتبديل التلقائي.'
-      );
-    } catch (err) {
-      setErrorNotice(err instanceof Error ? err.message : 'تعذر إعادة تفعيل القاعدة.');
     } finally {
       setActionBusy(false);
     }
   };
 
-  const handleRemoveDb = async (databaseId: string) => {
+  const handleRefreshBackupAuth = async (backupEntry: RegisteredDatabaseEntry) => {
     setActionBusy(true);
     setErrorNotice(null);
     try {
-      const res = await removeDatabaseFromPool(firebaseUser, fullNameQuad, databaseId);
+      const bApp = getOrInitFirebaseApp(backupEntry.config);
+      const bAuth = getAuth(bApp);
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const cred = await signInWithPopup(bAuth, provider);
+      playDuoSound('correct');
+      setStatusNotice(
+        `تم تجديد تأكيد الدخول للقاعدة الاحتياطية (${backupEntry.config.projectId}) بالحساب ${cred.user.email || ''} — جاهزة للإعلان الفوري دون نوافذ إضافية!`
+      );
+    } catch (err) {
+      playDuoSound('wrong');
+      setErrorNotice(
+        err instanceof Error
+          ? err.message
+          : `تعذر تجديد الدخول للقاعدة الاحتياطية (${backupEntry.config.projectId}).`
+      );
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleRemoveDb = async (entry: RegisteredDatabaseEntry) => {
+    setActionBusy(true);
+    setErrorNotice(null);
+    try {
+      const res =
+        entry.role === 'player'
+          ? await removePlayerDatabase(firebaseUser, fullNameQuad, entry.id)
+          : await removeBackupDatabase(firebaseUser, fullNameQuad, entry.id);
       onPoolStateUpdated(res.state);
       setConfirmDeleteDbId(null);
       playDuoSound('pop');
-      setStatusNotice('تمت إزالة القاعدة من القائمة وإعادة ترقيم الباقي.');
+      setStatusNotice(
+        entry.role === 'player'
+          ? `تمت إزالة القاعدة (${entry.config.projectId}) من قائمة قواعد البيانات.`
+          : `تمت إزالة القاعدة الاحتياطية (${entry.config.projectId}).`
+      );
     } catch (err) {
       setErrorNotice(err instanceof Error ? err.message : 'تعذر حذف القاعدة.');
     } finally {
@@ -468,7 +474,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl sm:text-2xl font-black text-[#3C3C3C]">
-                  لوحة المبرمج وإدارة المنصة
+                  لوحة المبرمج وإدارة القواعد
                 </h1>
                 <span
                   className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-black border ${
@@ -489,13 +495,13 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 >
                   <span>
                     {backendMode === 'serverless'
-                      ? 'وضع الاستضافة الثابتة (GitHub / Netlify)'
+                      ? 'وضع الاستضافة الثابتة'
                       : 'متصل بالخادم + السحابة'}
                   </span>
                 </span>
               </div>
               <p className="text-xs sm:text-sm font-bold text-[#777777] mt-0.5">
-                إدارة قائمة قواعد البيانات بالترتيب، التناوب التلقائي عند امتلاء الحصة، وترقية المبرمجين
+                فحص 100% للفايربيس وOAuth والـ Rules قبل الإضافة • فصل قواعد اللاعبين عن القواعد الاحتياطية الصامتة
               </p>
             </div>
           </div>
@@ -503,7 +509,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           <button
             type="button"
             onClick={() => void onRefreshState()}
-            disabled={actionBusy || Boolean(migratingEntryId)}
+            disabled={actionBusy || Boolean(migratingEntryId) || verifyingAndAdding}
             className="duo-btn self-start sm:self-center flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs sm:text-sm font-black text-[#3C3C3C] hover:border-[#1CB0F6] cursor-pointer"
           >
             <RefreshCw className="w-4 h-4 text-[#1899D6]" />
@@ -511,63 +517,47 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           </button>
         </div>
 
-        {/* Live Pool Metrics */}
+        {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
           <div className="p-3.5 rounded-2xl bg-white border-2 border-[#E5E5E5] flex flex-col gap-0.5">
             <span className="text-[11px] font-extrabold text-[#777777]">
-              القاعدة المعتمدة حالياً للجميع
+              القاعدة النشطة للاعبين الآن
             </span>
             <span className="font-latin text-sm sm:text-base font-black text-[#1899D6] truncate">
-              #{activeEntry?.order || 1} — {activeEntry?.config.projectId || activeProjectId}
+              {activePlayerEntry ? `#${activePlayerEntry.order} — ` : ''}
+              {activeProjectId}
             </span>
           </div>
 
           <div className="p-3.5 rounded-2xl bg-white border-2 border-[#E5E5E5] flex flex-col gap-0.5">
             <span className="text-[11px] font-extrabold text-[#777777]">
-              إجمالي القواعد المسجلة
+              قواعد البيانات (للاعبين والاختبارات)
             </span>
             <span className="text-sm sm:text-base font-black text-[#3C3C3C]">
-              <span className="font-latin text-[#58CC02]">{poolState.databases.length}</span> قواعد مرتبة للتناوب التلقائي
+              <span className="font-latin text-[#58CC02]">{poolState.playerDatabases.length}</span>{' '}
+              قواعد مفحوصة 100%
             </span>
           </div>
 
-          <div
-            className={`p-3.5 rounded-2xl border-2 flex flex-col gap-0.5 ${
-              poolState.allExhausted
-                ? 'bg-[#FFDFE0] border-[#FF4B4B]'
-                : 'bg-[#D7FFB8]/60 border-[#58CC02]'
-            }`}
-          >
-            <span className="text-[11px] font-extrabold text-[#777777]">حالة التشغيل العام</span>
-            <span
-              className={`text-sm sm:text-base font-black ${
-                poolState.allExhausted ? 'text-[#EA2B2B]' : 'text-[#46A302]'
-              }`}
-            >
-              {poolState.allExhausted
-                ? 'وضع الصيانة (جميع القواعد ممتلئة)'
-                : 'تعمل بكفاءة والتنقل التلقائي مفعّل'}
+          <div className="p-3.5 rounded-2xl bg-[#F8F3FF] border-2 border-[#A560E8]/50 flex flex-col gap-0.5">
+            <span className="text-[11px] font-extrabold text-[#777777]">
+              القواعد الاحتياطية الصامتة (لا تُمس بتاتاً)
+            </span>
+            <span className="text-sm sm:text-base font-black text-[#8938D6]">
+              <span className="font-latin">{poolState.backupDatabases.length}</span> قواعد للتجهيز والإعلان فقط
             </span>
           </div>
         </div>
 
-        {poolState.allExhausted && (
-          <div className="p-4 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-[#EA2B2B] text-xs sm:text-sm font-black">
-              <AlertCircle className="w-5 h-5 shrink-0" />
-              <span>
-                جميع القواعد وصلت للحد اليومي والمنصة تعرض للمستخدمين «جاري إصلاح مشاكل البرنامج». أضف قاعدة جديدة أدناه أو أعد تفعيل القواعد لعودة المنصة فوراً!
-              </span>
-            </div>
-            <button
-              type="button"
-              disabled={actionBusy}
-              onClick={() => void handleReactivateDb('ALL')}
-              className="duo-btn flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
-            >
-              <RotateCcw className="w-4 h-4" />
-              <span>تصفير الكل وإعادة التشغيل</span>
-            </button>
+        {poolState.lastBackupAnnouncement && (
+          <div className="p-3 rounded-2xl bg-[#D7FFB8]/45 border border-[#58CC02] flex flex-wrap items-center gap-2 text-xs font-black text-[#46A302]">
+            <Radio className="w-4 h-4 shrink-0" />
+            <span>
+              آخر تفعيل احتياطي: أعلنت القاعدة الاحتياطية (
+              <span className="font-latin">{poolState.lastBackupAnnouncement.backupProjectId}</span>)
+              الانتقال إلى (
+              <span className="font-latin">{poolState.lastBackupAnnouncement.targetProjectId}</span>)
+            </span>
           </div>
         )}
       </div>
@@ -587,7 +577,9 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           }`}
         >
           <Database className="w-5 h-5" />
-          <span>قواعد البيانات والنقل ({poolState.databases.length})</span>
+          <span>
+            القواعد والنقل ({poolState.playerDatabases.length} + {poolState.backupDatabases.length})
+          </span>
         </button>
 
         <button
@@ -622,23 +614,40 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
         </div>
       )}
 
+      {pendingPopupBackup && (
+        <div className="p-4 rounded-2xl bg-[#FFF4CC] border-2 border-[#FFC800] flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs sm:text-sm font-black text-[#3C3C3C]">
+            تم نقل كل البيانات 100%! بقي خطوة واحدة لإيقاظ القاعدة الاحتياطية ({pendingPopupBackup.backupEntry.config.projectId}) وإعلان القاعدة الجديدة للجميع:
+          </div>
+          <button
+            type="button"
+            disabled={actionBusy}
+            onClick={() => void handleRetryPendingBackupAnnounce()}
+            className="duo-btn flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+          >
+            <Radio className="w-4 h-4" />
+            <span>إعلان القاعدة الاحتياطية الآن</span>
+          </button>
+        </div>
+      )}
+
       {subTab === 'databases' ? (
         <div className="flex flex-col gap-6">
-          {/* Migration Progress Banner */}
+          {/* Migration Progress */}
           {migratingEntryId && migrationProgress && (
             <DuoLoading
               variant="inline"
               title={migrationProgress.message}
               subtitle={
                 migrationProgress.detail ||
-                'جاري نقل كافة الغرف والاختبارات والملفات وتحديث جميع المستخدمين تلقائياً...'
+                'جاري نقل وتحديث الغرف والسوابير والاختبارات ثم إيقاظ القاعدة الاحتياطية...'
               }
               percent={migrationProgress.percent}
               accent="blue"
             />
           )}
 
-          {/* Target Project Setup Assistance (Rules / Domain / Auth) */}
+          {/* Setup Assistance during migration */}
           {setupError && (
             <div className="duo-card p-5 bg-[#FFDFE0]/70 border-[#FF4B4B] flex flex-col gap-3">
               <div className="flex items-start gap-2 text-[#EA2B2B] text-sm font-black">
@@ -646,34 +655,28 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 <span>{setupError.message}</span>
               </div>
               {setupError.reason === 'firestore_rules' && (
-                <div className="bg-white rounded-xl p-3.5 border border-[#FF4B4B]/40 flex flex-col gap-2 text-xs font-bold text-[#3C3C3C]">
-                  <p>
-                    انسخ قواعد الأمان والصقها في Firebase Console للمشروع{' '}
-                    <span className="font-latin font-black">{setupError.projectId}</span> ثم اضغط Publish:
-                  </p>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void handleCopyRules()}
-                      className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-xs font-black cursor-pointer"
-                    >
-                      {copiedRules ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedRules ? 'تم نسخ قواعد الأمان' : 'نسخ firestore.rules'}</span>
-                    </button>
-                    <a
-                      href={`https://console.firebase.google.com/project/${setupError.projectId}/firestore/rules`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>فتح صفحة Rules</span>
-                    </a>
-                  </div>
+                <div className="bg-white rounded-xl p-3.5 border border-[#FF4B4B]/40 flex flex-wrap items-center gap-2 text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyRules()}
+                    className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-xs font-black cursor-pointer"
+                  >
+                    {copiedRules ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedRules ? 'تم نسخ firestore.rules' : 'نسخ firestore.rules'}</span>
+                  </button>
+                  <a
+                    href={`https://console.firebase.google.com/project/${setupError.projectId}/firestore/rules`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>فتح صفحة Rules</span>
+                  </a>
                 </div>
               )}
               {setupError.reason === 'unauthorized_domain' && (
-                <div className="bg-white rounded-xl p-3.5 border border-[#FF4B4B]/40 flex flex-wrap items-center gap-2 text-xs font-bold text-[#3C3C3C]">
+                <div className="bg-white rounded-xl p-3.5 border border-[#FF4B4B]/40 flex flex-wrap items-center gap-2 text-xs font-bold">
                   <span className="font-latin bg-[#F7F7F7] px-2 py-1 rounded-lg border border-[#E5E5E5]">
                     {window.location.hostname}
                   </span>
@@ -692,7 +695,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                     className="duo-btn flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>فتح Authorized domains</span>
+                    <span>Authorized domains</span>
                   </a>
                 </div>
               )}
@@ -705,22 +708,23 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                     className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-xs font-black"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>تفعيل Google Sign-In في المشروع</span>
+                    <span>تفعيل Google Sign-In</span>
                   </a>
                 </div>
               )}
             </div>
           )}
 
-          {/* Ordered Pool Cards */}
-          <div className="duo-card p-5 sm:p-6 flex flex-col gap-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b-2 border-[#F0F0F0]">
+          {/* 1. SECTION A: Player Databases */}
+          <div className="duo-card p-5 sm:p-6 flex flex-col gap-4 border-[#1CB0F6]/60">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b-2 border-[#F0F0F0]">
               <div>
-                <h2 className="text-lg font-black text-[#3C3C3C]">
-                  القواعد المرتبة والتنقل التلقائي
+                <h2 className="text-lg font-black text-[#3C3C3C] flex items-center gap-2">
+                  <Database className="w-5 h-5 text-[#1899D6]" />
+                  <span>قواعد البيانات (التي يجلس عليها اللاعبون والاختبارات)</span>
                 </h2>
-                <p className="text-xs font-bold text-[#777777]">
-                  عند امتلاء حصة القاعدة الحالية ينتقل الجميع تلقائياً إلى القاعدة التالية في الترتيب، وعند نهاية القائمة يعود من #1، وإذا امتلأت جميعاً تظهر شاشة «جاري إصلاح مشاكل البرنامج».
+                <p className="text-xs font-bold text-[#777777] mt-0.5">
+                  كل قاعدة هنا تم فحصها 100% وإضافتها لتسجيل الدخول. عند النقل إليها تُحدَّث بياناتها القديمة وتنتقل كل الغرف والسوابير ثم تُعلنها القاعدة الاحتياطية للجميع.
                 </p>
               </div>
               <label className="flex items-center gap-2 text-xs font-bold text-[#3C3C3C] bg-[#F7F7F7] px-3 py-2 rounded-xl border border-[#E5E5E5] cursor-pointer">
@@ -730,146 +734,240 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                   onChange={(e) => setCleanupOldDatabase(e.target.checked)}
                   className="accent-[#58CC02] w-4 h-4 cursor-pointer"
                 />
-                <span>تنظيف السجلات المنقولة من القاعدة السابقة بعد النقل</span>
+                <span>تنظيف القاعدة السابقة بعد النقل 100%</span>
               </label>
             </div>
 
-            <div className="flex flex-col gap-3">
-              {poolState.databases.map((entry, idx) => {
-                const isActive = entry.id === poolState.activeDatabaseId && !poolState.allExhausted;
-                const isExhausted = entry.exhaustedAt !== null;
-                const isMigratingThis = migratingEntryId === entry.id;
-                const isDeletingThis = confirmDeleteDbId === entry.id;
+            {poolState.playerDatabases.length === 0 ? (
+              <div className="p-6 rounded-2xl bg-[#F7F7F7] border-2 border-dashed border-[#D0D0D0] text-center flex flex-col items-center gap-2">
+                <Database className="w-8 h-8 text-[#AFAFAF]" />
+                <p className="text-sm font-black text-[#3C3C3C]">
+                  قائمة «قواعد البيانات» فارغة حالياً
+                </p>
+                <p className="text-xs font-bold text-[#777777]">
+                  أضف قاعدة بيانات جديدة بالأسفل ليتم فحص Firestore وOAuth وRules وإضافتها هنا لتسجيل الدخول.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {poolState.playerDatabases.map((entry) => {
+                  const isActive = isSameFirebaseTarget(entry.config, activeFirebaseConfig);
+                  const isMigratingThis = migratingEntryId === entry.id;
+                  const isDeletingThis = confirmDeleteDbId === entry.id;
+                  const chosenBackup = getChosenBackupForTarget(entry.id);
 
-                return (
-                  <div
-                    key={entry.id}
-                    className={`rounded-2xl border-2 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors ${
-                      isActive
-                        ? 'bg-[#D7FFB8]/35 border-[#58CC02]'
-                        : isExhausted
-                        ? 'bg-[#FFDFE0]/35 border-[#FF4B4B]'
-                        : 'bg-white border-[#E5E5E5]'
-                    }`}
-                  >
-                    <div className="flex items-start gap-3.5 min-w-0">
-                      <div
-                        className={`w-11 h-11 rounded-2xl flex items-center justify-center font-latin font-black text-base shrink-0 border-b-4 ${
-                          isActive
-                            ? 'bg-[#58CC02] border-[#46A302] text-white'
-                            : isExhausted
-                            ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
-                            : 'bg-[#1CB0F6] border-[#1899D6] text-white'
-                        }`}
-                      >
-                        #{entry.order}
-                      </div>
-
-                      <div className="flex flex-col gap-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
-                            {entry.label}
-                          </h3>
-                          {isActive && (
-                            <span className="px-2.5 py-0.5 rounded-lg bg-[#58CC02] text-white text-[11px] font-black">
-                              النشطة حالياً
-                            </span>
-                          )}
-                          {isExhausted && (
-                            <span className="px-2.5 py-0.5 rounded-lg bg-[#FFDFE0] border border-[#FF4B4B] text-[#EA2B2B] text-[11px] font-black">
-                              ممتلئة الحصة (Quota)
-                            </span>
-                          )}
-                          {!isActive && !isExhausted && (
-                            <span className="px-2.5 py-0.5 rounded-lg bg-[#F0F9FF] border border-[#BEE8FF] text-[#1899D6] text-[11px] font-black">
-                              جاهزة في الترتيب
-                            </span>
-                          )}
+                  return (
+                    <div
+                      key={entry.id}
+                      className={`rounded-2xl border-2 p-4 flex flex-col gap-3 transition-colors ${
+                        isActive
+                          ? 'bg-[#D7FFB8]/35 border-[#58CC02]'
+                          : 'bg-white border-[#E5E5E5]'
+                      }`}
+                    >
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                        <div className="flex items-start gap-3.5 min-w-0">
+                          <div
+                            className={`w-11 h-11 rounded-2xl flex items-center justify-center font-latin font-black text-base shrink-0 border-b-4 ${
+                              isActive
+                                ? 'bg-[#58CC02] border-[#46A302] text-white'
+                                : 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                            }`}
+                          >
+                            #{entry.order}
+                          </div>
+                          <div className="flex flex-col gap-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
+                                {entry.label}
+                              </h3>
+                              {isActive && (
+                                <span className="px-2.5 py-0.5 rounded-lg bg-[#58CC02] text-white text-[11px] font-black">
+                                  النشطة حالياً للجميع
+                                </span>
+                              )}
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#D7FFB8] text-[#46A302] text-[10px] font-black">
+                                <ShieldCheck className="w-3 h-3" />
+                                فحص 100% (Firestore + OAuth + Rules)
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#777777]">
+                              <span className="font-latin bg-[#F7F7F7] px-2 py-0.5 rounded-lg border border-[#E5E5E5]">
+                                {entry.config.projectId}
+                              </span>
+                              <span className="font-latin text-[11px]">
+                                DB: {entry.config.firestoreDatabaseId || '(default)'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#777777]">
-                          <span className="font-latin bg-[#F7F7F7] px-2 py-0.5 rounded-lg border border-[#E5E5E5]">
-                            {entry.config.projectId}
-                          </span>
-                          <span className="font-latin text-[11px]">
-                            DB: {entry.config.firestoreDatabaseId || '(default)'}
-                          </span>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {poolState.backupDatabases.length > 0 && !isActive && (
+                            <select
+                              value={chosenBackup?.id || ''}
+                              disabled={actionBusy || Boolean(migratingEntryId)}
+                              onChange={(e) =>
+                                setSelectedBackupByTarget((prev) => ({
+                                  ...prev,
+                                  [entry.id]: e.target.value,
+                                }))
+                              }
+                              className="px-2.5 py-2 rounded-xl bg-[#F8F3FF] border-2 border-[#A560E8]/60 text-xs font-black text-[#8938D6] cursor-pointer outline-none"
+                              title="اختر القاعدة الاحتياطية التي ستُعلن وتُجهّز القاعدة الجديدة للجميع"
+                            >
+                              {poolState.backupDatabases.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  إعلان عبر: {b.label} ({b.config.projectId})
+                                </option>
+                              ))}
+                            </select>
+                          )}
+
+                          {!isActive ? (
+                            <button
+                              type="button"
+                              disabled={actionBusy || Boolean(migratingEntryId)}
+                              onClick={() => void handleMigrateToPlayerDb(entry, false)}
+                              className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer disabled:opacity-50"
+                            >
+                              {isMigratingThis ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <ArrowRightLeft className="w-3.5 h-3.5" />
+                              )}
+                              <span>نقل وتفعيل للجميع</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={actionBusy || Boolean(migratingEntryId)}
+                              onClick={() => void handleMigrateToPlayerDb(entry, true)}
+                              className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer disabled:opacity-50"
+                              title="تحديث كافة الغرف والاختبارات على القاعدة النشطة"
+                            >
+                              {isMigratingThis ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="w-3.5 h-3.5" />
+                              )}
+                              <span>تحديث ومزامنة البيانات</span>
+                            </button>
+                          )}
+
+                          {isDeletingThis ? (
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={actionBusy}
+                                onClick={() => void handleRemoveDb(entry)}
+                                className="duo-btn px-3 py-2 rounded-xl bg-[#FF4B4B] border-2 border-b-4 border-[#EA2B2B] text-white text-xs font-black cursor-pointer"
+                              >
+                                تأكيد الحذف
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteDbId(null)}
+                                className="duo-btn px-2.5 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#777777] cursor-pointer"
+                              >
+                                إلغاء
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={actionBusy || Boolean(migratingEntryId)}
+                              onClick={() => setConfirmDeleteDbId(entry.id)}
+                              className="duo-btn p-2 rounded-xl bg-white hover:bg-[#FFDFE0] border-2 border-b-4 border-[#E5E5E5] text-[#EA2B2B] cursor-pointer"
+                              title="حذف القاعدة من القائمة"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
-                    {/* Actions */}
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {/* Reorder Up/Down */}
-                      <button
-                        type="button"
-                        disabled={idx === 0 || actionBusy || Boolean(migratingEntryId)}
-                        onClick={() => void handleMoveOrder(idx, 'up')}
-                        className="duo-btn p-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] disabled:opacity-40 cursor-pointer"
-                        title="تحريك للأعلى في الترتيب"
-                      >
-                        <ArrowUp className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        disabled={
-                          idx === poolState.databases.length - 1 ||
-                          actionBusy ||
-                          Boolean(migratingEntryId)
-                        }
-                        onClick={() => void handleMoveOrder(idx, 'down')}
-                        className="duo-btn p-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] disabled:opacity-40 cursor-pointer"
-                        title="تحريك للأسفل في الترتيب"
-                      >
-                        <ArrowDown className="w-4 h-4" />
-                      </button>
+          {/* 2. SECTION B: Untouched Backup Databases */}
+          <div className="duo-card p-5 sm:p-6 flex flex-col gap-4 border-[#A560E8]/60 bg-gradient-to-b from-[#FAF7FF] to-white">
+            <div className="pb-3 border-b-2 border-[#EFE6FF]">
+              <h2 className="text-lg font-black text-[#3C3C3C] flex items-center gap-2">
+                <Radio className="w-5 h-5 text-[#8938D6]" />
+                <span>القواعد الاحتياطية الصامتة (لا تُمس بتاتاً)</span>
+              </h2>
+              <p className="text-xs font-bold text-[#777777] mt-0.5">
+                لا يدخلها أي لاعب ولا يُنقل إليها أي اختبار أو سبورة. تبقى فارغة تماماً وتستيقظ فقط لحظة اكتمال النقل 100% لتُعلن وتُجهّز القاعدة الجديدة لجميع المتصلين.
+              </p>
+            </div>
 
-                      {isExhausted && (
+            {poolState.backupDatabases.length === 0 ? (
+              <div className="p-6 rounded-2xl bg-white border-2 border-dashed border-[#D8B4FE] text-center flex flex-col items-center gap-2">
+                <Radio className="w-8 h-8 text-[#A560E8]" />
+                <p className="text-sm font-black text-[#3C3C3C]">
+                  لا توجد قواعد احتياطية صامتة مضافة حالياً
+                </p>
+                <p className="text-xs font-bold text-[#777777]">
+                  من نموذج الإضافة بالأسفل اختر نوع «قاعدة احتياطية صامتة»، وافحصها 100% لإضافتها هنا.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {poolState.backupDatabases.map((entry) => {
+                  const isDeletingThis = confirmDeleteDbId === entry.id;
+                  return (
+                    <div
+                      key={entry.id}
+                      className="rounded-2xl border-2 border-[#E2D4F8] bg-white p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-start gap-3 min-w-0">
+                        <div className="w-11 h-11 rounded-2xl bg-[#A560E8] border-b-4 border-[#8938D6] text-white flex items-center justify-center font-latin font-black text-base shrink-0">
+                          #{entry.order}
+                        </div>
+                        <div className="flex flex-col gap-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
+                              {entry.label}
+                            </h3>
+                            <span className="px-2.5 py-0.5 rounded-lg bg-[#F3E8FF] border border-[#A560E8]/60 text-[#8938D6] text-[11px] font-black">
+                              {entry.lastAnnouncedToProjectId
+                                ? `أعلنت آخر انتقال ← ${entry.lastAnnouncedToProjectId}`
+                                : 'ساكنة وجاهزة (لا تُمس)'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#777777]">
+                            <span className="font-latin bg-[#F7F7F7] px-2 py-0.5 rounded-lg border border-[#E5E5E5]">
+                              {entry.config.projectId}
+                            </span>
+                            <span className="text-[11px] text-[#46A302] font-black">
+                              ✓ تم التحقق من Rules + OAuth
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
                         <button
                           type="button"
                           disabled={actionBusy || Boolean(migratingEntryId)}
-                          onClick={() => void handleReactivateDb(entry.id)}
-                          className="duo-btn flex items-center gap-1 px-3 py-2 rounded-xl bg-[#FFF4CC] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] text-xs font-black cursor-pointer"
+                          onClick={() => void handleRefreshBackupAuth(entry)}
+                          className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] hover:border-[#A560E8] text-xs font-black text-[#8938D6] cursor-pointer"
+                          title="تأكيد جلسة المبرمج على هذه الاحتياطية لتعمل بدون نوافذ منبثقة أثناء النقل"
                         >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>إعادة تفعيل</span>
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>تجديد تأكيد الدخول</span>
                         </button>
-                      )}
 
-                      {!isActive && (
-                        <>
-                          <button
-                            type="button"
-                            disabled={actionBusy || Boolean(migratingEntryId)}
-                            onClick={() => void handleMigrateAndActivate(entry)}
-                            className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer disabled:opacity-50"
-                          >
-                            {isMigratingThis ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <ArrowRightLeft className="w-3.5 h-3.5" />
-                            )}
-                            <span>نقل وتفعيل للجميع</span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actionBusy || Boolean(migratingEntryId)}
-                            onClick={() => void handleDirectActivateWithoutCopy(entry)}
-                            className="duo-btn flex items-center gap-1 px-3 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer disabled:opacity-50"
-                            title="تبديل فوري للجميع مع مزامنة الحساب عند الدخول"
-                          >
-                            <Zap className="w-3.5 h-3.5" />
-                            <span>تبديل مباشر</span>
-                          </button>
-                        </>
-                      )}
-
-                      {poolState.databases.length > 1 && (
-                        isDeletingThis ? (
+                        {isDeletingThis ? (
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
                               disabled={actionBusy}
-                              onClick={() => void handleRemoveDb(entry.id)}
+                              onClick={() => void handleRemoveDb(entry)}
                               className="duo-btn px-3 py-2 rounded-xl bg-[#FF4B4B] border-2 border-b-4 border-[#EA2B2B] text-white text-xs font-black cursor-pointer"
                             >
                               تأكيد الحذف
@@ -888,33 +986,94 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                             disabled={actionBusy || Boolean(migratingEntryId)}
                             onClick={() => setConfirmDeleteDbId(entry.id)}
                             className="duo-btn p-2 rounded-xl bg-white hover:bg-[#FFDFE0] border-2 border-b-4 border-[#E5E5E5] text-[#EA2B2B] cursor-pointer"
-                            title="حذف من القائمة"
+                            title="حذف القاعدة الاحتياطية"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
-                        )
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {/* Add New Database Form */}
-          <form onSubmit={handleAddDatabase} className="duo-card p-5 sm:p-6 flex flex-col gap-4">
+          {/* 3. Pre-Add Live Verification Wizard & Form */}
+          <form onSubmit={handleVerifyAndAddDatabase} className="duo-card p-5 sm:p-6 flex flex-col gap-4">
             <div className="flex items-center gap-2.5 pb-2 border-b-2 border-[#F0F0F0]">
               <div className="w-9 h-9 rounded-xl bg-[#1CB0F6]/15 text-[#1899D6] flex items-center justify-center">
                 <Plus className="w-5 h-5" />
               </div>
               <div>
                 <h2 className="text-base sm:text-lg font-black text-[#3C3C3C]">
-                  إضافة قاعدة بيانات جديدة للقائمة
+                  فحص 100% وإضافة قاعدة Firebase جديدة
                 </h2>
                 <p className="text-xs font-bold text-[#777777]">
-                  أضف أي عدد تريده من مشاريع Firebase بالترتيب لتعمل كاحتياطي وتناوب تلقائي
+                  لصق firebaseConfig فقط لا يكفي — سيختبر البرنامج وجود Firestore وGoogle OAuth وfirestore.rules الآمنة قبل الحفظ، ويخبرك بالخطوة الناقصة إن وُجدت.
                 </p>
               </div>
+            </div>
+
+            {/* Role Toggle */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                disabled={verifyingAndAdding}
+                onClick={() => {
+                  setNewDbRole('player');
+                  setVerifySteps(null);
+                  setErrorNotice(null);
+                }}
+                className={`p-3.5 rounded-2xl border-2 text-right flex items-start gap-3 cursor-pointer transition-colors ${
+                  newDbRole === 'player'
+                    ? 'bg-[#E6F7FF] border-[#1CB0F6]'
+                    : 'bg-[#F7F7F7] border-[#E5E5E5]'
+                }`}
+              >
+                <Database
+                  className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    newDbRole === 'player' ? 'text-[#1899D6]' : 'text-[#777777]'
+                  }`}
+                />
+                <div>
+                  <div className="text-xs sm:text-sm font-black text-[#3C3C3C]">
+                    قاعدة بيانات (للاعبين والاختبارات)
+                  </div>
+                  <div className="text-[11px] font-bold text-[#777777]">
+                    تُضاف لتسجيل الدخول وتستقبل الغرف والسوابير والاختبارات
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                disabled={verifyingAndAdding}
+                onClick={() => {
+                  setNewDbRole('backup');
+                  setVerifySteps(null);
+                  setErrorNotice(null);
+                }}
+                className={`p-3.5 rounded-2xl border-2 text-right flex items-start gap-3 cursor-pointer transition-colors ${
+                  newDbRole === 'backup'
+                    ? 'bg-[#F3E8FF] border-[#A560E8]'
+                    : 'bg-[#F7F7F7] border-[#E5E5E5]'
+                }`}
+              >
+                <Radio
+                  className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    newDbRole === 'backup' ? 'text-[#8938D6]' : 'text-[#777777]'
+                  }`}
+                />
+                <div>
+                  <div className="text-xs sm:text-sm font-black text-[#3C3C3C]">
+                    قاعدة احتياطية صامتة (لا تُمس بتاتاً)
+                  </div>
+                  <div className="text-[11px] font-bold text-[#777777]">
+                    لا يجلس عليها أي لاعب — فقط تُعلن القاعدة الجديدة بعد النقل 100%
+                  </div>
+                </div>
+              </button>
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -927,7 +1086,12 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 maxLength={70}
                 value={newDbLabel}
                 onChange={(e) => setNewDbLabel(e.target.value)}
-                placeholder={`مثال: قاعدة #${poolState.databases.length + 1} - حساب الاحتياط`}
+                disabled={verifyingAndAdding}
+                placeholder={
+                  newDbRole === 'player'
+                    ? `مثال: قاعدة اللاعبين #${poolState.playerDatabases.length + 1}`
+                    : `مثال: الاحتياطية الصامتة #${poolState.backupDatabases.length + 1}`
+                }
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#1CB0F6] focus:bg-white outline-none text-sm font-bold text-[#3C3C3C]"
               />
             </div>
@@ -941,8 +1105,11 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 dir="ltr"
                 rows={6}
                 value={configInput}
-                onChange={(e) => setConfigInput(e.target.value)}
-                disabled={addingDb}
+                onChange={(e) => {
+                  setConfigInput(e.target.value);
+                  setVerifySteps(null);
+                }}
+                disabled={verifyingAndAdding}
                 placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  authDomain: "project-x.firebaseapp.com",\n  projectId: "project-x",\n  appId: "..."\n};`}
                 className="w-full p-3.5 rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#1CB0F6] focus:bg-white outline-none font-latin text-xs leading-relaxed text-[#3C3C3C]"
               />
@@ -998,13 +1165,131 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
               )}
             </div>
 
+            {/* Live 5-Step Checklist Panel */}
+            {verifySteps && (
+              <div className="p-4 rounded-2xl bg-[#F9FAFB] border-2 border-[#E5E5E5] flex flex-col gap-2.5">
+                <div className="text-xs font-black text-[#3C3C3C] pb-1 border-b border-[#E5E5E5]">
+                  تقرير الفحص الشامل للقاعدة:
+                </div>
+                {verifySteps.map((step) => (
+                  <div
+                    key={step.id}
+                    className={`p-3 rounded-xl border flex flex-col gap-2 ${
+                      step.status === 'passed'
+                        ? 'bg-[#D7FFB8]/40 border-[#58CC02]'
+                        : step.status === 'failed'
+                        ? 'bg-[#FFDFE0]/70 border-[#FF4B4B]'
+                        : step.status === 'running'
+                        ? 'bg-[#E6F7FF] border-[#1CB0F6]'
+                        : 'bg-white border-[#E5E5E5] opacity-70'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 text-xs font-black">
+                      {step.status === 'passed' && (
+                        <CheckCircle2 className="w-4 h-4 text-[#46A302] shrink-0" />
+                      )}
+                      {step.status === 'failed' && (
+                        <XCircle className="w-4 h-4 text-[#EA2B2B] shrink-0" />
+                      )}
+                      {step.status === 'running' && (
+                        <Loader2 className="w-4 h-4 text-[#1899D6] animate-spin shrink-0" />
+                      )}
+                      {step.status === 'pending' && (
+                        <span className="w-4 h-4 rounded-full border-2 border-[#CFCFCF] shrink-0" />
+                      )}
+                      <span
+                        className={
+                          step.status === 'failed'
+                            ? 'text-[#EA2B2B]'
+                            : step.status === 'passed'
+                            ? 'text-[#46A302]'
+                            : 'text-[#3C3C3C]'
+                        }
+                      >
+                        {step.label}
+                      </span>
+                    </div>
+
+                    {step.detail && (
+                      <p className="text-[11px] font-bold text-[#3C3C3C] pr-6">{step.detail}</p>
+                    )}
+                    {step.fixHint && (
+                      <p className="text-[11px] font-extrabold text-[#9A6B00] bg-[#FFF4CC] px-2.5 py-1.5 rounded-lg border border-[#FFC800] mr-6">
+                        الحل المطلوب: {step.fixHint}
+                      </p>
+                    )}
+
+                    {(step.consoleUrl || step.actionType === 'copy_rules' || step.actionType === 'copy_domain') && (
+                      <div className="flex flex-wrap items-center gap-2 pr-6 pt-0.5">
+                        {step.actionType === 'copy_rules' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyRules()}
+                            className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1CB0F6] border-2 border-b-4 border-[#1899D6] text-white text-[11px] font-black cursor-pointer"
+                          >
+                            {copiedRules ? (
+                              <Check className="w-3.5 h-3.5" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                            <span>{copiedRules ? 'تم نسخ firestore.rules' : 'نسخ firestore.rules'}</span>
+                          </button>
+                        )}
+                        {step.actionType === 'copy_domain' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyDomain()}
+                            className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1CB0F6] border-2 border-b-4 border-[#1899D6] text-white text-[11px] font-black cursor-pointer"
+                          >
+                            {copiedDomain ? (
+                              <Check className="w-3.5 h-3.5" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {copiedDomain
+                                ? 'تم نسخ النطاق'
+                                : `نسخ النطاق (${window.location.hostname})`}
+                            </span>
+                          </button>
+                        )}
+                        {step.consoleUrl && (
+                          <a
+                            href={step.consoleUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-[11px] font-black"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>فتح الإعداد في Firebase Console</span>
+                          </a>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={addingDb || !detectedPreview?.ok}
-              className="duo-btn flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-[5px] border-[#1899D6] text-white text-sm sm:text-base font-black cursor-pointer disabled:opacity-50"
+              disabled={verifyingAndAdding || !detectedPreview?.ok}
+              className={`duo-btn flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl border-2 border-b-[5px] text-white text-sm sm:text-base font-black cursor-pointer disabled:opacity-50 ${
+                newDbRole === 'player'
+                  ? 'bg-[#1CB0F6] hover:bg-[#33BCFF] border-[#1899D6]'
+                  : 'bg-[#A560E8] hover:bg-[#B477EE] border-[#8938D6]'
+              }`}
             >
-              {addingDb ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
-              <span>إضافة قاعدة البيانات إلى الترتيب</span>
+              {verifyingAndAdding ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <ShieldCheck className="w-5 h-5" />
+              )}
+              <span>
+                {newDbRole === 'player'
+                  ? 'فحص شامل 100% وإضافة لقواعد البيانات'
+                  : 'فحص شامل 100% وإضافة كقاعدة احتياطية صامتة'}
+              </span>
             </button>
           </form>
         </div>
@@ -1021,7 +1306,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                   ترقية عضو إلى مبرمج
                 </h2>
                 <p className="text-xs font-bold text-[#777777]">
-                  سيظهر تبويب «مبرمج» فوراً لأي عضو تتم ترقيته عبر اسمه الرباعي أو بريده الإلكتروني في جميع القواعد
+                  سيظهر تبويب «مبرمج» وزر «نقل القاعدة» داخل الغرف فوراً لأي عضو تتم ترقيته
                 </p>
               </div>
             </div>
@@ -1128,17 +1413,6 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
             </div>
           </div>
         </div>
-      )}
-
-      {directSwitchProgress && (
-        <DuoLoading
-          variant="overlay"
-          title={directSwitchProgress.title}
-          subtitle={directSwitchProgress.subtitle}
-          detail={directSwitchProgress.detail}
-          percent={directSwitchProgress.percent}
-          accent="blue"
-        />
       )}
     </div>
   );

@@ -433,7 +433,9 @@ export interface CompetitionQuestion {
   updatedAt?: unknown;
 }
 
-/* ===================== إدارة المبرمجين ومسبح قواعد البيانات ===================== */
+/* ===================== إدارة المبرمجين وقواعد البيانات (اللاعبين + الاحتياطية) ===================== */
+
+export type DatabaseRole = 'player' | 'backup';
 
 export interface PoolFirebaseConfig {
   apiKey: string;
@@ -446,13 +448,23 @@ export interface PoolFirebaseConfig {
   firestoreDatabaseId?: string;
 }
 
-export interface PoolDatabaseEntry {
+export interface DatabaseVerificationSummary {
+  firestoreReady: boolean;
+  googleAuthReady: boolean;
+  rulesReady: boolean;
+  verifiedAt: number;
+  verifiedByEmail?: string;
+}
+
+export interface RegisteredDatabaseEntry {
   id: string;
   order: number;
+  role: DatabaseRole;
   label: string;
   config: PoolFirebaseConfig;
-  exhaustedAt: number | null;
-  exhaustedUntil: number | null;
+  verification: DatabaseVerificationSummary;
+  lastUsedAt?: number | null;
+  lastAnnouncedToProjectId?: string | null;
   addedByEmail?: string;
   addedAt: number;
 }
@@ -466,11 +478,23 @@ export interface ProgrammerMember {
   promotedAt: number;
 }
 
+export interface BackupAnnouncementInfo {
+  backupDbId: string;
+  backupProjectId: string;
+  targetProjectId: string;
+  targetConfig: PoolFirebaseConfig;
+  migratedRoomId?: string | null;
+  announcedAt: number;
+  announcedByEmail?: string;
+}
+
 export interface PlatformProgrammerState {
   revision: number;
-  databases: PoolDatabaseEntry[];
-  activeDatabaseId: string;
-  allExhausted: boolean;
+  playerDatabases: RegisteredDatabaseEntry[];
+  backupDatabases: RegisteredDatabaseEntry[];
+  activeTargetConfig: PoolFirebaseConfig;
+  activePlayerDatabaseId: string | null;
+  lastBackupAnnouncement: BackupAnnouncementInfo | null;
   programmers: ProgrammerMember[];
   migratedRoomId?: string | null;
   updatedByEmail?: string;

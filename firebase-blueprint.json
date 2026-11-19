@@ -936,9 +936,9 @@
         "updatedAt"
       ]
     },
-    "PlatformPool": {
-      "title": "PlatformPool",
-      "description": "Ordered database pool, exhaustion tracking, and programmer roster for serverless static hosting",
+    "PlatformRegistry": {
+      "title": "PlatformRegistry",
+      "description": "Clean split registry for verified player databases, untouched backup signaling databases, and programmer roster",
       "type": "object",
       "properties": {
         "id": {
@@ -950,20 +950,21 @@
         "revision": {
           "type": "integer"
         },
-        "activeDatabaseId": {
+        "activePlayerDatabaseId": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$"
+          "maxLength": 128
         },
-        "allExhausted": {
-          "type": "boolean"
+        "activeTargetConfig": {
+          "type": "object"
         },
-        "databases": {
+        "playerDatabases": {
           "type": "array"
         },
-        "exhaustedDatabaseIds": {
+        "backupDatabases": {
           "type": "array"
+        },
+        "lastBackupAnnouncement": {
+          "type": "object"
         },
         "programmers": {
           "type": "array"
@@ -987,10 +988,10 @@
       "required": [
         "id",
         "revision",
-        "activeDatabaseId",
-        "allExhausted",
-        "databases",
-        "exhaustedDatabaseIds",
+        "activePlayerDatabaseId",
+        "activeTargetConfig",
+        "playerDatabases",
+        "backupDatabases",
         "programmers",
         "updatedBy",
         "updatedByName",
@@ -1001,7 +1002,7 @@
   "firestore": {
     "/platform/{docId}": {
       "schema": { "$ref": "#/entities/PlatformPointer" },
-      "description": "Platform-wide active database pointer and pool configuration for automatic failover and serverless sync"
+      "description": "Platform-wide migration announcement pointer and split database registry"
     },
     "/users/{userId}/private/{docId}": {
       "schema": { "$ref": "#/entities/UserProfile" },

@@ -422,25 +422,26 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidPlatformPool(data) {
+    function isValidPlatformRegistry(data) {
       return data.keys().hasAll([
-          'id', 'revision', 'activeDatabaseId', 'allExhausted',
-          'databases', 'exhaustedDatabaseIds', 'programmers',
+          'id', 'revision', 'activePlayerDatabaseId', 'activeTargetConfig',
+          'playerDatabases', 'backupDatabases', 'programmers',
           'updatedBy', 'updatedByName', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'revision', 'activeDatabaseId', 'allExhausted',
-          'databases', 'exhaustedDatabaseIds', 'programmers',
+          'id', 'revision', 'activePlayerDatabaseId', 'activeTargetConfig',
+          'playerDatabases', 'backupDatabases', 'lastBackupAnnouncement', 'programmers',
           'updatedBy', 'updatedByName', 'updatedAt'
         ])
         && isValidId(data.id)
         && data.revision is int && data.revision >= 1 && data.revision <= 1000000
-        && isValidId(data.activeDatabaseId)
-        && data.allExhausted is bool
-        && data.databases is list && data.databases.size() >= 1 && data.databases.size() <= 25
-        && data.databases[0] is map
-        && data.exhaustedDatabaseIds is list && data.exhaustedDatabaseIds.size() <= 25
-        && (data.exhaustedDatabaseIds.size() == 0 || isValidId(data.exhaustedDatabaseIds[0]))
+        && data.activePlayerDatabaseId is string && data.activePlayerDatabaseId.size() <= 128
+        && data.activeTargetConfig is map
+        && data.playerDatabases is list && data.playerDatabases.size() <= 25
+        && (data.playerDatabases.size() == 0 || data.playerDatabases[0] is map)
+        && data.backupDatabases is list && data.backupDatabases.size() <= 25
+        && (data.backupDatabases.size() == 0 || data.backupDatabases[0] is map)
+        && (!('lastBackupAnnouncement' in data) || data.lastBackupAnnouncement is map)
         && data.programmers is list && data.programmers.size() >= 1 && data.programmers.size() <= 25
         && data.programmers[0] is map
         && isValidId(data.updatedBy)
@@ -450,7 +451,7 @@ service cloud.firestore {
     }
 
     match /platform/{docId} {
-      allow get: if isValidId(docId) && (docId == 'migration' || (docId == 'pool' && isVerified()));
+      allow get: if isValidId(docId) && (docId == 'migration' || (docId == 'registry' && isVerified()));
       allow list: if false;
       allow create: if isValidId(docId) && (
         (docId == 'migration' && isVerified()
@@ -458,8 +459,8 @@ service cloud.firestore {
           && incoming().id == docId
           && incoming().migratedBy == request.auth.uid
           && incoming().updatedAt == request.time)
-        || (docId == 'pool' && isMasterProgrammerAuth()
-          && isValidPlatformPool(incoming())
+        || (docId == 'registry' && isMasterProgrammerAuth()
+          && isValidPlatformRegistry(incoming())
           && incoming().id == docId
           && incoming().updatedBy == request.auth.uid
           && incoming().updatedAt == request.time)
@@ -475,22 +476,11 @@ service cloud.firestore {
             'measurementId', 'firestoreDatabaseId', 'migratedBy', 'migratedByName',
             'migratedRoomId', 'migrationEpoch', 'previousConfigs', 'updatedAt'
           ]))
-        || (docId == 'pool' && isVerified()
-          && isValidPlatformPool(incoming())
+        || (docId == 'registry' && isMasterProgrammerAuth()
+          && isValidPlatformRegistry(incoming())
           && incoming().id == existing().id
           && incoming().updatedBy == request.auth.uid
-          && incoming().updatedAt == request.time
-          && (
-            isMasterProgrammerAuth()
-            || (
-              incoming().databases == existing().databases
-              && incoming().programmers == existing().programmers
-              && incoming().diff(existing()).affectedKeys().hasOnly([
-                'activeDatabaseId', 'allExhausted', 'exhaustedDatabaseIds',
-                'revision', 'updatedBy', 'updatedByName', 'updatedAt'
-              ])
-            )
-          ))
+          && incoming().updatedAt == request.time)
       );
       allow delete: if false;
     }

@@ -13,19 +13,19 @@ import {
 import {
   AlertCircle,
   Archive,
+  ArrowRightLeft,
   Code2,
   Database,
   Home,
   ListChecks,
   LogOut,
   RefreshCw,
-  Wrench,
   X,
 } from 'lucide-react';
 import {
-  activateCustomFirebaseConfig,
   activeFirebaseConfig,
   activeProjectId,
+  activateCustomFirebaseConfig,
   auth,
   buildCleanPrimaryUrl,
   clearPendingRejoinRoom,
@@ -36,6 +36,7 @@ import {
   defaultFirebaseConfig,
   firebaseTargetKey,
   getInitialServerPlatformStatus,
+  getLastAppliedBackupDocTs,
   getPendingRejoinRoom,
   getPreviousFirebaseConfigs,
   getTimestampMillis,
@@ -50,8 +51,11 @@ import {
   markSwitchRequiresLogin,
   OperationType,
   resetToDefaultFirebaseConfig,
+  resolveBackupAnnouncementsRest,
   resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
+  saveBackupFirebaseConfigs,
+  setLastAppliedBackupDocTs,
   subscribeQuotaError,
   type FirebaseAppConfig,
   type ServerPlatformPointer,
@@ -60,7 +64,6 @@ import {
   fetchProgrammerSession,
   restoreActiveSupervisorRoomFromSnapshot,
   syncPersonalAccountFromPreviousDbs,
-  triggerAutomaticQuotaFailover,
   type MigrationProgress,
   type PlatformMigrationPointer,
 } from './firebaseMigration';
@@ -86,6 +89,7 @@ import { TestResultsView } from './components/TestResultsView';
 import { SavedTestsView } from './components/SavedTestsView';
 import { MyQuizzesView } from './components/MyQuizzesView';
 import { ProgrammerDashboard } from './components/ProgrammerDashboard';
+import { QuickMigrateModal } from './components/QuickMigrateModal';
 import { DuoOwlEmblem } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
 
@@ -183,9 +187,7 @@ export default function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [quotaAlert, setQuotaAlert] = useState<boolean>(false);
-  const [allExhausted, setAllExhausted] = useState<boolean>(
-    () => getInitialServerPlatformStatus().allExhausted
-  );
+  const [quickMigrateOpen, setQuickMigrateOpen] = useState<boolean>(false);
   const [isProgrammer, setIsProgrammer] = useState<boolean>(false);
   const [isMasterProgrammer, setIsMasterProgrammer] = useState<boolean>(false);
   const [programmerState, setProgrammerState] =
@@ -198,7 +200,7 @@ export default function App() {
   const [pendingRoomNotice, setPendingRoomNotice] = useState<string | null>(null);
   const [autoSwitchNotice, setAutoSwitchNotice] = useState<{
     targetProjectId: string;
-    reason: 'programmer' | 'quota';
+    backupProjectId?: string;
     percent: number;
     title: string;
     subtitle: string;
@@ -244,8 +246,8 @@ export default function App() {
   const firebaseUserRef = useRef(firebaseUser);
   firebaseUserRef.current = firebaseUser;
   const switchingInProgressRef = useRef(false);
-  const failoverInProgressRef = useRef(false);
-  const lastSeenPoolTagRef = useRef<string>('');
+  const backupCheckInProgressRef = useRef(false);
+  const lastSeenRegistryTagRef = useRef<string>('');
 
   const applyRemotePlatformPointer = useCallback(
     (incoming: {
@@ -254,7 +256,8 @@ export default function App() {
       migratedRoomId?: string | null;
       previousConfigs?: FirebaseAppConfig[];
       revision?: string | number;
-      reason?: 'programmer' | 'quota';
+      backupProjectId?: string;
+      backupDocTs?: number;
     }) => {
       if (justConsolidatedFrom || switchingInProgressRef.current) return;
       const ptrCfg = sanitizeFirebaseConfig(incoming.config);
@@ -287,23 +290,25 @@ export default function App() {
       }
 
       switchingInProgressRef.current = true;
-      const reason = incoming.reason === 'quota' ? 'quota' : 'programmer';
+      if (incoming.backupDocTs) {
+        setLastAppliedBackupDocTs(incoming.backupDocTs);
+      }
+
       const destCfg = wantsDefault ? defaultFirebaseConfig : ptrCfg;
       const destProject = destCfg.projectId;
+      const backupProj = incoming.backupProjectId;
 
       setAutoSwitchNotice({
         targetProjectId: destProject,
-        reason,
-        percent: 24,
-        title:
-          reason === 'quota'
-            ? 'جاري التحميل — التحويل لقاعدة بديلة...'
-            : 'جاري التحميل، الرجاء الانتظار قليلاً...',
-        subtitle:
-          reason === 'quota'
-            ? 'انتهت سعة القاعدة الحالية — يتم الآن نقلك تلقائياً إلى القاعدة الاحتياطية وتجهيز تسجيل الدخول'
-            : 'قام المبرمج بتحديث قاعدة البيانات المعتمدة — جاري نقلك تلقائياً لتسجيل الدخول واستكمال العمل',
-        detail: `القاعدة المعتمدة: ${destProject}`,
+        backupProjectId: backupProj,
+        percent: 26,
+        title: backupProj
+          ? 'جاري تجهيز القاعدة الجديدة عبر القاعدة الاحتياطية...'
+          : 'جاري التحميل، الرجاء الانتظار قليلاً...',
+        subtitle: backupProj
+          ? `استيقظت القاعدة الاحتياطية (${backupProj}) وتقوم الآن بتهيئة القاعدة الجديدة (${destProject}) لتسجيل الدخول واستكمال الجلسة`
+          : 'قام المبرمج بتحديث قاعدة البيانات المعتمدة — جاري نقلك تلقائياً لتسجيل الدخول واستكمال العمل',
+        detail: `القاعدة الجديدة: ${destProject}`,
       });
 
       const currentUserPresent = Boolean(firebaseUserRef.current);
@@ -318,8 +323,8 @@ export default function App() {
           prev
             ? {
                 ...prev,
-                percent: 62,
-                subtitle: 'يتم الآن تحديث إعدادات الاتصال وفصل الجلسة السابقة...',
+                percent: 66,
+                subtitle: 'يتم الآن إغلاق الجلسة السابقة وتحديث إعدادات الاتصال بالقاعدة الجديدة...',
               }
             : null
         );
@@ -346,8 +351,8 @@ export default function App() {
             ? {
                 ...prev,
                 percent: 100,
-                title: 'اكتمل التجهيز! جاري الانتقال الآن...',
-                subtitle: 'سيتم فتح شاشة تسجيل الدخول على القاعدة الجديدة الآن',
+                title: 'تمت تهيئة القاعدة الجديدة بنجاح!',
+                subtitle: 'جاري نقلك الآن لتسجيل الدخول على القاعدة الجديدة...',
               }
             : null
         );
@@ -365,63 +370,45 @@ export default function App() {
             url.searchParams.delete('room');
           }
           window.location.replace(url.toString());
-        }, 280);
-      }, 320);
+        }, 320);
+      }, 340);
     },
     []
   );
 
-  const triggerAutoFailover = useCallback(async () => {
-    if (failoverInProgressRef.current || switchingInProgressRef.current) return;
-    failoverInProgressRef.current = true;
-    setAutoSwitchNotice({
-      targetProjectId: activeProjectId,
-      reason: 'quota',
-      percent: 15,
-      title: 'جاري التحميل — التحويل لقاعدة بديلة...',
-      subtitle: 'وصلت القاعدة الحالية للحد اليومي — جاري التبديل تلقائياً لقاعدة احتياطية...',
-      detail: 'البحث عن القاعدة المتاحة التالية',
-    });
+  const checkBackupAnnouncementSignal = useCallback(async () => {
+    if (backupCheckInProgressRef.current || switchingInProgressRef.current) return;
+    backupCheckInProgressRef.current = true;
     try {
-      const res = await triggerAutomaticQuotaFailover({
-        failedProjectId: activeFirebaseConfig.projectId,
-        failedFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId,
-      });
-      if (!res) {
-        setAutoSwitchNotice(null);
-        return;
-      }
-      if (res.allExhausted) {
-        setAutoSwitchNotice(null);
-        setAllExhausted(true);
-        return;
-      }
-      setAllExhausted(false);
-      if (res.pointer?.config) {
+      const backupPtr = await resolveBackupAnnouncementsRest();
+      if (!backupPtr) return;
+      if (
+        backupPtr.updatedAtMs > getLastAppliedBackupDocTs() ||
+        !isSameFirebaseTarget(backupPtr.config, activeFirebaseConfig)
+      ) {
         applyRemotePlatformPointer({
-          config: res.pointer.config,
-          resetToDefault: res.pointer.resetToDefault,
-          migratedRoomId: res.pointer.migratedRoomId,
-          previousConfigs: res.pointer.previousConfigs,
-          revision: res.pointer.revision || res.pointer.updatedAt || Date.now(),
-          reason: 'quota',
+          config: backupPtr.config,
+          resetToDefault: backupPtr.resetToDefault,
+          migratedRoomId: backupPtr.migratedRoomId,
+          previousConfigs: backupPtr.previousConfigs,
+          revision: backupPtr.updatedAtMs,
+          backupProjectId: backupPtr.announcedFromBackupProjectId,
+          backupDocTs: backupPtr.updatedAtMs,
         });
-      } else {
-        setAutoSwitchNotice(null);
       }
     } finally {
       window.setTimeout(() => {
-        failoverInProgressRef.current = false;
-      }, 4000);
+        backupCheckInProgressRef.current = false;
+      }, 3000);
     }
   }, [applyRemotePlatformPointer]);
 
   useEffect(() => {
     return subscribeQuotaError(() => {
       setQuotaAlert(true);
-      void triggerAutoFailover();
+      void checkBackupAnnouncementSignal();
     });
-  }, [triggerAutoFailover]);
+  }, [checkBackupAnnouncementSignal]);
 
   const refreshProgrammerState = useCallback(
     async (userOverride?: User | null, nameOverride?: string | null) => {
@@ -463,7 +450,6 @@ export default function App() {
         if (res.mode) setProgrammerMode(res.mode);
         if (res.state) {
           setProgrammerState(res.state);
-          setAllExhausted(Boolean(res.state.allExhausted));
         }
       } catch (err) {
         const msg =
@@ -500,7 +486,7 @@ export default function App() {
     }
   }, []);
 
-  // Watch real-time server SSE stream + focus/poll so ALL open devices switch immediately (pre-login or active)
+  // Watch real-time server SSE stream + static Backup DB fallback so ALL connected devices switch immediately when a migration completes
   useEffect(() => {
     if (justConsolidatedFrom) return;
     let disposed = false;
@@ -508,24 +494,33 @@ export default function App() {
 
     const handleServerPayload = (
       ptr: ServerPlatformPointer | null | undefined,
-      payloadAllExhausted?: boolean,
-      poolUpdatedAt?: number,
+      counts?: {
+        playerDatabasesCount?: number;
+        backupDatabasesCount?: number;
+        backupConfigs?: FirebaseAppConfig[];
+        poolUpdatedAt?: number;
+      },
       payloadType?: string
     ) => {
       if (disposed) return;
-      const exhaustedNow = Boolean(payloadAllExhausted ?? ptr?.allExhausted);
-      setAllExhausted(exhaustedNow);
 
-      const poolTag = `${ptr?.revision || 0}::${poolUpdatedAt || ptr?.updatedAt || 0}::${ptr?.totalDatabases || 0}`;
-      if (poolTag !== lastSeenPoolTagRef.current) {
-        const hadPrevTag = Boolean(lastSeenPoolTagRef.current);
-        lastSeenPoolTagRef.current = poolTag;
+      if (Array.isArray(counts?.backupConfigs)) {
+        saveBackupFirebaseConfigs(counts.backupConfigs);
+      } else if (Array.isArray(ptr?.backupConfigs)) {
+        saveBackupFirebaseConfigs(ptr.backupConfigs);
+      }
+
+      const regTag = `${ptr?.revision || 0}::${counts?.poolUpdatedAt || ptr?.updatedAt || 0}::${
+        counts?.playerDatabasesCount ?? 0
+      }::${counts?.backupDatabasesCount ?? 0}`;
+      if (regTag !== lastSeenRegistryTagRef.current) {
+        const hadPrevTag = Boolean(lastSeenRegistryTagRef.current);
+        lastSeenRegistryTagRef.current = regTag;
         if ((hadPrevTag || payloadType === 'update') && firebaseUserRef.current) {
           void refreshProgrammerState(firebaseUserRef.current);
         }
       }
 
-      if (exhaustedNow) return;
       if (!ptr || !ptr.config) return;
       applyRemotePlatformPointer({
         config: ptr.config,
@@ -533,11 +528,12 @@ export default function App() {
         migratedRoomId: ptr.migratedRoomId,
         previousConfigs: ptr.previousConfigs,
         revision: ptr.revision || ptr.updatedAt || ptr.migrationEpoch || CURRENT_DB_EPOCH,
+        backupProjectId: ptr.lastBackupAnnouncement?.backupProjectId,
       });
     };
 
     let lastStaticRestCheckAt = 0;
-    const checkStaticFirestoreChain = async (force = false) => {
+    const checkStaticBackupAndChain = async (force = false) => {
       if (disposed) return;
       const now = Date.now();
       if (!force && now - lastStaticRestCheckAt < 14_000) return;
@@ -551,6 +547,8 @@ export default function App() {
           migratedRoomId: restPtr.migratedRoomId,
           previousConfigs: restPtr.previousConfigs,
           revision: restPtr.updatedAtMs || restPtr.migrationEpoch || CURRENT_DB_EPOCH,
+          backupProjectId: restPtr.announcedFromBackupProjectId,
+          backupDocTs: restPtr.announcedFromBackupProjectId ? restPtr.updatedAtMs : undefined,
         });
       } catch {
         // Ignore transient network errors
@@ -571,16 +569,18 @@ export default function App() {
         if (resp.ok && contentType.includes('application/json')) {
           const data = (await resp.json()) as {
             pointer?: ServerPlatformPointer | null;
-            allExhausted?: boolean;
+            playerDatabasesCount?: number;
+            backupDatabasesCount?: number;
+            backupConfigs?: FirebaseAppConfig[];
             poolUpdatedAt?: number;
           };
-          handleServerPayload(data?.pointer, data?.allExhausted, data?.poolUpdatedAt);
+          handleServerPayload(data?.pointer, data);
           return;
         }
       } catch {
-        // Static host (GitHub Pages / Netlify) — check Firestore REST migration chain below
+        // Static host or server offline — fall back to REST check
       }
-      await checkStaticFirestoreChain(forceRestFallback);
+      await checkStaticBackupAndChain(forceRestFallback);
     };
 
     try {
@@ -590,16 +590,18 @@ export default function App() {
           const msg = JSON.parse(event.data) as {
             type?: string;
             pointer?: ServerPlatformPointer | null;
-            allExhausted?: boolean;
+            playerDatabasesCount?: number;
+            backupDatabasesCount?: number;
+            backupConfigs?: FirebaseAppConfig[];
             poolUpdatedAt?: number;
           };
-          handleServerPayload(msg?.pointer, msg?.allExhausted, msg?.poolUpdatedAt, msg?.type);
+          handleServerPayload(msg?.pointer, msg, msg?.type);
         } catch {
           // Ignore malformed SSE payload
         }
       };
       es.onerror = () => {
-        // Browser auto-reconnects or fallback polling handles static hosting
+        // Browser auto-reconnects or polling checks static fallback
       };
     } catch {
       // EventSource unsupported or static host
@@ -627,7 +629,7 @@ export default function App() {
     };
   }, [applyRemotePlatformPointer, refreshProgrammerState]);
 
-  // Watch Firestore platform/migration AND platform/pool live so ALL users switch & ALL programmers stay synced
+  // Watch Firestore platform/migration AND platform/registry live so ALL users switch & ALL programmers stay synced
   useEffect(() => {
     if (justConsolidatedFrom) return;
     const unsubMigration = onSnapshot(
@@ -647,27 +649,27 @@ export default function App() {
         });
       },
       () => {
-        // Silent fallback when unauthenticated on older rules or quota-limited DB
+        // Silent fallback when unauthenticated or offline
       }
     );
 
-    let unsubPool: (() => void) | null = null;
+    let unsubRegistry: (() => void) | null = null;
     if (firebaseUser?.emailVerified) {
-      unsubPool = onSnapshot(
-        doc(db, 'platform', 'pool'),
+      unsubRegistry = onSnapshot(
+        doc(db, 'platform', 'registry'),
         (snap) => {
           if (!snap.exists()) return;
           void refreshProgrammerState(firebaseUser);
         },
         () => {
-          // Silent fallback if pool doc absent or restricted
+          // Silent fallback if registry doc absent
         }
       );
     }
 
     return () => {
       unsubMigration();
-      unsubPool?.();
+      unsubRegistry?.();
     };
   }, [
     applyRemotePlatformPointer,
@@ -894,9 +896,9 @@ export default function App() {
       }
       if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
         setQuotaAlert(true);
-        void triggerAutoFailover();
+        void checkBackupAnnouncementSignal();
         setProfileLoadError(
-          'تم الوصول للحد اليومي للقاعدة الحالية — جاري التبديل تلقائياً لقاعدة بديلة...'
+          'تم الوصول للحد اليومي للقاعدة الحالية — يرجى تحديث الصفحة بعد قيام المبرمج بتفعيل قاعدة بديلة.'
         );
       } else if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
         setProfileLoadError(
@@ -1035,93 +1037,8 @@ export default function App() {
 
   const isSupervisor = Boolean(room && room.supervisorId === profile?.uid);
 
-  const handleMaintenanceProgrammerEntry = async () => {
-    if (firebaseUser) {
-      await refreshProgrammerState(firebaseUser, profile?.fullNameQuad || firebaseUser.displayName);
-      setTab('programmer');
-      return;
-    }
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      await refreshProgrammerState(cred.user, cred.user.displayName);
-      setTab('programmer');
-    } catch {
-      // User dismissed popup
-    }
-  };
-
-  // Show maintenance screen when ALL databases in the programmer pool hit Quota,
-  // unless a verified programmer enters the Programmer Console to add/reactivate DBs
-  if (allExhausted && !(isProgrammer && tab === 'programmer')) {
-    return (
-      <AppErrorBoundary>
-        <div className="min-h-screen bg-[#FFFFFF] flex flex-col items-center justify-center p-4 sm:p-6">
-          <div className="duo-card max-w-lg w-full p-7 sm:p-9 text-center flex flex-col items-center gap-5 border-[#FFC800] bg-gradient-to-b from-[#FFFDF5] to-white">
-            <div className="w-16 h-16 rounded-2xl bg-[#FFF4CC] border-2 border-[#FFC800] text-[#E5A400] flex items-center justify-center">
-              <Wrench className="w-9 h-9 animate-pulse" />
-            </div>
-            <DuoOwlEmblem className="w-14 h-14 -mt-2" />
-            <div className="flex flex-col gap-2">
-              <h1 className="text-2xl sm:text-3xl font-black text-[#3C3C3C]">
-                جاري إصلاح مشاكل البرنامج
-              </h1>
-              <p className="text-sm font-bold text-[#777777] leading-relaxed">
-                يعمل الفريق التقني حالياً على صيانة الخوادم وقواعد البيانات لضمان أفضل تجربة للجميع. سيعود البرنامج للعمل تلقائياً فور الانتهاء.
-              </p>
-            </div>
-
-            <div className="w-full h-3 rounded-full bg-[#F0F0F0] overflow-hidden border border-[#E5E5E5]">
-              <div className="h-full w-2/3 bg-gradient-to-l from-[#FFC800] to-[#58CC02] rounded-full animate-pulse" />
-            </div>
-
-            <div className="flex flex-wrap items-center justify-center gap-3 w-full">
-              <button
-                type="button"
-                onClick={() => window.location.reload()}
-                className="duo-btn flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-sm font-black cursor-pointer"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>تحديث والتحقق الآن</span>
-              </button>
-              {isProgrammer && (
-                <button
-                  type="button"
-                  onClick={() => setTab('programmer')}
-                  className="duo-btn flex items-center gap-2 px-5 py-3 rounded-2xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-sm font-black cursor-pointer"
-                >
-                  <Code2 className="w-4 h-4" />
-                  <span>فتح لوحة المبرمج</span>
-                </button>
-              )}
-            </div>
-
-            {!isProgrammer && (
-              <button
-                type="button"
-                onClick={() => void handleMaintenanceProgrammerEntry()}
-                className="text-xs font-extrabold text-[#AFAFAF] hover:text-[#8938D6] transition-colors cursor-pointer pt-1"
-              >
-                دخول المبرمج للصيانة
-              </button>
-            )}
-          </div>
-        </div>
-        {autoSwitchNotice && (
-          <DuoLoading
-            variant="overlay"
-            title={autoSwitchNotice.title}
-            subtitle={autoSwitchNotice.subtitle}
-            detail={autoSwitchNotice.detail}
-            percent={autoSwitchNotice.percent}
-            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'green'}
-          />
-        )}
-      </AppErrorBoundary>
-    );
-  }
-
-  // Emergency direct view into Programmer Console if all DBs were exhausted OR profile Firestore failed
-  if (isProgrammer && tab === 'programmer' && firebaseUser && (!profile || allExhausted)) {
+  // Direct view into Programmer Console if profile Firestore load failed on current DB
+  if (isProgrammer && tab === 'programmer' && firebaseUser && !profile) {
     return (
       <AppErrorBoundary>
         <div className="min-h-screen bg-[#FFFFFF] flex flex-col">
@@ -1135,15 +1052,13 @@ export default function App() {
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                {!allExhausted && (
-                  <button
-                    type="button"
-                    onClick={() => setTab('home')}
-                    className="duo-btn px-3.5 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
-                  >
-                    العودة
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setTab('home')}
+                  className="duo-btn px-3.5 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                >
+                  العودة
+                </button>
                 <button
                   type="button"
                   onClick={() => void signOut(auth)}
@@ -1165,12 +1080,9 @@ export default function App() {
                 isMaster={isMasterProgrammer}
                 backendMode={programmerMode}
                 poolState={programmerState}
-                onPoolStateUpdated={(next) => {
-                  setProgrammerState(next);
-                  setAllExhausted(Boolean(next.allExhausted));
-                }}
+                onPoolStateUpdated={(next) => setProgrammerState(next)}
                 onRefreshState={() =>
-                  refreshProgrammerState(firebaseUser, profile?.fullNameQuad || firebaseUser.displayName)
+                  refreshProgrammerState(firebaseUser, firebaseUser.displayName)
                 }
               />
             ) : programmerLoading || !programmerError ? (
@@ -1199,7 +1111,7 @@ export default function App() {
                     onClick={() =>
                       void refreshProgrammerState(
                         firebaseUser,
-                        profile?.fullNameQuad || firebaseUser.displayName
+                        firebaseUser.displayName
                       )
                     }
                     className="duo-btn px-5 py-2.5 rounded-xl bg-[#A560E8] border-2 border-b-4 border-[#8938D6] text-white text-sm font-black cursor-pointer"
@@ -1266,7 +1178,7 @@ export default function App() {
             subtitle={autoSwitchNotice.subtitle}
             detail={autoSwitchNotice.detail}
             percent={autoSwitchNotice.percent}
-            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
+            accent={autoSwitchNotice.backupProjectId ? 'purple' : 'blue'}
           />
         )}
       </>
@@ -1327,7 +1239,7 @@ export default function App() {
             }
           }}
           onQuotaDetected={() => {
-            void triggerAutoFailover();
+            void checkBackupAnnouncementSignal();
           }}
         />
         {personalSyncProgress && (
@@ -1346,7 +1258,7 @@ export default function App() {
             subtitle={autoSwitchNotice.subtitle}
             detail={autoSwitchNotice.detail}
             percent={autoSwitchNotice.percent}
-            accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
+            accent={autoSwitchNotice.backupProjectId ? 'purple' : 'blue'}
           />
         )}
       </AppErrorBoundary>
@@ -1438,17 +1350,33 @@ export default function App() {
               </div>
             )}
 
-            {/* Zone 3: Room / Auth Action (No database badges visible to regular users!) */}
+            {/* Zone 3: Room / Auth Action (Programmer gets mid-exam transfer button inside rooms!) */}
             <div className="flex items-center gap-2 shrink-0">
               {activeRoomId ? (
-                <button
-                  type="button"
-                  onClick={() => handleLeaveRoom('home')}
-                  className="duo-btn px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] sm:text-xs font-black text-[#777777] hover:text-[#3C3C3C] whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <span className="sm:hidden">مغادرة</span>
-                  <span className="hidden sm:inline">مغادرة الغرفة</span>
-                </button>
+                <>
+                  {isProgrammer && room && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void refreshProgrammerState();
+                        setQuickMigrateOpen(true);
+                      }}
+                      className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-[11px] sm:text-xs font-black whitespace-nowrap shrink-0 cursor-pointer"
+                      title="نقل الغرفة والاختبار إلى قاعدة أخرى من قواعد البيانات الآن"
+                    >
+                      <ArrowRightLeft className="w-3.5 h-3.5" />
+                      <span>نقل القاعدة</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleLeaveRoom('home')}
+                    className="duo-btn px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] sm:text-xs font-black text-[#777777] hover:text-[#3C3C3C] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <span className="sm:hidden">مغادرة</span>
+                    <span className="hidden sm:inline">مغادرة الغرفة</span>
+                  </button>
+                </>
               ) : (
                 <button
                   type="button"
@@ -1464,14 +1392,14 @@ export default function App() {
           </div>
         </header>
 
-        {/* Global Quota Auto-Failover Banner */}
+        {/* Quota Alert Banner */}
         {quotaAlert && (
           <div className="bg-[#FFF4CC] border-b-2 border-[#FFC800] px-3 sm:px-6 py-3">
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 text-[#9A6B00] text-xs sm:text-sm font-black">
-                <RefreshCw className="w-5 h-5 shrink-0 animate-spin" />
+                <AlertCircle className="w-5 h-5 shrink-0" />
                 <span>
-                  وصل الضغط الحالي للحد اليومي — جاري التبديل تلقائياً لقاعدة بيانات احتياطية لاستكمال العمل دون توقف...
+                  وصلت القاعدة الحالية للحد اليومي (Quota) — يمكن للمبرمج نقل المنصة الآن لقاعدة بيانات بديلة.
                 </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1654,10 +1582,7 @@ export default function App() {
                 isMaster={isMasterProgrammer}
                 backendMode={programmerMode}
                 poolState={programmerState}
-                onPoolStateUpdated={(next) => {
-                  setProgrammerState(next);
-                  setAllExhausted(Boolean(next.allExhausted));
-                }}
+                onPoolStateUpdated={(next) => setProgrammerState(next)}
                 onRefreshState={() =>
                   refreshProgrammerState(firebaseUser, profile.fullNameQuad)
                 }
@@ -1697,6 +1622,22 @@ export default function App() {
           )}
         </main>
       </div>
+      {isProgrammer && room && (
+        <QuickMigrateModal
+          open={quickMigrateOpen}
+          onClose={() => setQuickMigrateOpen(false)}
+          firebaseUser={firebaseUser}
+          profile={profile}
+          currentRoom={room}
+          isSupervisorInCurrentRoom={isSupervisor}
+          poolState={programmerState}
+          onOpenFullDashboard={() => {
+            setQuickMigrateOpen(false);
+            setActiveRoomId(null);
+            setTab('programmer');
+          }}
+        />
+      )}
       {autoSwitchNotice && (
         <DuoLoading
           variant="overlay"
@@ -1704,7 +1645,7 @@ export default function App() {
           subtitle={autoSwitchNotice.subtitle}
           detail={autoSwitchNotice.detail}
           percent={autoSwitchNotice.percent}
-          accent={autoSwitchNotice.reason === 'quota' ? 'gold' : 'blue'}
+          accent={autoSwitchNotice.backupProjectId ? 'purple' : 'blue'}
         />
       )}
       {personalSyncProgress && (

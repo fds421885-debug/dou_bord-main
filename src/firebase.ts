@@ -15,7 +15,9 @@ import {
   DB_EPOCH_STORAGE_KEY,
   defaultFirebaseConfig,
   firebaseTargetKey,
+  getBackupFirebaseConfigs,
   getInitialServerPlatformStatus,
+  getLastAppliedBackupDocTs,
   getPreviousFirebaseConfigs,
   hasSwitchRequiresLogin,
   isMasterProgrammerIdentity,
@@ -25,10 +27,15 @@ import {
   MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
   PENDING_REJOIN_ROOM_KEY,
+  resolveBackupAnnouncementsRest,
   resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
+  saveBackupFirebaseConfigs,
   savePreviousFirebaseConfigs,
+  setLastAppliedBackupDocTs,
   SYNCED_SOURCES_KEY_PREFIX,
+  wipeLegacyDatabaseStorage,
+  type BackupSignalPayload,
   type FirebaseAppConfig,
   type InitialServerPlatformStatus,
   type ResolvedRemotePointer,
@@ -40,7 +47,9 @@ export {
   CURRENT_DB_EPOCH,
   defaultFirebaseConfig,
   firebaseTargetKey,
+  getBackupFirebaseConfigs,
   getInitialServerPlatformStatus,
+  getLastAppliedBackupDocTs,
   getPreviousFirebaseConfigs,
   hasSwitchRequiresLogin,
   isMasterProgrammerIdentity,
@@ -49,9 +58,14 @@ export {
   MASTER_PROGRAMMER_EMAIL,
   MASTER_PROGRAMMER_NAME,
   normalizeArabicName,
+  resolveBackupAnnouncementsRest,
   resolveLatestFirestoreMigrationRest,
   sanitizeFirebaseConfig,
+  saveBackupFirebaseConfigs,
   savePreviousFirebaseConfigs,
+  setLastAppliedBackupDocTs,
+  wipeLegacyDatabaseStorage,
+  type BackupSignalPayload,
   type FirebaseAppConfig,
   type InitialServerPlatformStatus,
   type ResolvedRemotePointer,
@@ -182,22 +196,12 @@ function resolveInitialConfig(): {
           ? decodedPayload.config
           : null;
 
-      // Consolidate anyone still on a custom database under the old system back to the primary database
+      // Reset all legacy pool & custom DB keys cleanly when upgrading to clean split epoch
       if (savedEpoch !== CURRENT_DB_EPOCH || legacyUrlCustom) {
+        wipeLegacyDatabaseStorage();
         localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
 
         if (!isNewEpochLink && (savedCustom || legacyUrlCustom)) {
-          const legacyList: FirebaseAppConfig[] = [];
-          if (savedCustom) legacyList.push(savedCustom);
-          if (legacyUrlCustom) legacyList.push(legacyUrlCustom);
-
-          savePreviousFirebaseConfigs(
-            [...legacyList, ...getPreviousFirebaseConfigs()],
-            defaultFirebaseConfig
-          );
-          localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
-          clearStaleRoomAndSessionKeys();
-
           let urlChanged = false;
           if (url.searchParams.has('fb')) {
             url.searchParams.delete('fb');

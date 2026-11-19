@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
+type DatabaseRole = 'player' | 'backup';
+
 interface SanitizedFirebaseConfig {
   apiKey: string;
   authDomain: string;
@@ -14,13 +16,23 @@ interface SanitizedFirebaseConfig {
   firestoreDatabaseId?: string;
 }
 
-interface PoolDatabaseEntry {
+interface DatabaseVerificationSummary {
+  firestoreReady: boolean;
+  googleAuthReady: boolean;
+  rulesReady: boolean;
+  verifiedAt: number;
+  verifiedByEmail?: string;
+}
+
+interface RegisteredDatabaseEntry {
   id: string;
   order: number;
+  role: DatabaseRole;
   label: string;
   config: SanitizedFirebaseConfig;
-  exhaustedAt: number | null;
-  exhaustedUntil: number | null;
+  verification: DatabaseVerificationSummary;
+  lastUsedAt?: number | null;
+  lastAnnouncedToProjectId?: string | null;
   addedByEmail?: string;
   addedAt: number;
 }
@@ -34,12 +46,24 @@ interface ProgrammerMember {
   promotedAt: number;
 }
 
+interface BackupAnnouncementInfo {
+  backupDbId: string;
+  backupProjectId: string;
+  targetProjectId: string;
+  targetConfig: SanitizedFirebaseConfig;
+  migratedRoomId?: string | null;
+  announcedAt: number;
+  announcedByEmail?: string;
+}
+
 interface PlatformState {
   revision: number;
-  migrationEpoch?: string;
-  databases: PoolDatabaseEntry[];
-  activeDatabaseId: string;
-  allExhausted: boolean;
+  migrationEpoch: string;
+  playerDatabases: RegisteredDatabaseEntry[];
+  backupDatabases: RegisteredDatabaseEntry[];
+  activeTargetConfig: SanitizedFirebaseConfig;
+  activePlayerDatabaseId: string | null;
+  lastBackupAnnouncement: BackupAnnouncementInfo | null;
   programmers: ProgrammerMember[];
   migratedRoomId?: string | null;
   previousConfigs: SanitizedFirebaseConfig[];
@@ -54,10 +78,9 @@ interface PublicPlatformPointer {
   migratedRoomId?: string | null;
   migrationEpoch: string;
   previousConfigs: SanitizedFirebaseConfig[];
-  activeDatabaseId: string;
-  activeOrder: number;
-  totalDatabases: number;
-  allExhausted: boolean;
+  backupConfigs: SanitizedFirebaseConfig[];
+  activePlayerDatabaseId: string | null;
+  lastBackupAnnouncement: BackupAnnouncementInfo | null;
   revision: number;
   updatedAt: number;
 }
@@ -67,10 +90,9 @@ const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.js
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
-const CURRENT_DB_EPOCH = 'consolidated_siiiiii_3720b_2026_11_18';
+const CURRENT_DB_EPOCH = 'clean_split_v3_2026_11_18';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
-const QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 function normalizeArabicName(input: string | undefined | null): string {
   if (!input) return '';
@@ -236,74 +258,6 @@ async function verifyFirebaseIdToken(
   return { ok: true, email, name, uid };
 }
 
-function createInitialState(): PlatformState {
-  const now = Date.now();
-  const databases: PoolDatabaseEntry[] = [
-    {
-      id: 'primary_default',
-      order: 1,
-      label: 'القاعدة الأساسية (#1)',
-      config: defaultAppletConfig,
-      exhaustedAt: null,
-      exhaustedUntil: null,
-      addedAt: now,
-    },
-  ];
-  const previousConfigs: SanitizedFirebaseConfig[] = [];
-
-  // Preserve any legacy config as a backup entry in pool while starting everyone on primary DB for the new epoch
-  try {
-    if (fs.existsSync(LEGACY_POINTER_FILE_PATH)) {
-      const raw = fs.readFileSync(LEGACY_POINTER_FILE_PATH, 'utf8');
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const legacyCfg = sanitizeConfig(parsed?.config);
-      if (legacyCfg && !isSameConfig(legacyCfg, defaultAppletConfig)) {
-        databases.push({
-          id: 'db_2',
-          order: 2,
-          label: `قاعدة مضافة (#2) - ${legacyCfg.projectId}`,
-          config: legacyCfg,
-          exhaustedAt: null,
-          exhaustedUntil: null,
-          addedByEmail:
-            typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
-          addedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : now,
-        });
-        previousConfigs.push(legacyCfg);
-      }
-    }
-  } catch {
-    // Ignore legacy read errors
-  }
-
-  return {
-    revision: 1,
-    migrationEpoch: CURRENT_DB_EPOCH,
-    databases,
-    activeDatabaseId: 'primary_default',
-    allExhausted: false,
-    programmers: [
-      {
-        id: 'master_programmer',
-        fullNameQuad: MASTER_PROGRAMMER_NAME,
-        email: MASTER_PROGRAMMER_EMAIL,
-        isMaster: true,
-        promotedAt: now,
-      },
-    ],
-    migratedRoomId: null,
-    previousConfigs,
-    updatedAt: now,
-  };
-}
-
-function renumberDatabases(list: PoolDatabaseEntry[]): PoolDatabaseEntry[] {
-  return list.map((item, idx) => ({
-    ...item,
-    order: idx + 1,
-  }));
-}
-
 function ensureMasterProgrammerPresent(members: ProgrammerMember[]): ProgrammerMember[] {
   const hasMaster = members.some(
     (m) =>
@@ -331,80 +285,94 @@ function ensureMasterProgrammerPresent(members: ProgrammerMember[]): ProgrammerM
   ];
 }
 
+function renumberEntries(list: RegisteredDatabaseEntry[]): RegisteredDatabaseEntry[] {
+  return list.map((item, idx) => ({
+    ...item,
+    order: idx + 1,
+  }));
+}
+
+function createCleanInitialState(preserveProgrammers?: ProgrammerMember[]): PlatformState {
+  const now = Date.now();
+  try {
+    if (fs.existsSync(LEGACY_POINTER_FILE_PATH)) {
+      fs.unlinkSync(LEGACY_POINTER_FILE_PATH);
+    }
+  } catch {
+    // Ignore unlink failure
+  }
+
+  return {
+    revision: 1,
+    migrationEpoch: CURRENT_DB_EPOCH,
+    playerDatabases: [],
+    backupDatabases: [],
+    activeTargetConfig: defaultAppletConfig,
+    activePlayerDatabaseId: null,
+    lastBackupAnnouncement: null,
+    programmers: ensureMasterProgrammerPresent(preserveProgrammers || []),
+    migratedRoomId: null,
+    previousConfigs: [],
+    updatedAt: now,
+  };
+}
+
+function sanitizeVerification(raw: unknown, now: number): DatabaseVerificationSummary {
+  const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  return {
+    firestoreReady: Boolean(obj.firestoreReady ?? true),
+    googleAuthReady: Boolean(obj.googleAuthReady ?? true),
+    rulesReady: Boolean(obj.rulesReady ?? true),
+    verifiedAt: typeof obj.verifiedAt === 'number' ? obj.verifiedAt : now,
+    verifiedByEmail: typeof obj.verifiedByEmail === 'string' ? obj.verifiedByEmail : undefined,
+  };
+}
+
+function parseRegisteredEntries(
+  rawList: unknown,
+  role: DatabaseRole
+): RegisteredDatabaseEntry[] {
+  if (!Array.isArray(rawList)) return [];
+  const now = Date.now();
+  const out: RegisteredDatabaseEntry[] = [];
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const d = item as Record<string, unknown>;
+    const cfg = sanitizeConfig(d.config);
+    if (!cfg) continue;
+    if (out.some((x) => isSameConfig(x.config, cfg))) continue;
+    out.push({
+      id:
+        typeof d.id === 'string' && d.id
+          ? d.id
+          : `${role}_${out.length + 1}_${cfg.projectId}`,
+      order: typeof d.order === 'number' ? d.order : out.length + 1,
+      role,
+      label:
+        typeof d.label === 'string' && d.label.trim()
+          ? d.label.trim().slice(0, 80)
+          : cfg.projectId,
+      config: cfg,
+      verification: sanitizeVerification(d.verification, now),
+      lastUsedAt: typeof d.lastUsedAt === 'number' ? d.lastUsedAt : null,
+      lastAnnouncedToProjectId:
+        typeof d.lastAnnouncedToProjectId === 'string' ? d.lastAnnouncedToProjectId : null,
+      addedByEmail: typeof d.addedByEmail === 'string' ? d.addedByEmail : undefined,
+      addedAt: typeof d.addedAt === 'number' ? d.addedAt : now,
+    });
+  }
+  return renumberEntries(out.sort((a, b) => a.order - b.order));
+}
+
 function loadPlatformState(): PlatformState {
   try {
     if (!fs.existsSync(STATE_FILE_PATH)) {
-      const initial = createInitialState();
+      const initial = createCleanInitialState();
       savePlatformState(initial);
       return initial;
     }
     const raw = fs.readFileSync(STATE_FILE_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<PlatformState>;
-    const rawDbs = Array.isArray(parsed.databases) ? parsed.databases : [];
-    const databases: PoolDatabaseEntry[] = [];
-    for (const d of rawDbs) {
-      if (!d || typeof d !== 'object') continue;
-      const cfg = sanitizeConfig(d.config);
-      if (!cfg) continue;
-      databases.push({
-        id: typeof d.id === 'string' && d.id ? d.id : `db_${databases.length + 1}`,
-        order: typeof d.order === 'number' ? d.order : databases.length + 1,
-        label:
-          typeof d.label === 'string' && d.label.trim()
-            ? d.label.trim().slice(0, 80)
-            : cfg.projectId,
-        config: cfg,
-        exhaustedAt: typeof d.exhaustedAt === 'number' ? d.exhaustedAt : null,
-        exhaustedUntil: typeof d.exhaustedUntil === 'number' ? d.exhaustedUntil : null,
-        addedByEmail: typeof d.addedByEmail === 'string' ? d.addedByEmail : undefined,
-        addedAt: typeof d.addedAt === 'number' ? d.addedAt : Date.now(),
-      });
-    }
-    databases.sort((a, b) => a.order - b.order);
-    if (databases.length === 0) {
-      return createInitialState();
-    }
-    const epochChanged = parsed.migrationEpoch !== CURRENT_DB_EPOCH;
-    const rawPrimaryMatch = databases.find((d) => isSameConfig(d.config, defaultAppletConfig));
-    let mergedList = databases.map((d) =>
-      d.id === 'primary_default' && !isSameConfig(d.config, defaultAppletConfig)
-        ? {
-            ...d,
-            id: `db_prev_${d.config.projectId}`,
-            label: d.label.includes('الأساسية') ? `القاعدة السابقة — ${d.config.projectId}` : d.label,
-          }
-        : d
-    );
-    if (!rawPrimaryMatch) {
-      mergedList.unshift({
-        id: 'primary_default',
-        order: 1,
-        label: `القاعدة الأساسية (#1) — ${defaultAppletConfig.projectId}`,
-        config: defaultAppletConfig,
-        exhaustedAt: null,
-        exhaustedUntil: null,
-        addedAt: Date.now(),
-      });
-    } else if (rawPrimaryMatch.id !== 'primary_default') {
-      rawPrimaryMatch.id = 'primary_default';
-      mergedList = [rawPrimaryMatch, ...mergedList.filter((d) => d !== rawPrimaryMatch)];
-    }
-
-    const renumberedDbs = renumberDatabases(mergedList);
-    const primaryEntry =
-      renumberedDbs.find((d) => isSameConfig(d.config, defaultAppletConfig)) || renumberedDbs[0];
-    if (epochChanged && primaryEntry) {
-      primaryEntry.exhaustedAt = null;
-      primaryEntry.exhaustedUntil = null;
-    }
-
-    const activeExists = renumberedDbs.some((d) => d.id === parsed.activeDatabaseId);
-    const activeDatabaseId =
-      epochChanged || !rawPrimaryMatch
-        ? primaryEntry.id
-        : activeExists
-        ? (parsed.activeDatabaseId as string)
-        : primaryEntry.id;
 
     const rawProgs = Array.isArray(parsed.programmers) ? parsed.programmers : [];
     const programmers = ensureMasterProgrammerPresent(
@@ -413,58 +381,80 @@ function loadPlatformState(): PlatformState {
         .map((m, idx) => ({
           id: typeof m.id === 'string' && m.id ? m.id : `prog_${idx + 1}`,
           fullNameQuad: typeof m.fullNameQuad === 'string' ? m.fullNameQuad.trim() : '',
-          email: typeof m.email === 'string' && m.email.trim() ? m.email.trim().toLowerCase() : undefined,
+          email:
+            typeof m.email === 'string' && m.email.trim()
+              ? m.email.trim().toLowerCase()
+              : undefined,
           isMaster: Boolean(m.isMaster),
           promotedBy: typeof m.promotedBy === 'string' ? m.promotedBy : undefined,
           promotedAt: typeof m.promotedAt === 'number' ? m.promotedAt : Date.now(),
         }))
     );
 
+    // Full clean reset whenever upgrading from old database pool system
+    if (parsed.migrationEpoch !== CURRENT_DB_EPOCH) {
+      const wiped = createCleanInitialState(programmers);
+      savePlatformState(wiped);
+      return wiped;
+    }
+
+    const playerDatabases = parseRegisteredEntries(parsed.playerDatabases, 'player');
+    const backupDatabases = parseRegisteredEntries(parsed.backupDatabases, 'backup').filter(
+      (b) => !playerDatabases.some((p) => isSameConfig(p.config, b.config))
+    );
+
+    const activeTargetConfig = sanitizeConfig(parsed.activeTargetConfig) || defaultAppletConfig;
+    const matchedActivePlayer = playerDatabases.find((d) =>
+      isSameConfig(d.config, activeTargetConfig)
+    );
+
+    let lastBackupAnnouncement: BackupAnnouncementInfo | null = null;
+    if (parsed.lastBackupAnnouncement && typeof parsed.lastBackupAnnouncement === 'object') {
+      const a = parsed.lastBackupAnnouncement as Partial<BackupAnnouncementInfo>;
+      const tCfg = sanitizeConfig(a.targetConfig);
+      if (tCfg && typeof a.backupProjectId === 'string') {
+        lastBackupAnnouncement = {
+          backupDbId: typeof a.backupDbId === 'string' ? a.backupDbId : '',
+          backupProjectId: a.backupProjectId,
+          targetProjectId: tCfg.projectId,
+          targetConfig: tCfg,
+          migratedRoomId: typeof a.migratedRoomId === 'string' ? a.migratedRoomId : null,
+          announcedAt: typeof a.announcedAt === 'number' ? a.announcedAt : Date.now(),
+          announcedByEmail:
+            typeof a.announcedByEmail === 'string' ? a.announcedByEmail : undefined,
+        };
+      }
+    }
+
     const prevRaw = Array.isArray(parsed.previousConfigs) ? parsed.previousConfigs : [];
-    const previousConfigs = [
-      ...prevRaw.map(sanitizeConfig).filter((x): x is SanitizedFirebaseConfig => Boolean(x)),
-      ...renumberedDbs
-        .filter((d) => !isSameConfig(d.config, defaultAppletConfig))
-        .map((d) => d.config),
-    ]
-      .filter(
-        (c, idx, arr) =>
-          !isSameConfig(c, defaultAppletConfig) &&
-          arr.findIndex((x) => isSameConfig(x, c)) === idx
-      )
+    const previousConfigs = prevRaw
+      .map(sanitizeConfig)
+      .filter((x): x is SanitizedFirebaseConfig => x !== null)
+      .filter((x) => !isSameConfig(x, activeTargetConfig))
       .slice(0, 12);
 
-    const forceReset = epochChanged || !rawPrimaryMatch;
-    const loadedState: PlatformState = {
-      revision: forceReset
-        ? (typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1) + 1
-        : typeof parsed.revision === 'number' && parsed.revision >= 1
-        ? parsed.revision
-        : 1,
+    return {
+      revision: typeof parsed.revision === 'number' && parsed.revision >= 1 ? parsed.revision : 1,
       migrationEpoch: CURRENT_DB_EPOCH,
-      databases: renumberedDbs,
-      activeDatabaseId,
-      allExhausted: forceReset ? false : Boolean(parsed.allExhausted),
+      playerDatabases,
+      backupDatabases: renumberEntries(backupDatabases),
+      activeTargetConfig,
+      activePlayerDatabaseId: matchedActivePlayer ? matchedActivePlayer.id : null,
+      lastBackupAnnouncement,
       programmers,
-      migratedRoomId: forceReset
-        ? null
-        : typeof parsed.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(parsed.migratedRoomId)
-        ? parsed.migratedRoomId.toUpperCase()
-        : null,
+      migratedRoomId:
+        typeof parsed.migratedRoomId === 'string' &&
+        /^[A-Z0-9_-]{4,16}$/i.test(parsed.migratedRoomId)
+          ? parsed.migratedRoomId.toUpperCase()
+          : null,
       previousConfigs,
       updatedByEmail: typeof parsed.updatedByEmail === 'string' ? parsed.updatedByEmail : undefined,
-      updatedAt: forceReset
-        ? Date.now()
-        : typeof parsed.updatedAt === 'number'
-        ? parsed.updatedAt
-        : Date.now(),
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now(),
     };
-    if (forceReset) {
-      savePlatformState(loadedState);
-    }
-    return loadedState;
   } catch {
-    return createInitialState();
+    const clean = createCleanInitialState();
+    savePlatformState(clean);
+    return clean;
   }
 }
 
@@ -502,53 +492,50 @@ function isIdentityProgrammer(
   return { isProgrammer: matched, isMaster: false };
 }
 
-function buildPreviousConfigsList(
-  state: PlatformState,
-  activeEntry: PoolDatabaseEntry
-): SanitizedFirebaseConfig[] {
-  const out: SanitizedFirebaseConfig[] = [];
-  const pushUnique = (cfg: SanitizedFirebaseConfig) => {
-    if (isSameConfig(cfg, activeEntry.config)) return;
-    if (!out.some((x) => isSameConfig(x, cfg))) out.push(cfg);
-  };
-  for (const d of state.databases) pushUnique(d.config);
-  for (const p of state.previousConfigs) pushUnique(p);
-  pushUnique(defaultAppletConfig);
-  return out.slice(0, 16);
-}
-
 function buildPublicPayload(state: PlatformState): {
   pointer: PublicPlatformPointer;
   revision: number;
-  allExhausted: boolean;
-  activeDatabaseId: string;
-  activeOrder: number;
-  totalDatabases: number;
+  activePlayerDatabaseId: string | null;
+  playerDatabasesCount: number;
+  backupDatabasesCount: number;
+  backupConfigs: SanitizedFirebaseConfig[];
   poolUpdatedAt: number;
 } {
-  const activeEntry =
-    state.databases.find((d) => d.id === state.activeDatabaseId) || state.databases[0];
+  const activeCfg = state.activeTargetConfig || defaultAppletConfig;
+  const backupConfigs = state.backupDatabases.map((b) => b.config);
+  const previousConfigs = [
+    ...state.previousConfigs,
+    ...state.playerDatabases.map((p) => p.config),
+    defaultAppletConfig,
+  ]
+    .filter(
+      (c, idx, arr) =>
+        !isSameConfig(c, activeCfg) &&
+        arr.findIndex((x) => isSameConfig(x, c)) === idx
+    )
+    .slice(0, 16);
+
   const pointer: PublicPlatformPointer = {
     id: 'migration',
-    config: activeEntry.config,
+    config: activeCfg,
     resetToDefault: false,
     migratedRoomId: state.migratedRoomId ?? null,
     migrationEpoch: CURRENT_DB_EPOCH,
-    previousConfigs: buildPreviousConfigsList(state, activeEntry),
-    activeDatabaseId: activeEntry.id,
-    activeOrder: activeEntry.order,
-    totalDatabases: state.databases.length,
-    allExhausted: state.allExhausted,
+    previousConfigs,
+    backupConfigs,
+    activePlayerDatabaseId: state.activePlayerDatabaseId,
+    lastBackupAnnouncement: state.lastBackupAnnouncement,
     revision: state.revision,
     updatedAt: state.updatedAt,
   };
+
   return {
     pointer,
     revision: state.revision,
-    allExhausted: state.allExhausted,
-    activeDatabaseId: activeEntry.id,
-    activeOrder: activeEntry.order,
-    totalDatabases: state.databases.length,
+    activePlayerDatabaseId: state.activePlayerDatabaseId,
+    playerDatabasesCount: state.playerDatabases.length,
+    backupDatabasesCount: state.backupDatabases.length,
+    backupConfigs,
     poolUpdatedAt: state.updatedAt,
   };
 }
@@ -566,7 +553,54 @@ interface FirestoreRestVal {
   mapValue?: { fields?: Record<string, FirestoreRestVal> };
 }
 
-async function tryHydrateServerFromFirestorePool(
+function parseConfigFromRestMap(cf: Record<string, FirestoreRestVal> | undefined): SanitizedFirebaseConfig | null {
+  if (!cf) return null;
+  return sanitizeConfig({
+    apiKey: cf.apiKey?.stringValue,
+    authDomain: cf.authDomain?.stringValue,
+    projectId: cf.projectId?.stringValue,
+    appId: cf.appId?.stringValue,
+    storageBucket: cf.storageBucket?.stringValue,
+    messagingSenderId: cf.messagingSenderId?.stringValue,
+    measurementId: cf.measurementId?.stringValue,
+    firestoreDatabaseId: cf.firestoreDatabaseId?.stringValue,
+  });
+}
+
+function parseEntriesFromRestArray(
+  arr: FirestoreRestVal[] | undefined,
+  role: DatabaseRole
+): RegisteredDatabaseEntry[] {
+  const now = Date.now();
+  const out: RegisteredDatabaseEntry[] = [];
+  for (const item of arr || []) {
+    const mf = item.mapValue?.fields;
+    if (!mf) continue;
+    const cfg = parseConfigFromRestMap(mf.config?.mapValue?.fields);
+    if (!cfg) continue;
+    const vf = mf.verification?.mapValue?.fields;
+    out.push({
+      id: mf.id?.stringValue || `${role}_${out.length + 1}`,
+      order: Number(mf.order?.integerValue || out.length + 1),
+      role,
+      label: (mf.label?.stringValue || cfg.projectId).slice(0, 80),
+      config: cfg,
+      verification: {
+        firestoreReady: Boolean(vf?.firestoreReady?.booleanValue ?? true),
+        googleAuthReady: Boolean(vf?.googleAuthReady?.booleanValue ?? true),
+        rulesReady: Boolean(vf?.rulesReady?.booleanValue ?? true),
+        verifiedAt: Number(vf?.verifiedAt?.integerValue || now),
+        verifiedByEmail: vf?.verifiedByEmail?.stringValue,
+      },
+      lastUsedAt: mf.lastUsedAt?.integerValue ? Number(mf.lastUsedAt.integerValue) : null,
+      lastAnnouncedToProjectId: mf.lastAnnouncedToProjectId?.stringValue || null,
+      addedAt: Number(mf.addedAt?.integerValue || now),
+    });
+  }
+  return renumberEntries(out);
+}
+
+async function tryHydrateServerFromFirestoreRegistry(
   idToken: string,
   targetCfg: SanitizedFirebaseConfig
 ): Promise<boolean> {
@@ -574,7 +608,7 @@ async function tryHydrateServerFromFirestorePool(
     const dbName = encodeURIComponent((targetCfg.firestoreDatabaseId || '(default)').trim());
     const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
       targetCfg.projectId
-    )}/databases/${dbName}/documents/platform/pool?key=${encodeURIComponent(targetCfg.apiKey)}`;
+    )}/databases/${dbName}/documents/platform/registry?key=${encodeURIComponent(targetCfg.apiKey)}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3500);
     const resp = await fetch(url, {
@@ -588,52 +622,20 @@ async function tryHydrateServerFromFirestorePool(
     if (!fields) return false;
 
     const remoteRevision = Number(fields.revision?.integerValue || 1);
-    const remoteDbsRaw = fields.databases?.arrayValue?.values || [];
-    const remoteProgsRaw = fields.programmers?.arrayValue?.values || [];
-    const remoteActiveId = fields.activeDatabaseId?.stringValue || '';
-    const remoteExhaustedIds = (fields.exhaustedDatabaseIds?.arrayValue?.values || [])
-      .map((v) => v.stringValue || '')
-      .filter(Boolean);
+    const remotePlayers = parseEntriesFromRestArray(fields.playerDatabases?.arrayValue?.values, 'player');
+    const remoteBackups = parseEntriesFromRestArray(fields.backupDatabases?.arrayValue?.values, 'backup');
+    const remoteTarget = parseConfigFromRestMap(fields.activeTargetConfig?.mapValue?.fields);
+    const remoteActivePlayerId = fields.activePlayerDatabaseId?.stringValue || null;
 
-    const parsedDbs: PoolDatabaseEntry[] = [];
-    for (const item of remoteDbsRaw) {
-      const mf = item.mapValue?.fields;
-      if (!mf) continue;
-      const cf = mf.config?.mapValue?.fields;
-      if (!cf) continue;
-      const cfg = sanitizeConfig({
-        apiKey: cf.apiKey?.stringValue,
-        authDomain: cf.authDomain?.stringValue,
-        projectId: cf.projectId?.stringValue,
-        appId: cf.appId?.stringValue,
-        storageBucket: cf.storageBucket?.stringValue,
-        messagingSenderId: cf.messagingSenderId?.stringValue,
-        measurementId: cf.measurementId?.stringValue,
-        firestoreDatabaseId: cf.firestoreDatabaseId?.stringValue,
-      });
-      if (!cfg) continue;
-      const dbId = mf.id?.stringValue || `db_${parsedDbs.length + 1}`;
-      const isExh = remoteExhaustedIds.includes(dbId);
-      parsedDbs.push({
-        id: dbId,
-        order: Number(mf.order?.integerValue || parsedDbs.length + 1),
-        label: (mf.label?.stringValue || cfg.projectId).slice(0, 80),
-        config: cfg,
-        exhaustedAt: isExh ? Date.now() : null,
-        exhaustedUntil: isExh ? Date.now() + QUOTA_COOLDOWN_MS : null,
-        addedAt: Number(mf.addedAt?.integerValue || Date.now()),
-      });
-    }
-
-    const parsedProgs: ProgrammerMember[] = [];
-    for (const item of remoteProgsRaw) {
+    const remoteProgs: ProgrammerMember[] = [];
+    for (const item of fields.programmers?.arrayValue?.values || []) {
       const mf = item.mapValue?.fields;
       if (!mf) continue;
       const name = (mf.fullNameQuad?.stringValue || '').trim();
       const masked = (mf.emailMasked?.stringValue || '').trim();
       const emailRaw = (mf.email?.stringValue || '').trim().toLowerCase();
-      parsedProgs.push({
-        id: mf.id?.stringValue || `prog_${parsedProgs.length + 1}`,
+      remoteProgs.push({
+        id: mf.id?.stringValue || `prog_${remoteProgs.length + 1}`,
         fullNameQuad: name,
         ...(emailRaw ? { email: emailRaw } : masked && !masked.includes('***') ? { email: masked } : {}),
         isMaster: Boolean(mf.isMaster?.booleanValue),
@@ -641,23 +643,35 @@ async function tryHydrateServerFromFirestorePool(
       });
     }
 
-    const remoteIsNewerOrRicher =
+    const remoteIsNewer =
       remoteRevision > platformState.revision ||
-      parsedDbs.length > platformState.databases.length ||
-      parsedProgs.length > platformState.programmers.length;
+      remotePlayers.length > platformState.playerDatabases.length ||
+      remoteBackups.length > platformState.backupDatabases.length ||
+      remoteProgs.length > platformState.programmers.length;
 
-    if (!remoteIsNewerOrRicher) return false;
+    if (!remoteIsNewer) return false;
 
-    const mergedDbs = [...platformState.databases];
-    for (const rd of parsedDbs) {
-      if (!mergedDbs.some((d) => isSameConfig(d.config, rd.config))) {
-        mergedDbs.push(rd);
+    const mergedPlayers = [...platformState.playerDatabases];
+    for (const rp of remotePlayers) {
+      if (!mergedPlayers.some((p) => isSameConfig(p.config, rp.config))) {
+        mergedPlayers.push(rp);
       }
     }
-    platformState.databases = renumberDatabases(mergedDbs);
+    platformState.playerDatabases = renumberEntries(mergedPlayers);
+
+    const mergedBackups = [...platformState.backupDatabases];
+    for (const rb of remoteBackups) {
+      if (
+        !mergedBackups.some((b) => isSameConfig(b.config, rb.config)) &&
+        !platformState.playerDatabases.some((p) => isSameConfig(p.config, rb.config))
+      ) {
+        mergedBackups.push(rb);
+      }
+    }
+    platformState.backupDatabases = renumberEntries(mergedBackups);
 
     const mergedProgs = [...platformState.programmers];
-    for (const rp of parsedProgs) {
+    for (const rp of remoteProgs) {
       const rpNorm = normalizeArabicName(rp.fullNameQuad);
       const exists = mergedProgs.some(
         (m) =>
@@ -670,13 +684,11 @@ async function tryHydrateServerFromFirestorePool(
     }
     platformState.programmers = ensureMasterProgrammerPresent(mergedProgs);
 
-    if (remoteRevision > platformState.revision && remoteActiveId) {
-      const matched = platformState.databases.find((d) => d.id === remoteActiveId);
-      if (matched) {
-        platformState.activeDatabaseId = matched.id;
-        platformState.allExhausted = Boolean(fields.allExhausted?.booleanValue);
-      }
+    if (remoteRevision > platformState.revision && remoteTarget) {
+      platformState.activeTargetConfig = remoteTarget;
+      platformState.activePlayerDatabaseId = remoteActivePlayerId || null;
     }
+
     platformState.revision = Math.max(platformState.revision, remoteRevision) + 1;
     platformState.migrationEpoch = CURRENT_DB_EPOCH;
     platformState.updatedAt = Date.now();
@@ -686,32 +698,6 @@ async function tryHydrateServerFromFirestorePool(
   } catch {
     return false;
   }
-}
-
-function refreshExpiredCooldowns(): boolean {
-  const now = Date.now();
-  let changed = false;
-  for (const entry of platformState.databases) {
-    if (entry.exhaustedAt !== null && entry.exhaustedUntil !== null && entry.exhaustedUntil <= now) {
-      entry.exhaustedAt = null;
-      entry.exhaustedUntil = null;
-      changed = true;
-    }
-  }
-  if (platformState.allExhausted) {
-    const firstHealthy = platformState.databases.find((d) => d.exhaustedAt === null);
-    if (firstHealthy) {
-      platformState.activeDatabaseId = firstHealthy.id;
-      platformState.allExhausted = false;
-      platformState.revision += 1;
-      platformState.updatedAt = now;
-      changed = true;
-    }
-  }
-  if (changed) {
-    savePlatformState(platformState);
-  }
-  return changed;
 }
 
 function broadcastState(): void {
@@ -735,9 +721,27 @@ function isAllowedFirebaseCredentials(projectId: string, apiKey: string): boolea
   ) {
     return true;
   }
-  return platformState.databases.some(
-    (d) => d.config.projectId === projectId && d.config.apiKey === apiKey
-  );
+  if (
+    projectId === platformState.activeTargetConfig.projectId &&
+    apiKey === platformState.activeTargetConfig.apiKey
+  ) {
+    return true;
+  }
+  if (
+    platformState.playerDatabases.some(
+      (d) => d.config.projectId === projectId && d.config.apiKey === apiKey
+    )
+  ) {
+    return true;
+  }
+  if (
+    platformState.backupDatabases.some(
+      (d) => d.config.projectId === projectId && d.config.apiKey === apiKey
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 async function authenticateRequest(
@@ -753,27 +757,29 @@ async function authenticateRequest(
     return { ok: false, status: 401, error: 'Missing Authorization token' };
   }
 
-  const activeEntry =
-    platformState.databases.find((d) => d.id === platformState.activeDatabaseId) ||
-    platformState.databases[0];
-
   const claims = decodeJwtPayload(bearer);
   const jwtAud = typeof claims?.aud === 'string' ? claims.aud.trim() : '';
-  const matchedPoolEntry = jwtAud
-    ? platformState.databases.find((d) => d.config.projectId === jwtAud) ||
-      (defaultAppletConfig.projectId === jwtAud ? { config: defaultAppletConfig } : undefined)
-    : undefined;
+
+  const matchedCfg =
+    (jwtAud &&
+      (platformState.playerDatabases.find((d) => d.config.projectId === jwtAud)?.config ||
+        platformState.backupDatabases.find((d) => d.config.projectId === jwtAud)?.config ||
+        (platformState.activeTargetConfig.projectId === jwtAud
+          ? platformState.activeTargetConfig
+          : undefined) ||
+        (defaultAppletConfig.projectId === jwtAud ? defaultAppletConfig : undefined))) ||
+    undefined;
 
   const tokenProjectId =
-    matchedPoolEntry?.config.projectId ||
+    matchedCfg?.projectId ||
     (typeof body.tokenProjectId === 'string' && body.tokenProjectId.trim()
       ? body.tokenProjectId.trim()
-      : activeEntry.config.projectId);
+      : platformState.activeTargetConfig.projectId);
   const tokenApiKey =
-    matchedPoolEntry?.config.apiKey ||
+    matchedCfg?.apiKey ||
     (typeof body.tokenApiKey === 'string' && body.tokenApiKey.trim()
       ? body.tokenApiKey.trim()
-      : activeEntry.config.apiKey);
+      : platformState.activeTargetConfig.apiKey);
 
   if (!isAllowedFirebaseCredentials(tokenProjectId, tokenApiKey)) {
     return { ok: false, status: 403, error: 'Unrecognized Firebase project credentials' };
@@ -811,13 +817,11 @@ async function startServer(): Promise<void> {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/platform-db', (_req: Request, res: Response) => {
-    refreshExpiredCooldowns();
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(buildPublicPayload(platformState));
   });
 
   app.get('/api/platform-db/stream', (req: Request, res: Response) => {
-    refreshExpiredCooldowns();
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -843,164 +847,8 @@ async function startServer(): Promise<void> {
     });
   });
 
-  // Automatic Quota Failover: rotates active database circularly (e.g. #5 -> #6 -> ... -> #N -> #1 -> allExhausted)
-  app.post('/api/platform-db/failover', (req: Request, res: Response) => {
-    refreshExpiredCooldowns();
-    const body = (req.body || {}) as Record<string, unknown>;
-    const failedProjectId =
-      typeof body.failedProjectId === 'string' ? body.failedProjectId.trim() : '';
-    const failedDbId =
-      typeof body.failedFirestoreDatabaseId === 'string'
-        ? body.failedFirestoreDatabaseId.trim()
-        : '';
-
-    const currentIdx = Math.max(
-      0,
-      platformState.databases.findIndex((d) => d.id === platformState.activeDatabaseId)
-    );
-    const currentEntry = platformState.databases[currentIdx];
-
-    if (!currentEntry) {
-      res.status(500).json({ error: 'No databases configured' });
-      return;
-    }
-
-    // Stampede protection: only rotate if the reported exhausted project matches the CURRENT active DB
-    const curDbSeg = (currentEntry.config.firestoreDatabaseId || '(default)').trim();
-    const repDbSeg = (failedDbId || '(default)').trim();
-    if (
-      failedProjectId &&
-      (failedProjectId !== currentEntry.config.projectId ||
-        (failedDbId !== '' && repDbSeg !== curDbSeg))
-    ) {
-      res.json({
-        rotated: false,
-        alreadyRotated: true,
-        ...buildPublicPayload(platformState),
-      });
-      return;
-    }
-
-    if (platformState.allExhausted) {
-      res.json({
-        rotated: false,
-        alreadyExhausted: true,
-        ...buildPublicPayload(platformState),
-      });
-      return;
-    }
-
-    const now = Date.now();
-    currentEntry.exhaustedAt = now;
-    currentEntry.exhaustedUntil = now + QUOTA_COOLDOWN_MS;
-
-    if (!platformState.previousConfigs.some((c) => isSameConfig(c, currentEntry.config))) {
-      platformState.previousConfigs = [currentEntry.config, ...platformState.previousConfigs].slice(
-        0,
-        12
-      );
-    }
-
-    const total = platformState.databases.length;
-    let nextEntry: PoolDatabaseEntry | null = null;
-    for (let offset = 1; offset < total; offset++) {
-      const candidate = platformState.databases[(currentIdx + offset) % total];
-      if (candidate.exhaustedAt === null) {
-        nextEntry = candidate;
-        break;
-      }
-    }
-
-    if (nextEntry) {
-      platformState.activeDatabaseId = nextEntry.id;
-      platformState.allExhausted = false;
-      platformState.migratedRoomId = null;
-    } else {
-      platformState.allExhausted = true;
-    }
-
-    platformState.revision += 1;
-    platformState.updatedAt = now;
-    savePlatformState(platformState);
-    broadcastState();
-
-    res.json({
-      rotated: Boolean(nextEntry),
-      ...buildPublicPayload(platformState),
-    });
-  });
-
-  // Backwards-compatible pointer publish route (used after full migration)
-  app.post('/api/platform-db', async (req: Request, res: Response) => {
-    const body = (req.body || {}) as Record<string, unknown>;
-    const config = sanitizeConfig(body.config);
-    if (!config) {
-      res.status(400).json({ error: 'Invalid Firebase config' });
-      return;
-    }
-
-    const authHeader = req.headers.authorization || '';
-    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-    if (!bearer) {
-      res.status(401).json({ error: 'Missing Authorization token' });
-      return;
-    }
-
-    const tokenProjectId =
-      typeof body.tokenProjectId === 'string' && body.tokenProjectId.trim()
-        ? body.tokenProjectId.trim()
-        : config.projectId;
-    const tokenApiKey =
-      typeof body.tokenApiKey === 'string' && body.tokenApiKey.trim()
-        ? body.tokenApiKey.trim()
-        : config.apiKey;
-
-    const verified = await verifyFirebaseIdToken(bearer, tokenProjectId, tokenApiKey);
-    if (!verified.ok) {
-      res.status(403).json({ error: 'Invalid or unverified Firebase ID token' });
-      return;
-    }
-
-    const now = Date.now();
-    let entry = platformState.databases.find((d) => isSameConfig(d.config, config));
-    if (!entry) {
-      const id = `db_${now}_${Math.random().toString(36).slice(2, 6)}`;
-      entry = {
-        id,
-        order: platformState.databases.length + 1,
-        label: config.projectId,
-        config,
-        exhaustedAt: null,
-        exhaustedUntil: null,
-        addedByEmail: verified.email,
-        addedAt: now,
-      };
-      platformState.databases = renumberDatabases([...platformState.databases, entry]);
-    } else {
-      entry.exhaustedAt = null;
-      entry.exhaustedUntil = null;
-    }
-
-    const migratedRoomId =
-      typeof body.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(body.migratedRoomId.trim())
-        ? body.migratedRoomId.trim().toUpperCase()
-        : null;
-
-    platformState.activeDatabaseId = entry.id;
-    platformState.allExhausted = false;
-    platformState.migratedRoomId = migratedRoomId;
-    platformState.revision += 1;
-    platformState.updatedByEmail = verified.email;
-    platformState.updatedAt = now;
-    savePlatformState(platformState);
-    broadcastState();
-
-    res.json({ ok: true, ...buildPublicPayload(platformState) });
-  });
-
-  // Programmer session check & full state retrieval (also auto-hydrates fresh server instances from cloud pool)
+  // Programmer session check & registry retrieval
   app.post('/api/programmer/session', async (req: Request, res: Response) => {
-    refreshExpiredCooldowns();
     const body = (req.body || {}) as Record<string, unknown>;
     const authHeader = req.headers.authorization || '';
     const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -1017,8 +865,9 @@ async function startServer(): Promise<void> {
         (reqProj &&
           reqKey &&
           sanitizeConfig({ projectId: reqProj, apiKey: reqKey, appId: '1:1:web:1', firestoreDatabaseId: reqDbId })) ||
+        platformState.activeTargetConfig ||
         defaultAppletConfig;
-      await tryHydrateServerFromFirestorePool(bearer, targetCfg);
+      await tryHydrateServerFromFirestoreRegistry(bearer, targetCfg);
     }
 
     const authRes = await authenticateRequest(req, body);
@@ -1039,9 +888,8 @@ async function startServer(): Promise<void> {
     });
   });
 
-  // Programmer: Explicitly hydrate server state from Firestore /platform/pool when switching servers
+  // Explicitly hydrate server state from Firestore /platform/registry
   app.post('/api/programmer/hydrate', async (req: Request, res: Response) => {
-    refreshExpiredCooldowns();
     const body = (req.body || {}) as Record<string, unknown>;
     const authHeader = req.headers.authorization || '';
     const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -1053,9 +901,9 @@ async function startServer(): Promise<void> {
     if (bearer) {
       const cfg =
         sanitizeConfig(body.poolConfig) ||
-        platformState.databases.find((d) => d.id === platformState.activeDatabaseId)?.config ||
+        platformState.activeTargetConfig ||
         defaultAppletConfig;
-      await tryHydrateServerFromFirestorePool(bearer, cfg);
+      await tryHydrateServerFromFirestoreRegistry(bearer, cfg);
     }
     const postAuthRole = isIdentityProgrammer(platformState, {
       email: authRes.email,
@@ -1072,8 +920,8 @@ async function startServer(): Promise<void> {
     });
   });
 
-  // Programmer: Add new Firebase database to ordered pool
-  app.post('/api/programmer/databases/add', async (req: Request, res: Response) => {
+  // Add verified Player Database
+  app.post('/api/programmer/player-dbs/add', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);
     if (!authRes.ok) {
@@ -1091,86 +939,54 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    if (platformState.databases.some((d) => isSameConfig(d.config, config))) {
-      res.status(409).json({ error: 'قاعدة البيانات هذه مضافة بالفعل في القائمة.' });
+    if (platformState.playerDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'قاعدة البيانات هذه مضافة بالفعل في قائمة قواعد البيانات.' });
+      return;
+    }
+    if (platformState.backupDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'هذه القاعدة مسجلة بالفعل كقاعدة احتياطية صامتة، ولا يمكن استخدامها كقاعدة لاعبين.' });
+      return;
+    }
+
+    const ver = sanitizeVerification(body.verification, Date.now());
+    if (!ver.firestoreReady || !ver.googleAuthReady || !ver.rulesReady) {
+      res.status(400).json({ error: 'يجب إكمال الفحص الشامل (Firestore + OAuth + Rules) أولاً قبل إضافة القاعدة.' });
       return;
     }
 
     const now = Date.now();
-    const nextOrder = platformState.databases.length + 1;
+    const nextOrder = platformState.playerDatabases.length + 1;
     const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
-    const newEntry: PoolDatabaseEntry = {
-      id: `db_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    const newEntry: RegisteredDatabaseEntry = {
+      id: `player_${now}_${Math.random().toString(36).slice(2, 6)}`,
       order: nextOrder,
-      label: rawLabel || `قاعدة #${nextOrder} — ${config.projectId}`,
+      role: 'player',
+      label: rawLabel || `قاعدة بيانات #${nextOrder} — ${config.projectId}`,
       config,
-      exhaustedAt: null,
-      exhaustedUntil: null,
+      verification: {
+        ...ver,
+        verifiedByEmail: ver.verifiedByEmail || authRes.email,
+      },
+      lastUsedAt: isSameConfig(config, platformState.activeTargetConfig) ? now : null,
       addedByEmail: authRes.email,
       addedAt: now,
     };
 
-    platformState.databases = renumberDatabases([...platformState.databases, newEntry]);
+    platformState.playerDatabases = renumberEntries([...platformState.playerDatabases, newEntry]);
+    if (isSameConfig(config, platformState.activeTargetConfig)) {
+      platformState.activePlayerDatabaseId = newEntry.id;
+    }
     platformState.revision += 1;
     platformState.updatedAt = now;
     platformState.updatedByEmail = authRes.email;
-    // If the entire platform was in maintenance (allExhausted), immediately bring it back on this new DB!
-    if (platformState.allExhausted) {
-      platformState.activeDatabaseId = newEntry.id;
-      platformState.allExhausted = false;
-    }
     savePlatformState(platformState);
     broadcastState();
 
     res.json({ ok: true, added: newEntry, state: platformState });
   });
 
-  // Programmer: Reorder databases (move up / move down / set explicit orderedIds)
-  app.post('/api/programmer/databases/reorder', async (req: Request, res: Response) => {
-    const body = (req.body || {}) as Record<string, unknown>;
-    const authRes = await authenticateRequest(req, body);
-    if (!authRes.ok) {
-      res.status(authRes.status).json({ error: authRes.error });
-      return;
-    }
-    if (!authRes.isProgrammer) {
-      res.status(403).json({ error: 'صلاحية مبرمج مطلوبة' });
-      return;
-    }
-
-    const orderedIds = Array.isArray(body.orderedIds)
-      ? body.orderedIds.filter((x): x is string => typeof x === 'string')
-      : [];
-    if (orderedIds.length === 0) {
-      res.status(400).json({ error: 'orderedIds required' });
-      return;
-    }
-
-    const byId = new Map(platformState.databases.map((d) => [d.id, d]));
-    const reordered: PoolDatabaseEntry[] = [];
-    for (const id of orderedIds) {
-      const found = byId.get(id);
-      if (found) {
-        reordered.push(found);
-        byId.delete(id);
-      }
-    }
-    for (const leftover of byId.values()) {
-      reordered.push(leftover);
-    }
-
-    platformState.databases = renumberDatabases(reordered);
-    platformState.revision += 1;
-    platformState.updatedAt = Date.now();
-    platformState.updatedByEmail = authRes.email;
-    savePlatformState(platformState);
-    broadcastState();
-
-    res.json({ ok: true, state: platformState });
-  });
-
-  // Programmer: Activate / Switch platform to specific pool database
-  app.post('/api/programmer/databases/activate', async (req: Request, res: Response) => {
+  // Remove Player Database
+  app.post('/api/programmer/player-dbs/remove', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);
     if (!authRes.ok) {
@@ -1183,49 +999,27 @@ async function startServer(): Promise<void> {
     }
 
     const databaseId = typeof body.databaseId === 'string' ? body.databaseId.trim() : '';
-    const target = platformState.databases.find((d) => d.id === databaseId);
-    if (!target) {
-      res.status(404).json({ error: 'لم يتم العثور على قاعدة البيانات المطلوبة' });
+    const remaining = platformState.playerDatabases.filter((d) => d.id !== databaseId);
+    if (remaining.length === platformState.playerDatabases.length) {
+      res.status(404).json({ error: 'القاعدة غير موجودة' });
       return;
     }
 
-    const currentEntry = platformState.databases.find(
-      (d) => d.id === platformState.activeDatabaseId
-    );
-    if (currentEntry && currentEntry.id !== target.id) {
-      if (!platformState.previousConfigs.some((c) => isSameConfig(c, currentEntry.config))) {
-        platformState.previousConfigs = [currentEntry.config, ...platformState.previousConfigs].slice(
-          0,
-          12
-        );
-      }
+    platformState.playerDatabases = renumberEntries(remaining);
+    if (platformState.activePlayerDatabaseId === databaseId) {
+      platformState.activePlayerDatabaseId = null;
     }
-
-    const migratedRoomId =
-      typeof body.migratedRoomId === 'string' && /^[A-Z0-9_-]{4,16}$/i.test(body.migratedRoomId.trim())
-        ? body.migratedRoomId.trim().toUpperCase()
-        : null;
-
-    target.exhaustedAt = null;
-    target.exhaustedUntil = null;
-    platformState.activeDatabaseId = target.id;
-    platformState.allExhausted = false;
-    platformState.migratedRoomId = migratedRoomId;
     platformState.revision += 1;
     platformState.updatedAt = Date.now();
     platformState.updatedByEmail = authRes.email;
     savePlatformState(platformState);
     broadcastState();
 
-    res.json({
-      ok: true,
-      state: platformState,
-      ...buildPublicPayload(platformState),
-    });
+    res.json({ ok: true, state: platformState });
   });
 
-  // Programmer: Clear Quota Exhaustion on a specific DB or ALL DBs
-  app.post('/api/programmer/databases/reactivate', async (req: Request, res: Response) => {
+  // Add verified untouched Backup Signaling Database
+  app.post('/api/programmer/backup-dbs/add', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);
     if (!authRes.ok) {
@@ -1237,33 +1031,64 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const databaseId = typeof body.databaseId === 'string' ? body.databaseId.trim() : 'ALL';
+    const config = sanitizeConfig(body.config);
+    if (!config) {
+      res.status(400).json({ error: 'إعدادات Firebase غير صالحة' });
+      return;
+    }
+
+    if (platformState.backupDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'هذه القاعدة الاحتياطية مضافة بالفعل.' });
+      return;
+    }
+    if (platformState.playerDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'هذه القاعدة مسجلة كقاعدة بيانات للاعبين، لا يمكن إضافتها كقاعدة احتياطية ساكنة.' });
+      return;
+    }
+    if (
+      isSameConfig(config, defaultAppletConfig) ||
+      isSameConfig(config, platformState.activeTargetConfig)
+    ) {
+      res.status(409).json({ error: 'القاعدة النشطة حالياً لا يمكن استخدامها كقاعدة احتياطية ساكنة.' });
+      return;
+    }
+
+    const ver = sanitizeVerification(body.verification, Date.now());
+    if (!ver.firestoreReady || !ver.googleAuthReady || !ver.rulesReady) {
+      res.status(400).json({ error: 'يجب إكمال الفحص الشامل (Firestore + OAuth + Rules) أولاً قبل إضافة القاعدة الاحتياطية.' });
+      return;
+    }
+
     const now = Date.now();
-    let recoveredId: string | null = null;
+    const nextOrder = platformState.backupDatabases.length + 1;
+    const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
+    const newEntry: RegisteredDatabaseEntry = {
+      id: `backup_${now}_${Math.random().toString(36).slice(2, 6)}`,
+      order: nextOrder,
+      role: 'backup',
+      label: rawLabel || `احتياطية #${nextOrder} — ${config.projectId}`,
+      config,
+      verification: {
+        ...ver,
+        verifiedByEmail: ver.verifiedByEmail || authRes.email,
+      },
+      lastAnnouncedToProjectId: null,
+      addedByEmail: authRes.email,
+      addedAt: now,
+    };
 
-    for (const d of platformState.databases) {
-      if (databaseId === 'ALL' || d.id === databaseId) {
-        d.exhaustedAt = null;
-        d.exhaustedUntil = null;
-        if (!recoveredId) recoveredId = d.id;
-      }
-    }
-
-    if (platformState.allExhausted && recoveredId) {
-      platformState.activeDatabaseId = recoveredId;
-      platformState.allExhausted = false;
-    }
+    platformState.backupDatabases = renumberEntries([...platformState.backupDatabases, newEntry]);
     platformState.revision += 1;
     platformState.updatedAt = now;
     platformState.updatedByEmail = authRes.email;
     savePlatformState(platformState);
     broadcastState();
 
-    res.json({ ok: true, state: platformState });
+    res.json({ ok: true, added: newEntry, state: platformState });
   });
 
-  // Programmer: Remove a DB from the pool (keeps at least 1)
-  app.post('/api/programmer/databases/remove', async (req: Request, res: Response) => {
+  // Remove Backup Database
+  app.post('/api/programmer/backup-dbs/remove', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);
     if (!authRes.ok) {
@@ -1276,26 +1101,14 @@ async function startServer(): Promise<void> {
     }
 
     const databaseId = typeof body.databaseId === 'string' ? body.databaseId.trim() : '';
-    if (platformState.databases.length <= 1) {
-      res.status(400).json({ error: 'يجب الإبقاء على قاعدة بيانات واحدة على الأقل.' });
+    const remaining = platformState.backupDatabases.filter((d) => d.id !== databaseId);
+    if (remaining.length === platformState.backupDatabases.length) {
+      res.status(404).json({ error: 'القاعدة الاحتياطية غير موجودة' });
       return;
     }
 
-    const remaining = renumberDatabases(
-      platformState.databases.filter((d) => d.id !== databaseId)
-    );
-    if (remaining.length === platformState.databases.length) {
-      res.status(404).json({ error: 'القاعدة غير موجودة' });
-      return;
-    }
-
-    platformState.databases = remaining;
-    if (platformState.activeDatabaseId === databaseId) {
-      const nextHealthy = remaining.find((d) => d.exhaustedAt === null) || remaining[0];
-      platformState.activeDatabaseId = nextHealthy.id;
-      platformState.allExhausted = remaining.every((d) => d.exhaustedAt !== null);
-      platformState.revision += 1;
-    }
+    platformState.backupDatabases = renumberEntries(remaining);
+    platformState.revision += 1;
     platformState.updatedAt = Date.now();
     platformState.updatedByEmail = authRes.email;
     savePlatformState(platformState);
@@ -1304,7 +1117,111 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, state: platformState });
   });
 
-  // Programmer: Promote user to Programmer
+  // Complete 100% Migration & Announce via Backup DB to Switch All Clients
+  app.post('/api/programmer/migrate-complete', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok) {
+      res.status(authRes.status).json({ error: authRes.error });
+      return;
+    }
+    if (!authRes.isProgrammer) {
+      res.status(403).json({ error: 'صلاحية مبرمج مطلوبة' });
+      return;
+    }
+
+    const targetConfig = sanitizeConfig(body.targetConfig);
+    if (!targetConfig) {
+      res.status(400).json({ error: 'إعدادات القاعدة الهدف غير صالحة' });
+      return;
+    }
+
+    const now = Date.now();
+    const prevTarget = platformState.activeTargetConfig;
+    if (
+      prevTarget &&
+      !isSameConfig(prevTarget, targetConfig) &&
+      !platformState.previousConfigs.some((c) => isSameConfig(c, prevTarget))
+    ) {
+      platformState.previousConfigs = [prevTarget, ...platformState.previousConfigs].slice(0, 12);
+    }
+
+    const migratedRoomId =
+      typeof body.migratedRoomId === 'string' &&
+      /^[A-Z0-9_-]{4,16}$/i.test(body.migratedRoomId.trim())
+        ? body.migratedRoomId.trim().toUpperCase()
+        : null;
+
+    let playerMatch = platformState.playerDatabases.find((d) =>
+      isSameConfig(d.config, targetConfig)
+    );
+    if (!playerMatch) {
+      const nextOrder = platformState.playerDatabases.length + 1;
+      playerMatch = {
+        id: `player_${now}_${Math.random().toString(36).slice(2, 6)}`,
+        order: nextOrder,
+        role: 'player',
+        label: `قاعدة بيانات #${nextOrder} — ${targetConfig.projectId}`,
+        config: targetConfig,
+        verification: {
+          firestoreReady: true,
+          googleAuthReady: true,
+          rulesReady: true,
+          verifiedAt: now,
+          verifiedByEmail: authRes.email,
+        },
+        lastUsedAt: now,
+        addedByEmail: authRes.email,
+        addedAt: now,
+      };
+      platformState.playerDatabases = renumberEntries([
+        ...platformState.playerDatabases,
+        playerMatch,
+      ]);
+    } else {
+      playerMatch.lastUsedAt = now;
+    }
+
+    const backupDbId = typeof body.backupDbId === 'string' ? body.backupDbId.trim() : '';
+    const backupEntry = backupDbId
+      ? platformState.backupDatabases.find((b) => b.id === backupDbId)
+      : undefined;
+    if (backupEntry) {
+      backupEntry.lastAnnouncedToProjectId = targetConfig.projectId;
+      platformState.lastBackupAnnouncement = {
+        backupDbId: backupEntry.id,
+        backupProjectId: backupEntry.config.projectId,
+        targetProjectId: targetConfig.projectId,
+        targetConfig,
+        migratedRoomId,
+        announcedAt: now,
+        announcedByEmail: authRes.email,
+      };
+    } else if (typeof body.backupProjectId === 'string' && body.backupProjectId.trim()) {
+      platformState.lastBackupAnnouncement = {
+        backupDbId: backupDbId || 'backup_manual',
+        backupProjectId: body.backupProjectId.trim(),
+        targetProjectId: targetConfig.projectId,
+        targetConfig,
+        migratedRoomId,
+        announcedAt: now,
+        announcedByEmail: authRes.email,
+      };
+    }
+
+    platformState.activeTargetConfig = targetConfig;
+    platformState.activePlayerDatabaseId = playerMatch.id;
+    platformState.migratedRoomId = migratedRoomId;
+    platformState.revision += 1;
+    platformState.updatedByEmail = authRes.email;
+    platformState.updatedAt = now;
+    savePlatformState(platformState);
+    broadcastState();
+
+    res.json({ ok: true, state: platformState, ...buildPublicPayload(platformState) });
+  });
+
+  // Programmer: Promote member
   app.post('/api/programmer/members/add', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);
@@ -1319,21 +1236,19 @@ async function startServer(): Promise<void> {
 
     const fullNameQuad =
       typeof body.fullNameQuad === 'string' ? body.fullNameQuad.trim().replace(/\s+/g, ' ') : '';
-    const email =
-      typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     if (!fullNameQuad && !email) {
       res.status(400).json({ error: 'أدخل الاسم الرباعي أو البريد الإلكتروني للمستخدم.' });
       return;
     }
 
-    const normNewName = normalizeArabicName(fullNameQuad);
-    const duplicate = platformState.programmers.some(
+    const normNew = normalizeArabicName(fullNameQuad);
+    const dup = platformState.programmers.some(
       (m) =>
         (email && m.email && m.email.toLowerCase() === email) ||
-        (normNewName && m.fullNameQuad && normalizeArabicName(m.fullNameQuad) === normNewName)
+        (normNew && normalizeArabicName(m.fullNameQuad) === normNew)
     );
-    if (duplicate) {
+    if (dup) {
       res.status(409).json({ error: 'هذا المستخدم مُرقّى بالفعل إلى مبرمج.' });
       return;
     }
@@ -1356,7 +1271,7 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, member, state: platformState });
   });
 
-  // Programmer: Remove a promoted programmer (Master cannot be removed)
+  // Programmer: Remove promoted member (Master cannot be removed)
   app.post('/api/programmer/members/remove', async (req: Request, res: Response) => {
     const body = (req.body || {}) as Record<string, unknown>;
     const authRes = await authenticateRequest(req, body);

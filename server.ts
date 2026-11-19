@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
@@ -41,6 +42,8 @@ interface ProgrammerMember {
   id: string;
   fullNameQuad: string;
   email?: string;
+  emailHash?: string;
+  emailMasked?: string;
   isMaster?: boolean;
   promotedBy?: string;
   promotedAt: number;
@@ -142,6 +145,10 @@ function normalizeArabicName(input: string | undefined | null): string {
     .replace(/ة/g, 'ه')
     .replace(/\s+/g, ' ')
     .toLowerCase();
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value.trim().toLowerCase(), 'utf8').digest('hex');
 }
 
 function sanitizeConfig(raw: unknown): SanitizedFirebaseConfig | null {
@@ -535,14 +542,22 @@ function loadPlatformState(): PlatformState {
             typeof m.email === 'string' && m.email.trim()
               ? m.email.trim().toLowerCase()
               : undefined,
+          emailHash:
+            typeof m.emailHash === 'string' && m.emailHash.trim()
+              ? m.emailHash.trim().toLowerCase()
+              : undefined,
+          emailMasked:
+            typeof m.emailMasked === 'string' && m.emailMasked.trim()
+              ? m.emailMasked.trim()
+              : undefined,
           isMaster: Boolean(m.isMaster),
           promotedBy: typeof m.promotedBy === 'string' ? m.promotedBy : undefined,
           promotedAt: typeof m.promotedAt === 'number' ? m.promotedAt : Date.now(),
         }))
     );
 
-    // Full clean reset whenever upgrading from old database pool system
-    if (parsed.migrationEpoch !== CURRENT_DB_EPOCH) {
+    const COMPATIBLE_EPOCHS = new Set([CURRENT_DB_EPOCH, 'clean_split_v3_2026_11_18']);
+    if (parsed.migrationEpoch && !COMPATIBLE_EPOCHS.has(parsed.migrationEpoch)) {
       const wiped = createCleanInitialState(programmers);
       savePlatformState(wiped);
       return wiped;
@@ -640,6 +655,7 @@ function isIdentityProgrammer(
   identity: { email?: string | null; fullNameQuad?: string | null }
 ): { isProgrammer: boolean; isMaster: boolean } {
   const emailLower = (identity.email || '').trim().toLowerCase();
+  const emailHash = emailLower ? sha256Hex(emailLower) : '';
   const normName = normalizeArabicName(identity.fullNameQuad);
 
   const isMaster =
@@ -652,8 +668,10 @@ function isIdentityProgrammer(
 
   const matched = state.programmers.some((m) => {
     const memberEmail = (m.email || '').trim().toLowerCase();
+    const memberHash = (m.emailHash || '').trim().toLowerCase();
     const memberName = normalizeArabicName(m.fullNameQuad);
     if (emailLower && memberEmail && emailLower === memberEmail) return true;
+    if (emailHash && memberHash && emailHash === memberHash) return true;
     if (normName && memberName && normName === memberName) return true;
     return false;
   });
@@ -731,7 +749,7 @@ function buildPublicPayload(state: PlatformState): {
 
 let platformState: PlatformState = loadPlatformState();
 const sseClients = new Set<Response>();
-let cloudHydrationAttempted = false;
+const hydratedProjectKeys = new Set<string>();
 
 interface FirestoreRestVal {
   stringValue?: string;
@@ -789,6 +807,30 @@ function parseEntriesFromRestArray(
   return renumberEntries(out);
 }
 
+async function fetchPlatformMigrationPointerRest(
+  idToken: string,
+  targetCfg: SanitizedFirebaseConfig
+): Promise<SanitizedFirebaseConfig | null> {
+  try {
+    const dbName = encodeURIComponent((targetCfg.firestoreDatabaseId || '(default)').trim());
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      targetCfg.projectId
+    )}/databases/${dbName}/documents/platform/migration?key=${encodeURIComponent(targetCfg.apiKey)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${idToken}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { fields?: Record<string, FirestoreRestVal> };
+    return parseConfigFromRestMap(json?.fields);
+  } catch {
+    return null;
+  }
+}
+
 async function tryHydrateServerFromFirestoreRegistry(
   idToken: string,
   targetCfg: SanitizedFirebaseConfig
@@ -823,20 +865,61 @@ async function tryHydrateServerFromFirestoreRegistry(
       const name = (mf.fullNameQuad?.stringValue || '').trim();
       const masked = (mf.emailMasked?.stringValue || '').trim();
       const emailRaw = (mf.email?.stringValue || '').trim().toLowerCase();
+      const emailHash = (mf.emailHash?.stringValue || '').trim().toLowerCase();
       remoteProgs.push({
         id: mf.id?.stringValue || `prog_${remoteProgs.length + 1}`,
         fullNameQuad: name,
         ...(emailRaw ? { email: emailRaw } : masked && !masked.includes('***') ? { email: masked } : {}),
+        ...(emailHash ? { emailHash } : {}),
+        ...(masked ? { emailMasked: masked } : {}),
         isMaster: Boolean(mf.isMaster?.booleanValue),
         promotedAt: Number(mf.promotedAt?.integerValue || Date.now()),
       });
     }
 
+    const allowRemoteTarget =
+      Boolean(remoteTarget) &&
+      !(
+        remoteTarget!.projectId === 'siiiiii-3720b' &&
+        defaultAppletConfig.projectId !== 'siiiiii-3720b' &&
+        !remotePlayers.some((p) => p.config.projectId === 'siiiiii-3720b')
+      );
+
+    const serverIsFresh =
+      platformState.revision <= 2 &&
+      isSameConfig(platformState.activeTargetConfig, defaultAppletConfig);
+
+    const shouldUpdateTarget =
+      allowRemoteTarget &&
+      Boolean(remoteTarget) &&
+      !isSameConfig(remoteTarget!, platformState.activeTargetConfig) &&
+      (remoteRevision > platformState.revision ||
+        (serverIsFresh && !isSameConfig(remoteTarget!, defaultAppletConfig)));
+
+    const hasMissingPlayer = remotePlayers.some(
+      (rp) => !platformState.playerDatabases.some((p) => isSameConfig(p.config, rp.config))
+    );
+    const hasMissingBackup = remoteBackups.some(
+      (rb) =>
+        !platformState.backupDatabases.some((b) => isSameConfig(b.config, rb.config)) &&
+        !platformState.playerDatabases.some((p) => isSameConfig(p.config, rb.config))
+    );
+    const hasMissingProg = remoteProgs.some((rp) => {
+      const rpNorm = normalizeArabicName(rp.fullNameQuad);
+      return !platformState.programmers.some(
+        (m) =>
+          (rp.email && m.email && m.email.toLowerCase() === rp.email.toLowerCase()) ||
+          (rp.emailHash && m.emailHash && m.emailHash.toLowerCase() === rp.emailHash.toLowerCase()) ||
+          (rpNorm && normalizeArabicName(m.fullNameQuad) === rpNorm)
+      );
+    });
+
     const remoteIsNewer =
-      remoteRevision > platformState.revision ||
-      remotePlayers.length > platformState.playerDatabases.length ||
-      remoteBackups.length > platformState.backupDatabases.length ||
-      remoteProgs.length > platformState.programmers.length;
+      shouldUpdateTarget ||
+      hasMissingPlayer ||
+      hasMissingBackup ||
+      hasMissingProg ||
+      remoteRevision > platformState.revision;
 
     if (!remoteIsNewer) return false;
 
@@ -844,6 +927,7 @@ async function tryHydrateServerFromFirestoreRegistry(
     for (const rp of remotePlayers) {
       if (!mergedPlayers.some((p) => isSameConfig(p.config, rp.config))) {
         mergedPlayers.push(rp);
+        getOrCreateProjectQuotaRecord(rp.config.projectId);
       }
     }
     platformState.playerDatabases = renumberEntries(mergedPlayers);
@@ -865,30 +949,38 @@ async function tryHydrateServerFromFirestoreRegistry(
       const exists = mergedProgs.some(
         (m) =>
           (rp.email && m.email && m.email.toLowerCase() === rp.email.toLowerCase()) ||
+          (rp.emailHash && m.emailHash && m.emailHash.toLowerCase() === rp.emailHash.toLowerCase()) ||
           (rpNorm && normalizeArabicName(m.fullNameQuad) === rpNorm)
       );
-      if (!exists && (rp.fullNameQuad || rp.email)) {
+      if (!exists && (rp.fullNameQuad || rp.email || rp.emailHash)) {
         mergedProgs.push(rp);
       }
     }
     platformState.programmers = ensureMasterProgrammerPresent(mergedProgs);
 
-    const allowRemoteTarget =
-      remoteTarget &&
-      !(
-        remoteTarget.projectId === 'siiiiii-3720b' &&
-        defaultAppletConfig.projectId !== 'siiiiii-3720b' &&
-        !remotePlayers.some((p) => p.config.projectId === 'siiiiii-3720b')
-      );
-
-    if (remoteRevision > platformState.revision && allowRemoteTarget && remoteTarget) {
+    if (shouldUpdateTarget && remoteTarget) {
+      if (
+        platformState.activeTargetConfig &&
+        !isSameConfig(platformState.activeTargetConfig, remoteTarget) &&
+        !platformState.previousConfigs.some((c) => isSameConfig(c, platformState.activeTargetConfig))
+      ) {
+        platformState.previousConfigs = [
+          platformState.activeTargetConfig,
+          ...platformState.previousConfigs,
+        ].slice(0, 12);
+      }
       platformState.activeTargetConfig = remoteTarget;
-      platformState.activePlayerDatabaseId = remoteActivePlayerId || null;
+      const matched = platformState.playerDatabases.find((p) =>
+        isSameConfig(p.config, remoteTarget)
+      );
+      platformState.activePlayerDatabaseId = matched?.id || remoteActivePlayerId || null;
+      getOrCreateProjectQuotaRecord(remoteTarget.projectId);
     }
 
     platformState.revision = Math.max(platformState.revision, remoteRevision) + 1;
     platformState.migrationEpoch = CURRENT_DB_EPOCH;
     platformState.updatedAt = Date.now();
+    saveQuotaStateFile();
     savePlatformState(platformState);
     broadcastState();
     return true;
@@ -952,6 +1044,13 @@ function isAllowedFirebaseCredentials(projectId: string, apiKey: string): boolea
   ) {
     return true;
   }
+  if (
+    platformState.previousConfigs.some(
+      (c) => c.projectId === projectId && c.apiKey === apiKey
+    )
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -978,27 +1077,37 @@ async function authenticateRequest(
         (platformState.activeTargetConfig.projectId === jwtAud
           ? platformState.activeTargetConfig
           : undefined) ||
-        (defaultAppletConfig.projectId === jwtAud ? defaultAppletConfig : undefined))) ||
+        (defaultAppletConfig.projectId === jwtAud ? defaultAppletConfig : undefined) ||
+        platformState.previousConfigs.find((c) => c.projectId === jwtAud))) ||
     undefined;
 
   const tokenProjectId =
     matchedCfg?.projectId ||
     (typeof body.tokenProjectId === 'string' && body.tokenProjectId.trim()
       ? body.tokenProjectId.trim()
-      : platformState.activeTargetConfig.projectId);
+      : jwtAud || platformState.activeTargetConfig.projectId);
   const tokenApiKey =
     matchedCfg?.apiKey ||
     (typeof body.tokenApiKey === 'string' && body.tokenApiKey.trim()
       ? body.tokenApiKey.trim()
       : platformState.activeTargetConfig.apiKey);
+  const tokenDbId =
+    matchedCfg?.firestoreDatabaseId ||
+    (typeof body.tokenFirestoreDatabaseId === 'string'
+      ? body.tokenFirestoreDatabaseId.trim()
+      : '');
 
-  if (!isAllowedFirebaseCredentials(tokenProjectId, tokenApiKey)) {
-    return { ok: false, status: 403, error: 'Unrecognized Firebase project credentials' };
-  }
+  const credentialsRecognized = isAllowedFirebaseCredentials(tokenProjectId, tokenApiKey);
 
   const verified = await verifyFirebaseIdToken(bearer, tokenProjectId, tokenApiKey);
   if (!verified.ok) {
-    return { ok: false, status: 403, error: 'Invalid or unverified Firebase ID token' };
+    return {
+      ok: false,
+      status: 403,
+      error: credentialsRecognized
+        ? 'Invalid or unverified Firebase ID token'
+        : 'Unrecognized Firebase project credentials',
+    };
   }
 
   const headerName =
@@ -1007,6 +1116,55 @@ async function authenticateRequest(
       : '';
   const bodyName = typeof body.fullNameQuad === 'string' ? body.fullNameQuad : '';
   const resolvedName = bodyName || headerName || verified.name || '';
+
+  if (!credentialsRecognized) {
+    const candidateCfg = sanitizeConfig({
+      projectId: tokenProjectId,
+      apiKey: tokenApiKey,
+      appId: '1:1:web:1',
+      firestoreDatabaseId: tokenDbId,
+    });
+    if (!candidateCfg) {
+      return { ok: false, status: 403, error: 'Unrecognized Firebase project credentials' };
+    }
+
+    await tryHydrateServerFromFirestoreRegistry(bearer, candidateCfg);
+    const migPtrCfg = await fetchPlatformMigrationPointerRest(bearer, candidateCfg);
+    const postRole = isIdentityProgrammer(platformState, {
+      email: verified.email,
+      fullNameQuad: resolvedName,
+    });
+
+    const isKnownAfterHydration =
+      isAllowedFirebaseCredentials(tokenProjectId, tokenApiKey) ||
+      Boolean(migPtrCfg) ||
+      postRole.isProgrammer;
+
+    if (!isKnownAfterHydration) {
+      return { ok: false, status: 403, error: 'Unrecognized Firebase project credentials' };
+    }
+
+    const cfgToSave =
+      migPtrCfg && migPtrCfg.projectId === candidateCfg.projectId ? migPtrCfg : candidateCfg;
+    if (!platformState.previousConfigs.some((c) => isSameConfig(c, cfgToSave))) {
+      platformState.previousConfigs = [cfgToSave, ...platformState.previousConfigs].slice(0, 12);
+    }
+    if (
+      migPtrCfg &&
+      migPtrCfg.projectId === candidateCfg.projectId &&
+      platformState.revision <= 2 &&
+      isSameConfig(platformState.activeTargetConfig, defaultAppletConfig) &&
+      !isSameConfig(migPtrCfg, defaultAppletConfig)
+    ) {
+      platformState.activeTargetConfig = migPtrCfg;
+      platformState.revision += 1;
+      platformState.updatedAt = Date.now();
+      getOrCreateProjectQuotaRecord(migPtrCfg.projectId);
+      saveQuotaStateFile();
+      broadcastState();
+    }
+    savePlatformState(platformState);
+  }
 
   const role = isIdentityProgrammer(platformState, {
     email: verified.email,
@@ -1187,14 +1345,21 @@ async function startServer(): Promise<void> {
     const authHeader = req.headers.authorization || '';
     const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
 
-    if (bearer && (!cloudHydrationAttempted || platformState.revision <= 1)) {
-      cloudHydrationAttempted = true;
-      const reqProj = typeof body.tokenProjectId === 'string' ? body.tokenProjectId.trim() : '';
-      const reqKey = typeof body.tokenApiKey === 'string' ? body.tokenApiKey.trim() : '';
-      const reqDbId =
-        typeof body.tokenFirestoreDatabaseId === 'string'
-          ? body.tokenFirestoreDatabaseId.trim()
-          : '';
+    const reqProj = typeof body.tokenProjectId === 'string' ? body.tokenProjectId.trim() : '';
+    const reqKey = typeof body.tokenApiKey === 'string' ? body.tokenApiKey.trim() : '';
+    const reqDbId =
+      typeof body.tokenFirestoreDatabaseId === 'string'
+        ? body.tokenFirestoreDatabaseId.trim()
+        : '';
+    const hydrateKey = `${reqProj || platformState.activeTargetConfig.projectId}:${reqDbId || '(default)'}`;
+
+    if (
+      bearer &&
+      (!hydratedProjectKeys.has(hydrateKey) ||
+        platformState.revision <= 1 ||
+        (reqProj && reqProj !== platformState.activeTargetConfig.projectId))
+    ) {
+      hydratedProjectKeys.add(hydrateKey);
       const targetCfg =
         (reqProj &&
           reqKey &&
@@ -1470,6 +1635,61 @@ async function startServer(): Promise<void> {
     }
     if (changed) {
       platformState.backupDatabases = renumberEntries(platformState.backupDatabases);
+    }
+
+    const rawIncomingProgs = Array.isArray(incomingState.programmers)
+      ? (incomingState.programmers as ProgrammerMember[])
+      : [];
+    for (const rp of rawIncomingProgs) {
+      if (!rp || typeof rp !== 'object') continue;
+      const rpEmail = typeof rp.email === 'string' ? rp.email.trim().toLowerCase() : '';
+      const rpHash = typeof rp.emailHash === 'string' ? rp.emailHash.trim().toLowerCase() : '';
+      const rpNorm = normalizeArabicName(rp.fullNameQuad);
+      const exists = platformState.programmers.some(
+        (m) =>
+          (rpEmail && m.email && m.email.toLowerCase() === rpEmail) ||
+          (rpHash && m.emailHash && m.emailHash.toLowerCase() === rpHash) ||
+          (rpNorm && normalizeArabicName(m.fullNameQuad) === rpNorm)
+      );
+      if (!exists && (rp.fullNameQuad || rpEmail || rpHash)) {
+        platformState.programmers.push({
+          id: typeof rp.id === 'string' && rp.id ? rp.id : `prog_${Date.now()}`,
+          fullNameQuad: (rp.fullNameQuad || rpEmail || 'مبرمج').trim(),
+          ...(rpEmail ? { email: rpEmail } : {}),
+          ...(rpHash ? { emailHash: rpHash } : {}),
+          ...(typeof rp.emailMasked === 'string' && rp.emailMasked ? { emailMasked: rp.emailMasked } : {}),
+          isMaster: Boolean(rp.isMaster),
+          promotedAt: typeof rp.promotedAt === 'number' ? rp.promotedAt : Date.now(),
+        });
+        changed = true;
+      }
+    }
+
+    const incomingTarget = sanitizeConfig(incomingState.activeTargetConfig);
+    if (
+      incomingTarget &&
+      incomingTarget.projectId !== 'siiiiii-3720b' &&
+      !isSameConfig(incomingTarget, platformState.activeTargetConfig) &&
+      platformState.revision <= 2 &&
+      isSameConfig(platformState.activeTargetConfig, defaultAppletConfig)
+    ) {
+      if (!platformState.previousConfigs.some((c) => isSameConfig(c, platformState.activeTargetConfig))) {
+        platformState.previousConfigs = [
+          platformState.activeTargetConfig,
+          ...platformState.previousConfigs,
+        ].slice(0, 12);
+      }
+      platformState.activeTargetConfig = incomingTarget;
+      const matched = platformState.playerDatabases.find((d) =>
+        isSameConfig(d.config, incomingTarget)
+      );
+      platformState.activePlayerDatabaseId = matched?.id || null;
+      getOrCreateProjectQuotaRecord(incomingTarget.projectId);
+      changed = true;
+    }
+
+    if (changed) {
+      platformState.programmers = ensureMasterProgrammerPresent(platformState.programmers);
       platformState.revision = Math.max(
         platformState.revision + 1,
         typeof incomingState.revision === 'number' ? incomingState.revision : platformState.revision + 1

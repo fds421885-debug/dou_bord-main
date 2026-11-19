@@ -3108,6 +3108,67 @@ export async function runFirebaseMigration(params: {
 
     // Notify backend server + SSE stream of 100% migration completion
     let serverPointerUpdated = false;
+    const isMasterActor = isMasterProgrammerIdentity({
+      email: targetUser.email,
+      fullNameQuad: resolvedQuadName,
+    });
+    const buildLocalMigratedState = (baseInput?: PlatformProgrammerState | null): PlatformProgrammerState => {
+      const base = ensureRegistryDefaults(baseInput || getFallbackProgrammerState(null));
+      const existingPlayer = base.playerDatabases.find((d) =>
+        isSameFirebaseTarget(d.config, targetConfig)
+      );
+      const nextPlayers = existingPlayer
+        ? base.playerDatabases.map((d) =>
+            isSameFirebaseTarget(d.config, targetConfig)
+              ? { ...d, lastUsedAt: Date.now() }
+              : d
+          )
+        : [
+            ...base.playerDatabases,
+            {
+              id: `player_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              order: base.playerDatabases.length + 1,
+              role: 'player' as const,
+              label: `قاعدة بيانات #${base.playerDatabases.length + 1} — ${targetConfig.projectId}`,
+              config: targetConfig,
+              verification: {
+                firestoreReady: true,
+                googleAuthReady: true,
+                rulesReady: true,
+                verifiedAt: Date.now(),
+                verifiedByEmail: targetUser.email || undefined,
+              },
+              lastUsedAt: Date.now(),
+              addedByEmail: targetUser.email || undefined,
+              addedAt: Date.now(),
+            },
+          ];
+      const finalPlayer = nextPlayers.find((d) =>
+        isSameFirebaseTarget(d.config, targetConfig)
+      );
+      return ensureRegistryDefaults({
+        ...base,
+        revision: base.revision + 1,
+        playerDatabases: renumberEntries(nextPlayers),
+        activeTargetConfig: targetConfig,
+        activePlayerDatabaseId: finalPlayer?.id || base.activePlayerDatabaseId,
+        migratedRoomId: migratedRoomId || null,
+        lastBackupAnnouncement: backupEntry
+          ? {
+              backupDbId: backupEntry.id,
+              backupProjectId: backupEntry.config.projectId,
+              targetProjectId: targetConfig.projectId,
+              targetConfig,
+              migratedRoomId,
+              announcedAt: Date.now(),
+              announcedByEmail: targetUser.email || undefined,
+            }
+          : base.lastBackupAnnouncement,
+        updatedByEmail: targetUser.email || undefined,
+        updatedAt: Date.now(),
+      });
+    };
+
     try {
       const serverRes = await callProgrammerEndpoint<{
         ok: boolean;
@@ -3124,50 +3185,28 @@ export async function runFirebaseMigration(params: {
         tokenFirestoreDatabaseId: targetConfig.firestoreDatabaseId || '',
       });
       serverPointerUpdated = Boolean(serverRes?.ok);
-      if (serverRes?.state) {
-        saveLocalRegistryState(serverRes.state);
-        saveBackupFirebaseConfigs(serverRes.state.backupDatabases.map((b) => b.config));
-        if (isMasterProgrammerIdentity({ email: targetUser.email, fullNameQuad: resolvedQuadName })) {
-          await withTimeout(
-            writeFirestoreRegistryDoc(
-              targetDb,
-              serverRes.state,
-              targetUid,
-              resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
-            ),
-            2000
-          ).catch(() => undefined);
-        }
+      const nextState = serverRes?.state
+        ? ensureRegistryDefaults(serverRes.state)
+        : buildLocalMigratedState(loadLocalRegistryState());
+      saveLocalRegistryState(nextState);
+      saveBackupFirebaseConfigs(nextState.backupDatabases.map((b) => b.config));
+      if (isMasterActor) {
+        await withTimeout(
+          writeFirestoreRegistryDoc(
+            targetDb,
+            nextState,
+            targetUid,
+            resolvedQuadName || targetUser.displayName || MASTER_PROGRAMMER_NAME
+          ),
+          2000
+        ).catch(() => undefined);
       }
     } catch {
-      // Static host fallback: mirror local registry onto targetDb
+      // Static host or secondary container fallback: mirror local registry onto targetDb
       try {
-        const localReg = loadLocalRegistryState();
-        if (localReg) {
-          const matchedPlayer = localReg.playerDatabases.find((d) =>
-            isSameFirebaseTarget(d.config, targetConfig)
-          );
-          const updatedReg: PlatformProgrammerState = {
-            ...localReg,
-            revision: localReg.revision + 1,
-            activeTargetConfig: targetConfig,
-            activePlayerDatabaseId: matchedPlayer?.id || localReg.activePlayerDatabaseId,
-            migratedRoomId: migratedRoomId || null,
-            lastBackupAnnouncement: backupEntry
-              ? {
-                  backupDbId: backupEntry.id,
-                  backupProjectId: backupEntry.config.projectId,
-                  targetProjectId: targetConfig.projectId,
-                  targetConfig,
-                  migratedRoomId,
-                  announcedAt: Date.now(),
-                  announcedByEmail: targetUser.email || undefined,
-                }
-              : localReg.lastBackupAnnouncement,
-            updatedByEmail: targetUser.email || undefined,
-            updatedAt: Date.now(),
-          };
-          saveLocalRegistryState(updatedReg);
+        const updatedReg = buildLocalMigratedState(loadLocalRegistryState());
+        saveLocalRegistryState(updatedReg);
+        if (isMasterActor) {
           await withTimeout(
             writeFirestoreRegistryDoc(
               targetDb,
@@ -4066,29 +4105,37 @@ export async function fetchProgrammerSession(
       }
     }
 
-    // Never drop already-saved local databases if server container restarted cleanly!
-    if (serverRes.isProgrammer && serverRes.state && localBeforeFetch) {
-      const missingPlayers = localBeforeFetch.playerDatabases.filter(
+    // Never drop already-saved local databases or active target if server container restarted cleanly!
+    if (serverRes.isProgrammer && serverRes.state) {
+      const localSeed = localBeforeFetch || getFallbackProgrammerState(null);
+      const missingPlayers = localSeed.playerDatabases.filter(
         (lp) =>
           !serverRes.state!.playerDatabases.some((sp) => isSameFirebaseTarget(sp.config, lp.config)) &&
           !serverRes.state!.backupDatabases.some((sb) => isSameFirebaseTarget(sb.config, lp.config))
       );
-      const missingBackups = localBeforeFetch.backupDatabases.filter(
+      const missingBackups = localSeed.backupDatabases.filter(
         (lb) =>
           !serverRes.state!.backupDatabases.some((sb) => isSameFirebaseTarget(sb.config, lb.config)) &&
           !serverRes.state!.playerDatabases.some((sp) => isSameFirebaseTarget(sp.config, lb.config))
       );
+      const serverNeedsTargetSync =
+        serverLooksFresh &&
+        !isSameFirebaseTarget(serverRes.state.activeTargetConfig, activeFirebaseConfig) &&
+        !isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig);
 
       if (
-        (missingPlayers.length > 0 || missingBackups.length > 0) &&
-        (serverLooksFresh || localBeforeFetch.revision >= serverRes.state.revision)
+        serverNeedsTargetSync ||
+        ((missingPlayers.length > 0 || missingBackups.length > 0) &&
+          (serverLooksFresh || localSeed.revision >= serverRes.state.revision))
       ) {
         try {
           const synced = await callProgrammerEndpoint<{
             ok: boolean;
             state?: PlatformProgrammerState;
           }>('/api/programmer/sync-state', user, fullNameQuad, {
-            state: localBeforeFetch,
+            state: serverNeedsTargetSync
+              ? { ...localSeed, activeTargetConfig: activeFirebaseConfig }
+              : localSeed,
           });
           if (synced?.state) {
             serverRes.state = synced.state;
@@ -4100,7 +4147,15 @@ export async function fetchProgrammerSession(
     }
 
     if (serverRes.state) {
-      const normalized = ensureRegistryDefaults(serverRes.state);
+      const normalized = ensureRegistryDefaults({
+        ...serverRes.state,
+        activeTargetConfig:
+          !isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig) &&
+          isSameFirebaseTarget(serverRes.state.activeTargetConfig, defaultFirebaseConfig) &&
+          serverRes.state.revision <= 1
+            ? activeFirebaseConfig
+            : serverRes.state.activeTargetConfig,
+      });
       serverRes.state = normalized;
       saveLocalRegistryState(normalized);
       if (normalized.playerDatabases.length > 0) {
@@ -4135,34 +4190,58 @@ export async function fetchProgrammerSession(
       }
     }
 
+    if (
+      !serverRes.state &&
+      (serverRes.isProgrammer || isMasterProgrammerIdentity({ email: user.email, fullNameQuad }))
+    ) {
+      const fallbackState = await loadServerlessRegistryState().catch(() =>
+        getFallbackProgrammerState(localBeforeFetch)
+      );
+      return {
+        isProgrammer: true,
+        isMaster:
+          serverRes.isMaster ||
+          isMasterProgrammerIdentity({ email: user.email, fullNameQuad }),
+        state: fallbackState,
+        mode: 'serverless',
+      };
+    }
+
     return { ...serverRes, mode: 'server' };
   } catch (err) {
-    if (!(err instanceof ApiUnavailableError) && !isMasterProgrammerIdentity({ email: user.email, fullNameQuad })) {
+    const state = await loadServerlessRegistryState().catch(() =>
+      getFallbackProgrammerState(localBeforeFetch)
+    );
+    const role = await isIdentityProgrammerServerless(state, {
+      email: user.email,
+      fullNameQuad,
+    });
+    if (role.isMaster) {
+      void writeFirestoreRegistryDoc(
+        sourceDb,
+        state,
+        user.uid,
+        fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
+      );
+    }
+    if (role.isProgrammer) {
+      return {
+        isProgrammer: true,
+        isMaster: role.isMaster,
+        state,
+        mode: 'serverless',
+      };
+    }
+    if (!(err instanceof ApiUnavailableError)) {
       throw err;
     }
+    return {
+      isProgrammer: false,
+      isMaster: false,
+      state: undefined,
+      mode: 'serverless',
+    };
   }
-
-  const state = await loadServerlessRegistryState().catch(() =>
-    getFallbackProgrammerState(localBeforeFetch)
-  );
-  const role = await isIdentityProgrammerServerless(state, {
-    email: user.email,
-    fullNameQuad,
-  });
-  if (role.isMaster) {
-    void writeFirestoreRegistryDoc(
-      sourceDb,
-      state,
-      user.uid,
-      fullNameQuad || user.displayName || MASTER_PROGRAMMER_NAME
-    );
-  }
-  return {
-    isProgrammer: role.isProgrammer,
-    isMaster: role.isMaster,
-    state: role.isProgrammer ? state : undefined,
-    mode: 'serverless',
-  };
 }
 
 export async function addPlayerDatabase(

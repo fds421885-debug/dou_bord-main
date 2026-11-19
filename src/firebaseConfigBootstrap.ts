@@ -843,9 +843,21 @@ export async function syncPlatformDbBeforeBoot(
     detail: backendAvailable ? 'تم استلام حالة المنصة' : 'فحص الإعلان الاحتياطي السحابي...',
   });
 
-  // Only query Backup DB(s) via REST if backend isn't available OR if server hasn't switched away from default yet
+  // Query Backup DB(s) & chain via REST if backend is offline OR server looks fresh on default DB while local/backup history exists
+  const storedCustomDifferent = !isSameFirebaseTarget(
+    getCurrentStoredFirebaseConfig(),
+    defaultFirebaseConfig
+  );
   let restPtr: ResolvedRemotePointer | null = null;
-  if (!backendAvailable || (serverPtr && isSameFirebaseTarget(serverPtr.config, defaultFirebaseConfig) && getBackupFirebaseConfigs().length > 0)) {
+  if (
+    !backendAvailable ||
+    (serverPtr &&
+      isSameFirebaseTarget(serverPtr.config, defaultFirebaseConfig) &&
+      serverRevision <= 1 &&
+      (getBackupFirebaseConfigs().length > 0 ||
+        storedCustomDifferent ||
+        getPreviousFirebaseConfigs().length > 0))
+  ) {
     restPtr = await resolveLatestFirestoreMigrationRest().catch(() => null);
   }
 

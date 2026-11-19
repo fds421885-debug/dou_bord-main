@@ -65,6 +65,7 @@ import {
 } from './firebase';
 import {
   fetchProgrammerSession,
+  getFallbackProgrammerState,
   restoreActiveSupervisorRoomFromSnapshot,
   syncPersonalAccountFromPreviousDbs,
   type MigrationProgress,
@@ -572,14 +573,22 @@ export default function App() {
             }
             return res.state!;
           });
+        } else if (res.isProgrammer || quickMaster) {
+          setProgrammerState((prev) => prev || getFallbackProgrammerState());
         }
       } catch (err) {
         if (reqSeq !== programmerReqSeqRef.current) return;
-        const msg =
-          err instanceof Error && err.message
-            ? err.message
-            : 'تعذر الاتصال بخادم إدارة القواعد حالياً.';
-        setProgrammerError(msg);
+        if (quickMaster) {
+          setProgrammerMode('serverless');
+          setProgrammerState((prev) => prev || getFallbackProgrammerState());
+          setProgrammerError(null);
+        } else {
+          const msg =
+            err instanceof Error && err.message
+              ? err.message
+              : 'تعذر الاتصال بخادم إدارة القواعد حالياً.';
+          setProgrammerError(msg);
+        }
       } finally {
         if (reqSeq === programmerReqSeqRef.current) {
           setProgrammerLoading(false);
@@ -647,6 +656,15 @@ export default function App() {
       }
 
       if (!ptr || !ptr.config) return;
+      // Ignore a fresh-restarted default pointer (revision <= 1) while user is actively on a migrated custom DB
+      if (
+        (ptr.revision || 1) <= 1 &&
+        isSameFirebaseTarget(ptr.config, defaultFirebaseConfig) &&
+        !isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig) &&
+        (counts?.playerDatabasesCount ?? 0) === 0
+      ) {
+        return;
+      }
       applyRemotePlatformPointer({
         config: ptr.config,
         resetToDefault: ptr.resetToDefault,

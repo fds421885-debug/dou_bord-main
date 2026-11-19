@@ -124,7 +124,7 @@ interface ServerProjectQuotaStatus extends ServerProjectQuotaRecord {
   alertStep: number | null;
 }
 
-const CURRENT_DB_EPOCH = 'clean_split_v3_2026_11_18';
+const CURRENT_DB_EPOCH = 'qdrat1_base_v4_2026_11_19';
 const MASTER_PROGRAMMER_NAME = 'محمد منتصر محمد يونس';
 const MASTER_PROGRAMMER_EMAIL = 'mohammedmonta2022m@gmail.com';
 const MASTER_PROGRAMMER_EMAILS = [
@@ -667,6 +667,14 @@ function buildPublicPayload(state: PlatformState): {
   activePlayerDatabaseId: string | null;
   playerDatabasesCount: number;
   backupDatabasesCount: number;
+  playerDatabases: Array<{
+    id: string;
+    order: number;
+    label: string;
+    config: SanitizedFirebaseConfig;
+    lastUsedAt?: number | null;
+    addedAt: number;
+  }>;
   backupConfigs: SanitizedFirebaseConfig[];
   poolUpdatedAt: number;
   quotaStatus: ServerProjectQuotaStatus;
@@ -674,6 +682,14 @@ function buildPublicPayload(state: PlatformState): {
   const activeCfg = state.activeTargetConfig || defaultAppletConfig;
   const quotaStatus = buildQuotaStatusFromRecord(getOrCreateProjectQuotaRecord(activeCfg.projectId));
   const backupConfigs = state.backupDatabases.map((b) => b.config);
+  const publicPlayerDatabases = state.playerDatabases.map((p) => ({
+    id: p.id,
+    order: p.order,
+    label: p.label,
+    config: p.config,
+    lastUsedAt: p.lastUsedAt ?? null,
+    addedAt: p.addedAt,
+  }));
   const previousConfigs = [
     ...state.previousConfigs,
     ...state.playerDatabases.map((p) => p.config),
@@ -706,6 +722,7 @@ function buildPublicPayload(state: PlatformState): {
     activePlayerDatabaseId: state.activePlayerDatabaseId,
     playerDatabasesCount: state.playerDatabases.length,
     backupDatabasesCount: state.backupDatabases.length,
+    playerDatabases: publicPlayerDatabases,
     backupConfigs,
     poolUpdatedAt: state.updatedAt,
     quotaStatus,
@@ -856,7 +873,15 @@ async function tryHydrateServerFromFirestoreRegistry(
     }
     platformState.programmers = ensureMasterProgrammerPresent(mergedProgs);
 
-    if (remoteRevision > platformState.revision && remoteTarget) {
+    const allowRemoteTarget =
+      remoteTarget &&
+      !(
+        remoteTarget.projectId === 'siiiiii-3720b' &&
+        defaultAppletConfig.projectId !== 'siiiiii-3720b' &&
+        !remotePlayers.some((p) => p.config.projectId === 'siiiiii-3720b')
+      );
+
+    if (remoteRevision > platformState.revision && allowRemoteTarget && remoteTarget) {
       platformState.activeTargetConfig = remoteTarget;
       platformState.activePlayerDatabaseId = remoteActivePlayerId || null;
     }
@@ -1300,6 +1325,100 @@ async function startServer(): Promise<void> {
     broadcastState();
 
     res.json({ ok: true, added: newEntry, state: platformState });
+  });
+
+  // Public verified Player Database addition (any verified Google sign-in on target DB can add; deletion remains Programmer-only)
+  app.post('/api/public/player-dbs/add', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const config = sanitizeConfig(body.config);
+    if (!config) {
+      res.status(400).json({ error: 'إعدادات Firebase غير صالحة' });
+      return;
+    }
+
+    const ver = sanitizeVerification(body.verification, Date.now());
+    if (!ver.firestoreReady || !ver.googleAuthReady || !ver.rulesReady) {
+      res.status(400).json({ error: 'يجب إكمال الفحص الشامل (Firestore + OAuth + Rules) أولاً قبل إضافة القاعدة.' });
+      return;
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const targetToken =
+      typeof body.targetIdToken === 'string' && body.targetIdToken.trim()
+        ? body.targetIdToken.trim()
+        : bearer;
+
+    if (!targetToken) {
+      res.status(401).json({ error: 'يلزم إتمام التحقق من تسجيل الدخول على القاعدة الجديدة قبل الإضافة.' });
+      return;
+    }
+
+    const verifiedTarget = await verifyFirebaseIdToken(targetToken, config.projectId, config.apiKey);
+    if (!verifiedTarget.ok) {
+      res.status(403).json({ error: 'تعذر التحقق من صلاحية جلسة Google على القاعدة الجديدة. أعد الفحص ثم حاول مجدداً.' });
+      return;
+    }
+
+    if (platformState.playerDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'قاعدة البيانات هذه مضافة بالفعل في قائمة قواعد البيانات.' });
+      return;
+    }
+    if (platformState.backupDatabases.some((d) => isSameConfig(d.config, config))) {
+      res.status(409).json({ error: 'هذه القاعدة مسجلة بالفعل كقاعدة احتياطية صامتة، ولا يمكن إضافتها هنا.' });
+      return;
+    }
+
+    const now = Date.now();
+    const nextOrder = platformState.playerDatabases.length + 1;
+    const rawLabel = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
+    const newEntry: RegisteredDatabaseEntry = {
+      id: `player_${now}_${Math.random().toString(36).slice(2, 6)}`,
+      order: nextOrder,
+      role: 'player',
+      label: rawLabel || `قاعدة بيانات #${nextOrder} — ${config.projectId}`,
+      config,
+      verification: {
+        ...ver,
+        verifiedByEmail: ver.verifiedByEmail || verifiedTarget.email,
+      },
+      lastUsedAt: isSameConfig(config, platformState.activeTargetConfig) ? now : null,
+      addedByEmail: verifiedTarget.email,
+      addedAt: now,
+    };
+
+    platformState.playerDatabases = renumberEntries([...platformState.playerDatabases, newEntry]);
+    if (isSameConfig(config, platformState.activeTargetConfig)) {
+      platformState.activePlayerDatabaseId = newEntry.id;
+    }
+    if (
+      !isSameConfig(config, platformState.activeTargetConfig) &&
+      !platformState.previousConfigs.some((c) => isSameConfig(c, config))
+    ) {
+      platformState.previousConfigs = [...platformState.previousConfigs, config].slice(0, 12);
+    }
+    getOrCreateProjectQuotaRecord(config.projectId);
+    saveQuotaStateFile();
+    platformState.revision += 1;
+    platformState.updatedAt = now;
+    platformState.updatedByEmail = verifiedTarget.email;
+    savePlatformState(platformState);
+    broadcastState();
+
+    const publicPayload = buildPublicPayload(platformState);
+    res.json({
+      ok: true,
+      added: {
+        id: newEntry.id,
+        order: newEntry.order,
+        label: newEntry.label,
+        config: newEntry.config,
+        lastUsedAt: newEntry.lastUsedAt,
+        addedAt: newEntry.addedAt,
+      },
+      playerDatabases: publicPayload.playerDatabases,
+      revision: publicPayload.revision,
+    });
   });
 
   // Re-hydrate / merge saved local or cloud registry entries if server restarted

@@ -35,6 +35,15 @@ export interface ServerPlatformPointer {
   updatedAt?: number;
 }
 
+export interface PublicDatabaseSummary {
+  id: string;
+  order: number;
+  label: string;
+  config: FirebaseAppConfig;
+  lastUsedAt?: number | null;
+  addedAt: number;
+}
+
 export interface InitialServerPlatformStatus {
   serverSynced: boolean;
   backendAvailable: boolean;
@@ -43,6 +52,7 @@ export interface InitialServerPlatformStatus {
   activePlayerDatabaseId: string | null;
   playerDatabasesCount: number;
   backupDatabasesCount: number;
+  playerDatabases: PublicDatabaseSummary[];
   backupSignalProjectId?: string | null;
 }
 
@@ -94,7 +104,9 @@ export const DB_EPOCH_STORAGE_KEY = 'duoboard_db_epoch_v1';
 export const CONSOLIDATED_FROM_SESSION_KEY = 'duoboard_consolidated_from_project';
 export const SWITCH_REQUIRE_LOGIN_KEY = 'duoboard_switched_require_login_v1';
 export const LEGACY_STATIC_POOL_KEY = 'duoboard_static_programmer_pool_v1';
-export const CURRENT_DB_EPOCH = 'clean_split_v3_2026_11_18';
+export const PUBLIC_PLAYER_DBS_STORAGE_KEY = 'duoboard_public_player_dbs_v1';
+export const MANUAL_DB_PIN_KEY = 'duoboard_manual_db_pin_v1';
+export const CURRENT_DB_EPOCH = 'qdrat1_base_v4_2026_11_19';
 
 export interface BootProgress {
   percent: number;
@@ -111,6 +123,7 @@ let initialServerStatus: InitialServerPlatformStatus = {
   activePlayerDatabaseId: null,
   playerDatabasesCount: 0,
   backupDatabasesCount: 0,
+  playerDatabases: [],
   backupSignalProjectId: null,
 };
 
@@ -280,12 +293,104 @@ export function setLastAppliedBackupDocTs(ts: number): void {
   }
 }
 
+export function getPublicPlayerDatabases(): PublicDatabaseSummary[] {
+  try {
+    const raw = localStorage.getItem(PUBLIC_PLAYER_DBS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: PublicDatabaseSummary[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const d = item as Record<string, unknown>;
+      const cfg = sanitizeFirebaseConfig(d.config);
+      if (!cfg || out.some((x) => isSameFirebaseTarget(x.config, cfg))) continue;
+      out.push({
+        id: typeof d.id === 'string' && d.id ? d.id : `pub_${out.length + 1}_${cfg.projectId}`,
+        order: typeof d.order === 'number' ? d.order : out.length + 1,
+        label:
+          typeof d.label === 'string' && d.label.trim()
+            ? d.label.trim().slice(0, 80)
+            : cfg.projectId,
+        config: cfg,
+        lastUsedAt: typeof d.lastUsedAt === 'number' ? d.lastUsedAt : null,
+        addedAt: typeof d.addedAt === 'number' ? d.addedAt : Date.now(),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export function savePublicPlayerDatabases(list: PublicDatabaseSummary[]): void {
+  try {
+    const deduped: PublicDatabaseSummary[] = [];
+    for (const item of list) {
+      const cfg = sanitizeFirebaseConfig(item?.config);
+      if (!cfg || deduped.some((x) => isSameFirebaseTarget(x.config, cfg))) continue;
+      deduped.push({
+        id: item.id || `pub_${deduped.length + 1}_${cfg.projectId}`,
+        order: deduped.length + 1,
+        label: (item.label || cfg.projectId).trim().slice(0, 80),
+        config: cfg,
+        lastUsedAt: typeof item.lastUsedAt === 'number' ? item.lastUsedAt : null,
+        addedAt: typeof item.addedAt === 'number' ? item.addedAt : Date.now(),
+      });
+    }
+    localStorage.setItem(PUBLIC_PLAYER_DBS_STORAGE_KEY, JSON.stringify(deduped.slice(0, 25)));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function getManualDbPin(): { targetKey: string; pinnedRevision: number } | null {
+  try {
+    const raw = localStorage.getItem(MANUAL_DB_PIN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { targetKey?: string; pinnedRevision?: number };
+    if (parsed && typeof parsed.targetKey === 'string' && parsed.targetKey) {
+      return {
+        targetKey: parsed.targetKey,
+        pinnedRevision: Number(parsed.pinnedRevision || 0),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function setManualDbPin(config: FirebaseAppConfig, revision = 0): void {
+  try {
+    localStorage.setItem(
+      MANUAL_DB_PIN_KEY,
+      JSON.stringify({
+        targetKey: firebaseTargetKey(config),
+        pinnedRevision: Number(revision || 0),
+      })
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function clearManualDbPin(): void {
+  try {
+    localStorage.removeItem(MANUAL_DB_PIN_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function wipeLegacyDatabaseStorage(): void {
   try {
     localStorage.removeItem(LEGACY_STATIC_POOL_KEY);
     localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
     localStorage.removeItem(PREV_CONFIGS_STORAGE_KEY);
     localStorage.removeItem(BACKUP_CONFIGS_STORAGE_KEY);
+    localStorage.removeItem(PUBLIC_PLAYER_DBS_STORAGE_KEY);
+    localStorage.removeItem(MANUAL_DB_PIN_KEY);
     localStorage.removeItem(LAST_APPLIED_BACKUP_TS_KEY);
     localStorage.removeItem(PENDING_REJOIN_ROOM_KEY);
     const toRemove: string[] = [];
@@ -686,6 +791,7 @@ export async function syncPlatformDbBeforeBoot(
   let serverActivePlayerDbId: string | null = null;
   let playerCount = 0;
   let backupCount = 0;
+  let publicPlayerDbs: PublicDatabaseSummary[] = getPublicPlayerDatabases();
   let backendAvailable = false;
   let backupSignalProjectId: string | null = null;
 
@@ -705,6 +811,7 @@ export async function syncPlatformDbBeforeBoot(
         activePlayerDatabaseId?: string | null;
         playerDatabasesCount?: number;
         backupDatabasesCount?: number;
+        playerDatabases?: PublicDatabaseSummary[];
         backupConfigs?: FirebaseAppConfig[];
       };
       if (payload?.pointer?.config) {
@@ -716,6 +823,10 @@ export async function syncPlatformDbBeforeBoot(
         backupCount = Number(payload.backupDatabasesCount ?? 0);
         backupSignalProjectId = payload.pointer.lastBackupAnnouncement?.backupProjectId || null;
 
+        if (Array.isArray(payload.playerDatabases)) {
+          savePublicPlayerDatabases(payload.playerDatabases);
+          publicPlayerDbs = getPublicPlayerDatabases();
+        }
         if (Array.isArray(payload.backupConfigs)) {
           saveBackupFirebaseConfigs(payload.backupConfigs);
         }
@@ -792,7 +903,20 @@ export async function syncPlatformDbBeforeBoot(
   }
 
   let switchedOnBoot = false;
-  if (chosenTarget) {
+  const manualPin = getManualDbPin();
+  const currentStoredCfg = getCurrentStoredFirebaseConfig();
+  const manualPinMatchesCurrent =
+    Boolean(manualPin) && manualPin!.targetKey === firebaseTargetKey(currentStoredCfg);
+  const manualPinStillValid =
+    manualPinMatchesCurrent &&
+    (!serverRevision || serverRevision <= manualPin!.pinnedRevision) &&
+    !restOverridesFreshServer;
+
+  if (manualPin && !manualPinStillValid) {
+    clearManualDbPin();
+  }
+
+  if (chosenTarget && !manualPinStillValid) {
     switchedOnBoot = persistResolvedTargetConfig({
       targetCfg: chosenTarget,
       resetToDefault: chosenResetToDefault,
@@ -841,8 +965,9 @@ export async function syncPlatformDbBeforeBoot(
     switchedOnBoot,
     revision: serverRevision,
     activePlayerDatabaseId: serverActivePlayerDbId,
-    playerDatabasesCount: playerCount,
+    playerDatabasesCount: Math.max(playerCount, publicPlayerDbs.length),
     backupDatabasesCount: backupCount,
+    playerDatabases: publicPlayerDbs,
     backupSignalProjectId,
   };
 

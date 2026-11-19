@@ -35,6 +35,7 @@ import {
   encodeCompactFirebaseConfig,
   firebaseTargetKey,
   getBackupFirebaseConfigs,
+  getInitialServerPlatformStatus,
   getPreviousFirebaseConfigs,
   getSyncedSourceKeys,
   getTargetFirebaseAppName,
@@ -3860,9 +3861,15 @@ export async function readCloudRegistryDoc(
   }
 }
 
+export function getFallbackProgrammerState(
+  existing?: Partial<PlatformProgrammerState> | null
+): PlatformProgrammerState {
+  return ensureRegistryDefaults(existing ?? loadLocalRegistryState());
+}
+
 async function loadServerlessRegistryState(): Promise<PlatformProgrammerState> {
   const local = loadLocalRegistryState();
-  const cloud = await readCloudRegistryDoc(sourceDb);
+  const cloud = await readCloudRegistryDoc(sourceDb).catch(() => null);
   const rest = await resolveLatestFirestoreMigrationRest().catch(() => null);
 
   let base: PlatformProgrammerState;
@@ -3874,7 +3881,11 @@ async function loadServerlessRegistryState(): Promise<PlatformProgrammerState> {
     base = ensureRegistryDefaults(null);
   }
 
-  if (rest && !isSameFirebaseTarget(rest.config, base.activeTargetConfig)) {
+  if (
+    rest &&
+    rest.migrationEpoch === CURRENT_DB_EPOCH &&
+    !isSameFirebaseTarget(rest.config, base.activeTargetConfig)
+  ) {
     base = ensureRegistryDefaults({
       ...base,
       activeTargetConfig: rest.config,
@@ -3913,10 +3924,19 @@ async function callProgrammerEndpoint<T>(
   fullNameQuad: string,
   payload: Record<string, unknown> = {}
 ): Promise<T> {
+  const bootBackendKnown = getInitialServerPlatformStatus().backendAvailable;
+  if (
+    typeof window !== 'undefined' &&
+    (window.location.hostname.endsWith('.github.io') ||
+      window.location.hostname.endsWith('.netlify.app'))
+  ) {
+    throw new ApiUnavailableError('Static host (GitHub Pages / Netlify) uses serverless mode');
+  }
+
   const sendWithToken = async (forceRefresh: boolean) => {
     const idToken = await withTimeout(user.getIdToken(forceRefresh), 4000);
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 6000);
+    const timer = window.setTimeout(() => controller.abort(), bootBackendKnown ? 6000 : 1800);
     try {
       return await fetch(endpoint, {
         method: 'POST',
@@ -3942,14 +3962,22 @@ async function callProgrammerEndpoint<T>(
   let resp: Response;
   try {
     resp = await sendWithToken(false);
-    if (resp.status === 401 || resp.status === 403) {
+    if (bootBackendKnown && (resp.status === 401 || resp.status === 403)) {
       resp = await sendWithToken(true);
     }
   } catch {
     throw new ApiUnavailableError('Network unreachable');
   }
 
-  if (resp.status === 404 || resp.status === 405 || resp.status === 501 || resp.status === 502) {
+  if (
+    resp.status === 404 ||
+    resp.status === 405 ||
+    resp.status === 501 ||
+    resp.status === 502 ||
+    resp.status === 503 ||
+    resp.status === 504 ||
+    (!bootBackendKnown && !resp.ok)
+  ) {
     throw new ApiUnavailableError(`Static host or server unavailable (${resp.status})`);
   }
 
@@ -4109,10 +4137,14 @@ export async function fetchProgrammerSession(
 
     return { ...serverRes, mode: 'server' };
   } catch (err) {
-    if (!(err instanceof ApiUnavailableError)) throw err;
+    if (!(err instanceof ApiUnavailableError) && !isMasterProgrammerIdentity({ email: user.email, fullNameQuad })) {
+      throw err;
+    }
   }
 
-  const state = await loadServerlessRegistryState();
+  const state = await loadServerlessRegistryState().catch(() =>
+    getFallbackProgrammerState(localBeforeFetch)
+  );
   const role = await isIdentityProgrammerServerless(state, {
     email: user.email,
     fullNameQuad,

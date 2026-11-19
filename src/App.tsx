@@ -1331,7 +1331,10 @@ export default function App() {
                 isMaster={isMasterProgrammer}
                 backendMode={programmerMode}
                 poolState={programmerState}
-                onPoolStateUpdated={(next) => setProgrammerState(next)}
+                onPoolStateUpdated={(next) => {
+                  programmerReqSeqRef.current += 1;
+                  setProgrammerState(next);
+                }}
                 onRefreshState={() =>
                   refreshProgrammerState(firebaseUser, firebaseUser.displayName)
                 }

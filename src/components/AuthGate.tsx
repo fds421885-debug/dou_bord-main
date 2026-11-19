@@ -1,14 +1,34 @@
 import React, { useEffect, useState } from 'react';
-import { signInWithPopup, signOut, type User } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from '../firestoreTracked';
-import { LogIn, UserCheck, AlertCircle, LogOut } from 'lucide-react';
 import {
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+  type User,
+} from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from '../firestoreTracked';
+import {
+  AlertCircle,
+  Check,
+  Code2,
+  Copy,
+  ExternalLink,
+  LogIn,
+  LogOut,
+  RefreshCw,
+  UserCheck,
+} from 'lucide-react';
+import {
+  activeProjectId,
   auth,
+  buildCleanPrimaryUrl,
   db,
+  defaultFirebaseConfig,
   googleProvider,
   handleFirestoreError,
+  isCustomFirebaseConfig,
   isQuadNameValid,
   OperationType,
+  resetToDefaultFirebaseConfig,
 } from '../firebase';
 import { saveSessionSnapshot } from '../localDraftStore';
 import type { UserProfile } from '../types';
@@ -17,47 +37,115 @@ import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
 interface AuthGateProps {
   firebaseUser: User | null;
   profile: UserProfile | null;
+  isProgrammer?: boolean;
+  onOpenProgrammer?: () => void;
   onProfileSaved: (profile: UserProfile) => void;
   onQuotaDetected?: () => void;
 }
 
-function formatAuthOrFirestoreError(err: unknown, user?: User | null): string {
+type AuthErrorKind =
+  | 'unauthorized_domain'
+  | 'auth_provider'
+  | 'popup_blocked'
+  | 'email_unverified'
+  | 'other'
+  | null;
+
+function classifyAuthOrFirestoreError(
+  err: unknown,
+  user?: User | null,
+  context: 'login' | 'profile' = 'profile'
+): { message: string; kind: AuthErrorKind } {
   const raw = err instanceof Error ? err.message : String(err);
   const lower = raw.toLowerCase();
 
   if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
-    return 'تم الوصول للحد الأقصى مؤقتاً، جاري التبديل تلقائياً لقاعدة بيانات بديلة...';
+    return {
+      kind: 'other',
+      message: 'تم الوصول للحد الأقصى مؤقتاً، جاري التبديل تلقائياً لقاعدة بيانات بديلة...',
+    };
   }
   if (lower.includes('auth/unauthorized-domain')) {
-    return 'هذا النطاق (مثل Netlify) غير مضاف في النطاقات المصرح بها (Authorized domains) في إعدادات Firebase Authentication.';
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    return {
+      kind: 'unauthorized_domain',
+      message: `النطاق الحالي (${host}) غير مضاف في Authorized domains لمشروع Firebase النشط (${activeProjectId}).`,
+    };
   }
-  if (lower.includes('auth/popup-blocked')) {
-    return 'تم حظر نافذة تسجيل الدخول من المتصفح، يرجى السماح بالنوافذ المنبثقة والمحاولة مرة أخرى.';
+  if (
+    lower.includes('auth/operation-not-allowed') ||
+    lower.includes('auth/configuration-not-found')
+  ) {
+    return {
+      kind: 'auth_provider',
+      message: `مزوّد Google Sign-In غير مفعّل في إعدادات Authentication لمشروع (${activeProjectId}).`,
+    };
+  }
+  if (lower.includes('auth/popup-blocked') || lower.includes('auth/cancelled-popup-request')) {
+    return {
+      kind: 'popup_blocked',
+      message:
+        'تم حظر نافذة تسجيل الدخول المنبثقة من المتصفح. اسمح بالنوافذ المنبثقة أو استخدم زر الدخول المباشر بالأسفل.',
+    };
   }
   if (lower.includes('auth/popup-closed-by-user')) {
-    return 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.';
+    return {
+      kind: 'popup_blocked',
+      message: 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية. يمكنك المحاولة مجدداً أو استخدام الدخول المباشر.',
+    };
   }
   if (user && !user.emailVerified) {
-    return 'بريد هذا الحساب غير مفعّل (email_verified). يرجى تسجيل الدخول بحساب Google مُفعّل البريد.';
+    return {
+      kind: 'email_unverified',
+      message: 'بريد هذا الحساب غير مفعّل (email_verified). يرجى تسجيل الدخول بحساب Google مُفعّل البريد.',
+    };
   }
   if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
-    return 'تعذر حفظ الاسم الرباعي بسبب رفض الصلاحيات من قاعدة البيانات (PERMISSION_DENIED). تأكد من أن البريد مفعّل وحاول تسجيل الخروج ثم الدخول مجدداً.';
+    return {
+      kind: 'other',
+      message:
+        'تعذر حفظ الاسم الرباعي بسبب رفض الصلاحيات من قاعدة البيانات (PERMISSION_DENIED). تأكد من نشر firestore.rules ثم أعد المحاولة.',
+    };
   }
-  if (lower.includes('offline') || lower.includes('unavailable') || lower.includes('network')) {
-    return 'تعذر الاتصال بقاعدة البيانات حالياً. تحقق من اتصال الإنترنت وحاول مرة أخرى.';
+  if (
+    lower.includes('offline') ||
+    lower.includes('unavailable') ||
+    lower.includes('network') ||
+    lower.includes('auth/network-request-failed')
+  ) {
+    return {
+      kind: 'other',
+      message: 'تعذر الاتصال بخوادم المصادقة أو قاعدة البيانات حالياً. تحقق من اتصال الإنترنت وحاول مرة أخرى.',
+    };
   }
-  return `حدث خطأ أثناء حفظ الاسم الرباعي: ${raw}`;
+  if (context === 'login') {
+    return {
+      kind: 'other',
+      message: `تعذر إتمام تسجيل الدخول (${activeProjectId}): ${raw}`,
+    };
+  }
+  return {
+    kind: 'other',
+    message: `حدث خطأ أثناء حفظ الاسم الرباعي: ${raw}`,
+  };
 }
 
 export const AuthGate: React.FC<AuthGateProps> = ({
   firebaseUser,
   profile,
+  isProgrammer = false,
+  onOpenProgrammer,
   onProfileSaved,
   onQuotaDetected,
 }) => {
   const [quadName, setQuadName] = useState(profile?.fullNameQuad ?? '');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<AuthErrorKind>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const currentHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const isTopWindow = typeof window !== 'undefined' && window.self === window.top;
 
   useEffect(() => {
     if (profile?.fullNameQuad) {
@@ -76,15 +164,49 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     }
   }, [firebaseUser?.uid, profile?.fullNameQuad]);
 
+  const handleCopyHostname = async () => {
+    if (!currentHostname) return;
+    try {
+      await navigator.clipboard.writeText(currentHostname);
+      setCopiedDomain(true);
+      playDuoSound('pop');
+      window.setTimeout(() => setCopiedDomain(false), 2200);
+    } catch {
+      // Ignore clipboard failures
+    }
+  };
+
+  const handleResetToBaseConfig = () => {
+    resetToDefaultFirebaseConfig();
+    window.location.replace(buildCleanPrimaryUrl());
+  };
+
   const handleGoogleLogin = async () => {
     setErrorMsg(null);
+    setErrorKind(null);
     setLoading(true);
     try {
       await signInWithPopup(auth, googleProvider);
       playDuoSound('pop');
     } catch (err) {
-      setErrorMsg(formatAuthOrFirestoreError(err));
+      const classified = classifyAuthOrFirestoreError(err, null, 'login');
+      setErrorMsg(classified.message);
+      setErrorKind(classified.kind);
     } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleRedirectLogin = async () => {
+    setErrorMsg(null);
+    setErrorKind(null);
+    setLoading(true);
+    try {
+      await signInWithRedirect(auth, googleProvider);
+    } catch (err) {
+      const classified = classifyAuthOrFirestoreError(err, null, 'login');
+      setErrorMsg(classified.message);
+      setErrorKind(classified.kind);
       setLoading(false);
     }
   };
@@ -95,11 +217,15 @@ export const AuthGate: React.FC<AuthGateProps> = ({
 
     const cleaned = quadName.trim().replace(/\s+/g, ' ');
     if (!isQuadNameValid(cleaned) || cleaned.length > 120) {
-      setErrorMsg('يرجى إدخال الاسم الرباعي كاملاً (أربع كلمات على الأقل وبحد أقصى 120 حرفاً، مثل: محمد أحمد علي السالم)');
+      setErrorMsg(
+        'يرجى إدخال الاسم الرباعي كاملاً (أربع كلمات على الأقل وبحد أقصى 120 حرفاً، مثل: محمد أحمد علي السالم)'
+      );
+      setErrorKind('other');
       return;
     }
 
     setErrorMsg(null);
+    setErrorKind(null);
     setLoading(true);
     const path = `users/${firebaseUser.uid}/private/profile`;
     const profileRef = doc(db, 'users', firebaseUser.uid, 'private', 'profile');
@@ -151,7 +277,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({
       if (rawErr.includes('quota exceeded') || rawErr.includes('resource-exhausted')) {
         onQuotaDetected?.();
       }
-      setErrorMsg(formatAuthOrFirestoreError(err, firebaseUser));
+      const classified = classifyAuthOrFirestoreError(err, firebaseUser, 'profile');
+      setErrorMsg(classified.message);
+      setErrorKind(classified.kind);
     } finally {
       setLoading(false);
     }
@@ -168,14 +296,26 @@ export const AuthGate: React.FC<AuthGateProps> = ({
             </span>
           </div>
           {firebaseUser && (
-            <button
-              type="button"
-              onClick={() => void signOut(auth)}
-              className="duo-btn flex items-center gap-2 px-4 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-extrabold text-[#777777] hover:text-[#3C3C3C] cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <LogOut className="w-4 h-4" />
-              <span>تبديل الحساب</span>
-            </button>
+            <div className="flex items-center gap-2">
+              {isProgrammer && onOpenProgrammer && (
+                <button
+                  type="button"
+                  onClick={onOpenProgrammer}
+                  className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-xs sm:text-sm font-black cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Code2 className="w-4 h-4" />
+                  <span>فتح لوحة المبرمج</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void signOut(auth)}
+                className="duo-btn flex items-center gap-2 px-4 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-extrabold text-[#777777] hover:text-[#3C3C3C] cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>تبديل الحساب</span>
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -211,9 +351,67 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </div>
 
                 {errorMsg && (
-                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
-                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                    <span>{errorMsg}</span>
+                  <div className="flex flex-col gap-3 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-xs sm:text-sm font-bold">
+                    <div className="flex items-start gap-2.5">
+                      <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                      <span>{errorMsg}</span>
+                    </div>
+
+                    {errorKind === 'unauthorized_domain' && currentHostname && (
+                      <div className="bg-white rounded-xl p-3 border border-[#FF4B4B]/40 flex flex-col gap-2 text-[#3C3C3C]">
+                        <div className="text-[11px] font-bold text-[#777777]">
+                          المشروع المتصل حالياً:{' '}
+                          <span className="font-latin font-black text-[#1899D6]">
+                            {activeProjectId}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span dir="ltr" className="font-latin text-[11px] bg-[#F7F7F7] px-2 py-1 rounded-lg border border-[#E5E5E5] break-all">
+                            {currentHostname}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyHostname()}
+                            className="duo-btn flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#1CB0F6] border-2 border-b-4 border-[#1899D6] text-white text-[11px] font-black cursor-pointer"
+                          >
+                            {copiedDomain ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                            <span>{copiedDomain ? 'تم النسخ' : 'نسخ النطاق'}</span>
+                          </button>
+                          <a
+                            href={`https://console.firebase.google.com/project/${activeProjectId}/authentication/settings`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="duo-btn flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-[11px] font-black"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>إضافة في Firebase</span>
+                          </a>
+                        </div>
+                      </div>
+                    )}
+
+                    {errorKind === 'auth_provider' && (
+                      <a
+                        href={`https://console.firebase.google.com/project/${activeProjectId}/authentication/providers`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="duo-btn self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>تفعيل Google Sign-In في {activeProjectId}</span>
+                      </a>
+                    )}
+
+                    {isCustomFirebaseConfig && (
+                      <button
+                        type="button"
+                        onClick={handleResetToBaseConfig}
+                        className="duo-btn self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#FFF4CC] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] text-xs font-black cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>إعادة الضبط للقاعدة الأساسية ({defaultFirebaseConfig.projectId})</span>
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -226,6 +424,17 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <LogIn className="w-5 h-5" />
                   <span>{loading ? 'جاري تسجيل الدخول...' : 'الدخول عبر حساب Google'}</span>
                 </button>
+
+                {isTopWindow && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={handleGoogleRedirectLogin}
+                    className="text-xs font-extrabold text-[#1899D6] hover:underline cursor-pointer self-center"
+                  >
+                    الدخول المباشر بدون نافذة منبثقة (إذا حُظرت النافذة)
+                  </button>
+                )}
               </div>
             ) : (
               <form onSubmit={handleSaveQuadName} className="flex flex-col gap-5">
@@ -274,6 +483,17 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <UserCheck className="w-5 h-5" />
                   <span>{loading ? 'جاري الحفظ...' : 'حفظ الاسم والمتابعة'}</span>
                 </button>
+
+                {isProgrammer && onOpenProgrammer && (
+                  <button
+                    type="button"
+                    onClick={onOpenProgrammer}
+                    className="duo-btn w-full flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-[#F3E8FF] hover:bg-[#E9D5FF] border-2 border-b-4 border-[#A560E8] text-[#7C3AED] text-sm font-black cursor-pointer"
+                  >
+                    <Code2 className="w-4 h-4" />
+                    <span>دخول سريع إلى لوحة المبرمج</span>
+                  </button>
+                )}
               </form>
             )}
           </div>

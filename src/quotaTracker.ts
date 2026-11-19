@@ -351,9 +351,7 @@ export function recordFirestoreOperations(
 
   localStatusByProject.set(resolvedProject, finalStatus);
   saveLocalStoredQuota(finalStatus);
-  if (crossedNewStep || finalStatus.alertStep !== null) {
-    notifyListeners(finalStatus);
-  }
+  notifyListeners(finalStatus);
 
   const pending = pendingOpsByProject.get(resolvedProject) || {
     reads: 0,

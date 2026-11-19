@@ -195,23 +195,43 @@ export const QuickMigrateModal: React.FC<QuickMigrateModalProps> = ({
     }
   };
 
-  const handleCopyRules = async () => {
+  const copyTextSafely = async (text: string): Promise<boolean> => {
     try {
-      await navigator.clipboard.writeText(firestoreRulesRaw);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Fallback for sandboxed iframes
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', 'true');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const copied = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return copied;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyRules = async () => {
+    if (await copyTextSafely(firestoreRulesRaw)) {
       setCopiedRules(true);
       setTimeout(() => setCopiedRules(false), 2000);
-    } catch {
-      // Ignore
     }
   };
 
   const handleCopyDomain = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.hostname);
+    if (await copyTextSafely(window.location.hostname)) {
       setCopiedDomain(true);
       setTimeout(() => setCopiedDomain(false), 2000);
-    } catch {
-      // Ignore
     }
   };
 

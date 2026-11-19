@@ -460,26 +460,38 @@ export async function verifyDatabaseBeforeAdd(params: {
   });
 
   // Step 2: Live Firestore REST check
+  const encodedProject = encodeURIComponent(projectId);
+  const encodedDb = encodeURIComponent(dbSegment);
+  const encodedApiKey = encodeURIComponent(cleanCfg.apiKey);
+  const firestoreDocsBaseUrl = `https://firestore.googleapis.com/v1/projects/${encodedProject}/databases/${encodedDb}/documents`;
+  const firestoreDbDocPrefix = `projects/${projectId}/databases/${dbSegment}/documents`;
+
+  const parseFirestoreRestError = async (
+    resp: Response
+  ): Promise<{ message: string; status: string }> => {
+    try {
+      const body = (await resp.json()) as {
+        error?: { message?: string; status?: string };
+      };
+      return {
+        message: body?.error?.message || '',
+        status: body?.error?.status || '',
+      };
+    } catch {
+      return { message: '', status: '' };
+    }
+  };
+
   setStep('firestore', { status: 'running', detail: 'جاري الاتصال بخدمة Cloud Firestore...' });
   try {
-    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-      projectId
-    )}/databases/${encodeURIComponent(dbSegment)}/documents/platform/migration?key=${encodeURIComponent(
-      cleanCfg.apiKey
-    )}`;
+    const url = `${firestoreDocsBaseUrl}/platform/migration?key=${encodedApiKey}`;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 5000);
+    const timer = window.setTimeout(() => controller.abort(), 8000);
     const resp = await fetch(url, { cache: 'no-store', signal: controller.signal });
     window.clearTimeout(timer);
 
     if (!resp.ok) {
-      let errMsg = '';
-      try {
-        const body = (await resp.json()) as { error?: { message?: string; status?: string } };
-        errMsg = body?.error?.message || '';
-      } catch {
-        errMsg = '';
-      }
+      const { message: errMsg } = await parseFirestoreRestError(resp);
       const lowerErr = errMsg.toLowerCase();
 
       if (
@@ -511,11 +523,15 @@ export async function verifyDatabaseBeforeAdd(params: {
         return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
       }
 
-      if (
+      const isMissingDatabase =
         resp.status === 404 &&
-        (lowerErr.includes('database') && lowerErr.includes('does not exist')) ||
-        lowerErr.includes('not have a default cloud firestore')
-      ) {
+        ((lowerErr.includes('database') && lowerErr.includes('does not exist')) ||
+          lowerErr.includes('not have a default cloud firestore') ||
+          (lowerErr.includes('database') &&
+            lowerErr.includes('not found') &&
+            !lowerErr.includes('document')));
+
+      if (isMissingDatabase) {
         const msg = `لم يتم إنشاء قاعدة Firestore Database (${dbSegment}) داخل المشروع ${projectId} حتى الآن.`;
         setStep('firestore', {
           status: 'failed',
@@ -545,17 +561,27 @@ export async function verifyDatabaseBeforeAdd(params: {
 
   const targetApp = getOrInitFirebaseApp(cleanCfg);
   const targetAuth = getAuth(targetApp);
-  const targetDb = createFirestoreInstance(targetApp, cleanCfg);
+  if (typeof targetAuth.authStateReady === 'function') {
+    await withTimeout(targetAuth.authStateReady(), 5000).catch(() => undefined);
+  }
   let verifiedUser: User | null = targetAuth.currentUser;
+  let verifiedIdToken = '';
 
   try {
+    if (verifiedUser) {
+      try {
+        verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
+      } catch {
+        verifiedUser = null;
+      }
+    }
+
     if (!verifiedUser) {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
-      const cred = await signInWithPopup(targetAuth, provider);
+      const cred = await withTimeout(signInWithPopup(targetAuth, provider), 90000);
       verifiedUser = cred.user;
-    } else {
-      await verifiedUser.getIdToken(true);
+      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
     }
 
     if (!verifiedUser.emailVerified) {
@@ -606,6 +632,11 @@ export async function verifyDatabaseBeforeAdd(params: {
       setStep('auth', { status: 'failed', detail: msg });
       return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
     }
+    if (lower === 'timeout') {
+      const msg = 'انتهت مهلة نافذة تسجيل الدخول بـ Google. تأكد من عدم إغلاق النافذة ثم أعد المحاولة.';
+      setStep('auth', { status: 'failed', detail: msg });
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
+    }
     const msg =
       lower.includes('auth/popup-closed-by-user')
         ? 'تم إغلاق نافذة تسجيل الدخول قبل إتمام التحقق.'
@@ -614,64 +645,271 @@ export async function verifyDatabaseBeforeAdd(params: {
     return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
   }
 
-  // Step 4: Hardened Firestore Rules Probe & Player Account Registration
+  // Step 4: Hardened Firestore Rules Probe via Direct REST API (zero SDK cache / WebChannel hangs)
+  const firestoreRestRequest = async (
+    pathOrSuffix: string,
+    init: RequestInit = {},
+    timeoutMs = 8000
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const sep = pathOrSuffix.includes('?') ? '&' : '?';
+      return await fetch(`${firestoreDocsBaseUrl}${pathOrSuffix}${sep}key=${encodedApiKey}`, {
+        ...init,
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${verifiedIdToken}`,
+          'Content-Type': 'application/json',
+          ...(init.headers || {}),
+        },
+      });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
+
+  type RulesProbeOutcome =
+    | { ok: true }
+    | {
+        ok: false;
+        retryablePropagation: boolean;
+        detail: string;
+        fixHint: string;
+      };
+
+  const runLiveRulesProbes = async (currentUser: User): Promise<RulesProbeOutcome> => {
+    // 4A. Negative probe: unauthorized write to platform/__rules_probe__ MUST be 403 PERMISSION_DENIED!
+    setStep('rules', {
+      status: 'running',
+      detail: '4أ. التحقق من رفض الكتابة العشوائية (منع Test Mode المفتوح)...',
+    });
+
+    const rogueResp = await firestoreRestRequest(':commit', {
+      method: 'POST',
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: `${firestoreDbDocPrefix}/platform/__rules_probe__`,
+              fields: {
+                probe: { booleanValue: true },
+                ts: { integerValue: String(Date.now()) },
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    if (rogueResp.ok) {
+      await firestoreRestRequest('/platform/__rules_probe__', { method: 'DELETE' }).catch(
+        () => undefined
+      );
+      return {
+        ok: false,
+        retryablePropagation: true,
+        detail: `قاعدة ${projectId} (${dbSegment}) ما زالت على وضع الاختبار المفتوح (Test Mode) ولم تُنشر قواعد firestore.rules الآمنة بعد!`,
+        fixHint:
+          'انسخ قواعد firestore.rules الكاملة وألصقها في Firebase Console -> Firestore -> Rules (لنفس القاعدة) ثم اضغط Publish.',
+      };
+    }
+
+    if (rogueResp.status !== 403) {
+      const { message: rogueErr } = await parseFirestoreRestError(rogueResp);
+      return {
+        ok: false,
+        retryablePropagation: false,
+        detail: `استجابة غير متوقعة أثناء فحص الحماية (${rogueResp.status}): ${rogueErr || rogueResp.statusText}`,
+        fixHint:
+          'تأكد من تفعيل Cloud Firestore للقاعدة المختارة ومن صحة معرّف القاعدة (default) ثم أعد الفحص.',
+      };
+    }
+
+    // 4B. Positive read probes: rooms/__verify_probe_room__ & platform/migration MUST NOT return 403!
+    setStep('rules', {
+      status: 'running',
+      detail: '4ب. التحقق من صلاحية قراءة الغرف ومسار الانتقال (rooms + platform/migration)...',
+    });
+
+    const [roomReadResp, migrationReadResp] = await Promise.all([
+      firestoreRestRequest('/rooms/__verify_probe_room__', { method: 'GET' }),
+      firestoreRestRequest('/platform/migration', { method: 'GET' }),
+    ]);
+
+    if (roomReadResp.status === 403 || migrationReadResp.status === 403) {
+      const deniedTargets = [
+        roomReadResp.status === 403 ? 'rooms' : null,
+        migrationReadResp.status === 403 ? 'platform/migration' : null,
+      ]
+        .filter(Boolean)
+        .join(' و ');
+      return {
+        ok: false,
+        retryablePropagation: true,
+        detail: `تم رفض قراءة (${deniedTargets}) في ${projectId} (${dbSegment}) — إما أن القواعد ما زالت على الوضع المغلق (Production Mode) أو أُلصقت نسخة قديمة قبل تحديث المنصة.`,
+        fixHint:
+          'اضغط "نسخ firestore.rules" أدناه واستبدل محتوى Rules بالكامل في Firebase Console (بعد حذف القديم) ثم اضغط Publish.',
+      };
+    }
+
+    if (
+      (roomReadResp.status !== 200 && roomReadResp.status !== 404) ||
+      (migrationReadResp.status !== 200 && migrationReadResp.status !== 404)
+    ) {
+      const errBody =
+        roomReadResp.status >= 400 && roomReadResp.status !== 404
+          ? await parseFirestoreRestError(roomReadResp)
+          : await parseFirestoreRestError(migrationReadResp);
+      return {
+        ok: false,
+        retryablePropagation: false,
+        detail: `تعذر قراءة مسارات القواعد (${errBody.message || 'خطأ غير معروف'}).`,
+        fixHint: 'تحقق من إعدادات Firestore Database والقواعد المنشورة ثم أعد الفحص.',
+      };
+    }
+
+    // 4C. Positive create/delete probe on users/{uid}/private/__verify_probe_<ts>
+    setStep('rules', {
+      status: 'running',
+      detail: '4ج. التحقق من صلاحية كتابة وحذف الملف الشخصي للمستخدم بموجب firestore.rules...',
+    });
+
+    const rawCandidate =
+      fallbackQuadName && isQuadNameValid(fallbackQuadName)
+        ? fallbackQuadName.trim()
+        : currentUser.displayName && isQuadNameValid(currentUser.displayName)
+        ? currentUser.displayName.trim()
+        : MASTER_PROGRAMMER_NAME;
+    const quadCandidate = (
+      rawCandidate.length >= 5 ? rawCandidate : MASTER_PROGRAMMER_NAME
+    ).slice(0, 120);
+    const emailCandidate = (currentUser.email || 'programmer@example.com').slice(0, 200);
+
+    const probeDocId = `__verify_probe_${Date.now()}`;
+    const probePath = `/users/${encodeURIComponent(currentUser.uid)}/private/${probeDocId}`;
+    const createProbeResp = await firestoreRestRequest(':commit', {
+      method: 'POST',
+      body: JSON.stringify({
+        writes: [
+          {
+            currentDocument: { exists: false },
+            update: {
+              name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/${probeDocId}`,
+              fields: {
+                uid: { stringValue: currentUser.uid },
+                fullNameQuad: { stringValue: quadCandidate },
+                email: { stringValue: emailCandidate },
+              },
+            },
+            updateTransforms: [
+              { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+              { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!createProbeResp.ok) {
+      const { message: createErr } = await parseFirestoreRestError(createProbeResp);
+      const isDenied = createProbeResp.status === 403;
+      return {
+        ok: false,
+        retryablePropagation: isDenied,
+        detail: isDenied
+          ? `فشلت صلاحية إنشاء ملف المستخدم (${dbSegment}) تحت firestore.rules — تأكد من نسخ القواعد الكاملة دون نقص في دوال التحقق.`
+          : `فشل اختبار كتابة الملف الشخصي (${createProbeResp.status}): ${createErr || createProbeResp.statusText}`,
+        fixHint:
+          'اضغط "نسخ firestore.rules" وتأكد من استبدال النص كاملاً داخل Rules ثم اضغط Publish.',
+      };
+    }
+
+    // Delete temporary verification doc immediately (both player & backup stay clean!)
+    const deleteProbeResp = await firestoreRestRequest(probePath, { method: 'DELETE' });
+    if (!deleteProbeResp.ok && deleteProbeResp.status !== 404) {
+      // Non-blocking cleanup warning, check permissions only if 403
+      if (deleteProbeResp.status === 403) {
+        return {
+          ok: false,
+          retryablePropagation: true,
+          detail: 'تم السماح بالإنشاء لكن رُفضت صلاحية الحذف في users/private — القواعد غير مطابقة بالكامل.',
+          fixHint: 'انسخ firestore.rules الكاملة وألصقها في Firebase Console ثم اضغط Publish.',
+        };
+      }
+    }
+
+    // If Player DB: ensure user's profile doc exists in users/{uid}/private/profile
+    if (role === 'player') {
+      const profilePath = `/users/${encodeURIComponent(currentUser.uid)}/private/profile`;
+      const existingProfileResp = await firestoreRestRequest(profilePath, { method: 'GET' });
+      if (existingProfileResp.status === 404) {
+        const writeProfileResp = await firestoreRestRequest(':commit', {
+          method: 'POST',
+          body: JSON.stringify({
+            writes: [
+              {
+                currentDocument: { exists: false },
+                update: {
+                  name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/profile`,
+                  fields: {
+                    uid: { stringValue: currentUser.uid },
+                    fullNameQuad: { stringValue: quadCandidate },
+                    email: { stringValue: emailCandidate },
+                  },
+                },
+                updateTransforms: [
+                  { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+                ],
+              },
+            ],
+          }),
+        });
+        if (!writeProfileResp.ok && writeProfileResp.status === 403) {
+          return {
+            ok: false,
+            retryablePropagation: true,
+            detail: 'تعذر تسجيل ملف الدخول الشخصي على قاعدة البيانات الجديدة بموجب القواعد الحالية.',
+            fixHint: 'انسخ firestore.rules الكاملة وأعد نشرها (Publish) ثم أعد الفحص.',
+          };
+        }
+      }
+    }
+
+    return { ok: true };
+  };
+
   setStep('rules', {
     status: 'running',
-    detail: 'جاري اختبار قواعد الأمان (Firestore Rules) ومنع وضع الاختبار المفتوح...',
+    detail: 'جاري اختبار قواعد الأمان (Firestore Rules) عبر الاتصال المباشر...',
   });
 
   try {
-    // 4A. Negative probe: must FAIL permission-denied under hardened firestore.rules (catches Test Mode allow write: if true!)
-    let openedTestMode = false;
-    const rogueProbeRef = doc(targetDb, 'platform', '__rules_probe__');
-    try {
-      await withTimeout(setDoc(rogueProbeRef, { probe: true, ts: Date.now() }), 4500);
-      openedTestMode = true;
-      await deleteDoc(rogueProbeRef).catch(() => undefined);
-    } catch {
-      // Expected: hardened firestore.rules rejects unauthorized platform doc
+    let probeOutcome = await runLiveRulesProbes(verifiedUser);
+
+    // Firebase Console rule publishing can take 2-5 seconds to propagate to all edge nodes.
+    // Auto-retry once if the failure looks like unpropagated rules (Test Mode or Locked Mode 403).
+    if (!probeOutcome.ok && probeOutcome.retryablePropagation) {
+      setStep('rules', {
+        status: 'running',
+        detail: 'جاري انتظار تفعيل القواعد المنشورة حديثاً على خوادم Google وإعادة الفحص تلقائياً...',
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+      verifiedIdToken = await withTimeout(verifiedUser.getIdToken(true), 8000);
+      probeOutcome = await runLiveRulesProbes(verifiedUser);
     }
 
-    if (openedTestMode) {
-      const msg = `قاعدة ${projectId} ما زالت على وضع الاختبار المفتوح (Test Mode) ولم تُنشر قواعد firestore.rules الآمنة بعد!`;
+    if (!probeOutcome.ok) {
       setStep('rules', {
         status: 'failed',
-        detail: msg,
-        fixHint: 'انسخ قواعد firestore.rules الكاملة وألصقها في Firebase Console -> Firestore -> Rules ثم اضغط Publish.',
+        detail: probeOutcome.detail,
+        fixHint: probeOutcome.fixHint,
         consoleUrl: `https://console.firebase.google.com/project/${projectId}/firestore/rules`,
         actionType: 'copy_rules',
       });
-      return { ok: false, config: cleanCfg, role, steps, failureMessage: msg };
-    }
-
-    // 4B. Positive probe: verify rooms read & platform/migration read + user profile write under rules
-    await withTimeout(getDoc(doc(targetDb, 'rooms', '__verify_probe_room__')), 4500);
-    await withTimeout(getDoc(doc(targetDb, 'platform', 'migration')), 4500);
-
-    const profileRef = doc(targetDb, 'users', verifiedUser.uid, 'private', 'profile');
-    const existingProfile = await withTimeout(getDoc(profileRef), 4500);
-    const quadCandidate =
-      fallbackQuadName && isQuadNameValid(fallbackQuadName)
-        ? fallbackQuadName.trim().slice(0, 120)
-        : verifiedUser.displayName && isQuadNameValid(verifiedUser.displayName)
-        ? verifiedUser.displayName.trim().slice(0, 120)
-        : MASTER_PROGRAMMER_NAME;
-
-    if (!existingProfile.exists()) {
-      await withTimeout(
-        setDoc(profileRef, {
-          uid: verifiedUser.uid,
-          fullNameQuad: quadCandidate,
-          email: verifiedUser.email || 'programmer@example.com',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        }),
-        4500
-      );
-      // If Backup DB: remove the temporary probe doc immediately so the Backup DB remains untouched & empty!
-      if (role === 'backup') {
-        await withTimeout(deleteDoc(profileRef), 4000).catch(() => undefined);
-      }
+      return { ok: false, config: cleanCfg, role, steps, failureMessage: probeOutcome.detail };
     }
 
     setStep('rules', {
@@ -684,8 +922,11 @@ export async function verifyDatabaseBeforeAdd(params: {
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
     const lower = raw.toLowerCase();
+    const isAbort = lower.includes('abort') || lower.includes('timeout');
     const isPerm = lower.includes('permission-denied') || lower.includes('permission_denied');
-    const msg = isPerm
+    const msg = isAbort
+      ? `انتهت مهلة الاتصال بخادم Firestore أثناء فحص القواعد (${projectId}). تأكد من الشبكة وأعد المحاولة.`
+      : isPerm
       ? `قواعد الأمان (Firestore Rules) في المشروع ${projectId} ناقصة أو مغلقة ولا تطابق نظام المنصة.`
       : `تعذر فحص قواعد الأمان في ${projectId}: ${raw}`;
     setStep('rules', {
@@ -1238,13 +1479,23 @@ async function signInOnTarget(
 ): Promise<{ targetApp: FirebaseApp; targetDb: Firestore; targetUser: User }> {
   const targetApp = getOrInitFirebaseApp(targetConfig);
   const targetAuth = getAuth(targetApp);
+  if (typeof targetAuth.authStateReady === 'function') {
+    await withTimeout(targetAuth.authStateReady(), 5000).catch(() => undefined);
+  }
   const targetDb = createFirestoreInstance(targetApp, targetConfig);
 
   let targetUser = targetAuth.currentUser;
+  if (targetUser) {
+    try {
+      await withTimeout(targetUser.getIdToken(true), 8000);
+    } catch {
+      targetUser = null;
+    }
+  }
   if (!targetUser) {
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });
-    const cred = await signInWithPopup(targetAuth, provider);
+    const cred = await withTimeout(signInWithPopup(targetAuth, provider), 90000);
     targetUser = cred.user;
   }
 
@@ -1683,13 +1934,23 @@ export async function announceViaBackupDatabase(params: {
   try {
     const bApp = getOrInitFirebaseApp(backupConfig);
     const bAuth = getAuth(bApp);
+    if (typeof bAuth.authStateReady === 'function') {
+      await withTimeout(bAuth.authStateReady(), 5000).catch(() => undefined);
+    }
     const bDb = createFirestoreInstance(bApp, backupConfig);
 
     let bUser = bAuth.currentUser;
+    if (bUser) {
+      try {
+        await withTimeout(bUser.getIdToken(true), 8000);
+      } catch {
+        bUser = null;
+      }
+    }
     if (!bUser) {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
-      const cred = await signInWithPopup(bAuth, provider);
+      const cred = await withTimeout(signInWithPopup(bAuth, provider), 90000);
       bUser = cred.user;
     }
 

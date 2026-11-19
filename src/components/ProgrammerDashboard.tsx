@@ -106,6 +106,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
 
   const [copiedRules, setCopiedRules] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
+  const [showRulesPreview, setShowRulesPreview] = useState(false);
   const [confirmDeleteDbId, setConfirmDeleteDbId] = useState<string | null>(null);
 
   // Promote Programmer State
@@ -440,25 +441,49 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
     }
   };
 
-  const handleCopyRules = async () => {
+  const copyTextSafely = async (text: string): Promise<boolean> => {
     try {
-      await navigator.clipboard.writeText(firestoreRulesRaw);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Fallback below for restricted iframe contexts
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', 'true');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const copied = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return copied;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyRules = async () => {
+    const ok = await copyTextSafely(firestoreRulesRaw);
+    if (ok) {
       setCopiedRules(true);
       playDuoSound('pop');
-      setTimeout(() => setCopiedRules(false), 2000);
-    } catch {
-      // Ignore
+      setTimeout(() => setCopiedRules(false), 2200);
+    } else {
+      setShowRulesPreview(true);
     }
   };
 
   const handleCopyDomain = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.hostname);
+    const ok = await copyTextSafely(window.location.hostname);
+    if (ok) {
       setCopiedDomain(true);
       playDuoSound('pop');
-      setTimeout(() => setCopiedDomain(false), 2000);
-    } catch {
-      // Ignore
+      setTimeout(() => setCopiedDomain(false), 2200);
     }
   };
 
@@ -1165,6 +1190,65 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
               )}
             </div>
 
+            {/* Quick Setup Helper Toolbar (Copy Rules + Domain before or during verification) */}
+            <div className="p-3.5 rounded-2xl bg-[#F8FAFC] border-2 border-[#E5E5E5] flex flex-col gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-black text-[#3C3C3C]">
+                  تجهيز القاعدة في Firebase Console:
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyRules()}
+                    className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#1CB0F6] border-2 border-b-4 border-[#1899D6] text-white text-[11px] font-black cursor-pointer"
+                  >
+                    {copiedRules ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>{copiedRules ? 'تم نسخ firestore.rules' : 'نسخ firestore.rules الرسمية'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowRulesPreview((v) => !v)}
+                    className="duo-btn px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                  >
+                    {showRulesPreview ? 'إخفاء نص القواعد' : 'عرض القواعد للنسخ اليدوي'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyDomain()}
+                    className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                  >
+                    {copiedDomain ? (
+                      <Check className="w-3.5 h-3.5 text-[#46A302]" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {copiedDomain ? 'تم نسخ النطاق' : `نسخ النطاق (${window.location.hostname})`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+              {showRulesPreview && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11px] font-bold text-[#777777]">
+                    حدد النص كاملاً (Ctrl+A ثم Ctrl+C) وألصقه في Firebase Console -&gt; Firestore Database -&gt; Rules ثم اضغط Publish:
+                  </span>
+                  <textarea
+                    readOnly
+                    dir="ltr"
+                    rows={7}
+                    value={firestoreRulesRaw}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="w-full p-2.5 rounded-xl bg-white border border-[#D0D0D0] font-latin text-[11px] text-[#3C3C3C] outline-none"
+                  />
+                </div>
+              )}
+            </div>
+
             {/* Live 5-Step Checklist Panel */}
             {verifySteps && (
               <div className="p-4 rounded-2xl bg-[#F9FAFB] border-2 border-[#E5E5E5] flex flex-col gap-2.5">
@@ -1219,7 +1303,10 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                       </p>
                     )}
 
-                    {(step.consoleUrl || step.actionType === 'copy_rules' || step.actionType === 'copy_domain') && (
+                    {(step.status === 'failed' ||
+                      step.consoleUrl ||
+                      step.actionType === 'copy_rules' ||
+                      step.actionType === 'copy_domain') && (
                       <div className="flex flex-wrap items-center gap-2 pr-6 pt-0.5">
                         {step.actionType === 'copy_rules' && (
                           <button
@@ -1263,6 +1350,16 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                             <ExternalLink className="w-3.5 h-3.5" />
                             <span>فتح الإعداد في Firebase Console</span>
                           </a>
+                        )}
+                        {step.status === 'failed' && (
+                          <button
+                            type="submit"
+                            disabled={verifyingAndAdding || !detectedPreview?.ok}
+                            className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-[11px] font-black cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>إعادة الفحص الآن</span>
+                          </button>
                         )}
                       </div>
                     )}

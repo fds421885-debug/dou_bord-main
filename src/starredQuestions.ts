@@ -21,7 +21,7 @@ export interface RulesUpdateNotice {
 
 const rulesUpdateListeners = new Set<(info: RulesUpdateNotice) => void>();
 
-function notifyRulesUpdateNeeded(projectId: string = activeProjectId): void {
+export function notifyRulesUpdateNeeded(projectId: string = activeProjectId): void {
   const payload: RulesUpdateNotice = { projectId };
   rulesUpdateListeners.forEach((cb) => {
     try {

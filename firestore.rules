@@ -258,7 +258,9 @@ service cloud.firestore {
           'id', 'ownerId', 'title', 'questions', 'questionCount', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerId', 'title', 'questions', 'questionCount', 'createdAt', 'updatedAt'
+          'id', 'ownerId', 'title', 'questions', 'questionCount',
+          'parentQuizId', 'quizKind', 'drillStyle', 'sourceStarredId', 'ruleTitle',
+          'createdAt', 'updatedAt'
         ])
         && isValidId(data.id)
         && isValidId(data.ownerId)
@@ -266,6 +268,11 @@ service cloud.firestore {
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
         && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
         && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 100
+        && (!('parentQuizId' in data) || (data.parentQuizId is string && data.parentQuizId.size() <= 128))
+        && (!('quizKind' in data) || data.quizKind in ['main', 'drill'])
+        && (!('drillStyle' in data) || data.drillStyle in ['same_values', 'same_law_ideas', 'mixed'])
+        && (!('sourceStarredId' in data) || (data.sourceStarredId is string && data.sourceStarredId.size() <= 128))
+        && (!('ruleTitle' in data) || (data.ruleTitle is string && data.ruleTitle.size() <= 120))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -572,7 +579,11 @@ service cloud.firestore {
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'questions', 'questionCount', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'questions', 'questionCount',
+          'parentQuizId', 'quizKind', 'drillStyle', 'sourceStarredId', 'ruleTitle',
+          'updatedAt'
+        ]);
       allow delete: if isValidId(userId) && isValidId(quizId) && isOwner(userId);
     }
 

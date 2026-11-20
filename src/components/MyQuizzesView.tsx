@@ -1,25 +1,30 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, onSnapshot, query, where } from '../firestoreTracked';
 import {
   ArrowRight,
   CheckCircle2,
   ClipboardCopy,
   Download,
+  Dumbbell,
   Eye,
   EyeOff,
   FileJson,
   FilePlus2,
   FolderOpen,
   History,
+  Layers,
   ListChecks,
+  Loader2,
   Pencil,
   Play,
+  Sparkles,
   Star,
   Trash2,
   Upload,
 } from 'lucide-react';
 import { db, formatTimestamp, getTimestampMillis } from '../firebase';
 import type {
+  DrillStyle,
   ExamQuestion,
   ExamSettings,
   MyQuiz,
@@ -30,25 +35,44 @@ import type {
 } from '../types';
 import {
   deleteSessionSnapshot,
+  loadMyQuizMetaOverrides,
   loadSessionSnapshot,
   saveMyQuizzesSnapshot,
   saveSessionSnapshot,
+  type MyQuizMetaOverride,
   type StoredExamSession,
   type StoredMyQuizDraft,
   type StoredMyQuizzesSnapshot,
   type StoredQuizAttemptsSnapshot,
 } from '../localDraftStore';
-import { deleteMyQuiz, EXAMPLE_JSON, IMPORT_PROMPT, parseQuizJson, quizToExportJson } from '../myQuizzes';
+import {
+  buildMainImportPrompt,
+  createMyQuiz,
+  deleteMyQuiz,
+  EXAMPLE_JSON,
+  parseQuizBundleJson,
+  quizToExportJson,
+  type ParsedQuizBundle,
+} from '../myQuizzes';
 import { removeStarredQuestion, subscribeStarredQuestions } from '../starredQuestions';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
 import { QuestionTableView } from './QuestionTableView';
 import { RichExplanationView } from './RichExplanationView';
+import { CreateDrillModal } from './CreateDrillModal';
 import { ExamSetup } from './ExamSetup';
 import { ExamRunner, type ExamInitialState } from './ExamRunner';
 import { ExamResult } from './ExamResult';
 import { ExamReview } from './ExamReview';
-import { deleteAttempt, describeTiming, formatDuration, isExamReady, isQuestionAnswered, newAttemptId } from '../exam';
+import {
+  buildExam,
+  deleteAttempt,
+  describeTiming,
+  formatDuration,
+  isExamReady,
+  isQuestionAnswered,
+  newAttemptId,
+} from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 import { DuoLoading } from './DuoLoading';
@@ -99,6 +123,18 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
   const [session, setSession] = useState<StoredExamSession | null>(null);
   const [confirmDeleteAttemptId, setConfirmDeleteAttemptId] = useState<string | null>(null);
+  const [metaOverrides, setMetaOverrides] = useState<Record<string, MyQuizMetaOverride>>({});
+  const [drillModalTarget, setDrillModalTarget] = useState<{
+    question: QuizQuestion;
+    sourceTitle?: string;
+    sourceQuizId?: string;
+    sourceStarredId?: string;
+  } | null>(null);
+
+  const reloadMetaOverrides = async () => {
+    const map = await loadMyQuizMetaOverrides(profile.uid);
+    setMetaOverrides(map);
+  };
 
   const refreshDraft = async () => {
     const d = await loadSessionSnapshot<StoredMyQuizDraft>('my_quiz_draft');
@@ -110,6 +146,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   useEffect(() => {
     let alive = true;
+    void reloadMetaOverrides();
     // 1) نعرض النسخة المحلية فوراً (تعمل حتى لو الحصة منتهية)
     void loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').then((snap) => {
       if (alive && snap && snap.ownerId === profile.uid) {
@@ -177,21 +214,91 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.uid]);
 
+  const mergedQuizzes = useMemo<MyQuiz[]>(() => {
+    return quizzes.map((q) => {
+      const ov = metaOverrides[q.id];
+      if (!ov) return q;
+      return {
+        ...q,
+        parentQuizId: q.parentQuizId ?? ov.parentQuizId,
+        quizKind: q.quizKind ?? ov.quizKind,
+        drillStyle: q.drillStyle ?? ov.drillStyle,
+        sourceStarredId: q.sourceStarredId ?? ov.sourceStarredId,
+        ruleTitle: q.ruleTitle ?? ov.ruleTitle,
+      };
+    });
+  }, [quizzes, metaOverrides]);
+
+  const { mainQuizzes, childrenByParentId, standaloneDrills } = useMemo(() => {
+    const idSet = new Set(mergedQuizzes.map((q) => q.id));
+    const mains: MyQuiz[] = [];
+    const byParent: Record<string, MyQuiz[]> = {};
+    const orphans: MyQuiz[] = [];
+
+    for (const q of mergedQuizzes) {
+      if (q.parentQuizId && idSet.has(q.parentQuizId)) {
+        if (!byParent[q.parentQuizId]) byParent[q.parentQuizId] = [];
+        byParent[q.parentQuizId].push(q);
+      } else if (q.quizKind === 'drill') {
+        orphans.push(q);
+      } else {
+        mains.push(q);
+      }
+    }
+    return { mainQuizzes: mains, childrenByParentId: byParent, standaloneDrills: orphans };
+  }, [mergedQuizzes]);
+
   const finish = (msg: string) => {
     setNotice(msg);
     setMode({ kind: 'list' });
     void refreshDraft();
+    void reloadMetaOverrides();
     window.setTimeout(() => setNotice(null), 4000);
   };
 
-  const exportQuiz = (quiz: MyQuiz) => {
-    const blob = new Blob([quizToExportJson(quiz.title, quiz.questions)], { type: 'application/json' });
+  const exportQuiz = (quiz: MyQuiz, childDrills: MyQuiz[] = []) => {
+    const blob = new Blob([quizToExportJson(quiz.title, quiz.questions, childDrills)], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `${quiz.title.replace(/[^\w\u0600-\u06FF\- ]+/g, '').trim() || 'quiz'}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const startSingleQuizNow = (quiz: MyQuiz) => {
+    const readyCount = quiz.questions.filter(isExamReady).length;
+    if (readyCount === 0) {
+      setNotice('هذا الاختبار لا يحتوي أسئلة جاهزة للحل بعد.');
+      return;
+    }
+    const settings: ExamSettings = {
+      sourceMode: 'single',
+      mixMode: 'total',
+      quizIds: [quiz.id],
+      quizTitles: [quiz.title],
+      questionCount: readyCount,
+      shuffleQuestions: false,
+      shuffleChoices: false,
+      timing: 'none',
+      seconds: 0,
+    };
+    const qs = buildExam([quiz], settings);
+    if (qs.length === 0) return;
+    void deleteSessionSnapshot('exam_session');
+    setDrillModalTarget(null);
+    setMode({ kind: 'examRun', settings, questions: qs });
+  };
+
+  const getLatestScoreForQuiz = (quizId: string): QuizAttempt | null => {
+    for (const a of attempts) {
+      if (a.settings?.quizIds?.length === 1 && a.settings.quizIds[0] === quizId) {
+        return a;
+      }
+    }
+    return null;
   };
 
   const confirmDelete = async (id: string) => {
@@ -210,7 +317,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   if (mode.kind === 'examSetup') {
     return (
       <ExamSetup
-        quizzes={quizzes}
+        quizzes={mergedQuizzes}
         onBack={() => setMode({ kind: 'list' })}
         onStart={(settings, questions) => {
           void deleteSessionSnapshot('exam_session');
@@ -250,22 +357,48 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   if (mode.kind === 'examResult') {
     return (
-      <ExamResult
-        key={mode.attemptId}
-        ownerId={profile.uid}
-        attemptId={mode.attemptId}
-        settings={mode.settings}
-        questions={mode.questions}
-        answers={mode.answers}
-        tableAnswers={mode.tableAnswers}
-        durationSec={mode.durationSec}
-        finishedAt={mode.finishedAt}
-        onBack={() => {
-          setMode({ kind: 'list' });
-          void refreshDraft();
-        }}
-        onRetake={() => setMode({ kind: 'examSetup' })}
-      />
+      <>
+        <ExamResult
+          key={mode.attemptId}
+          ownerId={profile.uid}
+          attemptId={mode.attemptId}
+          settings={mode.settings}
+          questions={mode.questions}
+          answers={mode.answers}
+          tableAnswers={mode.tableAnswers}
+          durationSec={mode.durationSec}
+          finishedAt={mode.finishedAt}
+          onBack={() => {
+            setMode({ kind: 'list' });
+            void refreshDraft();
+          }}
+          onRetake={() => setMode({ kind: 'examSetup' })}
+          onCreateDrill={(exQ) =>
+            setDrillModalTarget({
+              question: { ...exQ, answer: exQ.choices?.[exQ.correctIndex] || '' },
+              sourceTitle: exQ.sourceTitle,
+              sourceQuizId: exQ.sourceQuizId,
+            })
+          }
+        />
+        {drillModalTarget && (
+          <CreateDrillModal
+            open
+            ownerId={profile.uid}
+            question={drillModalTarget.question}
+            sourceTitle={drillModalTarget.sourceTitle}
+            sourceQuizId={drillModalTarget.sourceQuizId}
+            sourceStarredId={drillModalTarget.sourceStarredId}
+            mainQuizzes={mainQuizzes}
+            onClose={() => setDrillModalTarget(null)}
+            onCreated={() => {
+              void reloadMetaOverrides();
+              setNotice('تم إنشاء وحفظ اختبار التقوية بنجاح تحت اختبارك الأساسي.');
+            }}
+            onStartQuizNow={startSingleQuizNow}
+          />
+        )}
+      </>
     );
   }
 
@@ -290,7 +423,31 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           score={a.score}
           total={a.total}
           durationSec={a.durationSec}
+          onCreateDrill={(exQ) =>
+            setDrillModalTarget({
+              question: { ...exQ, answer: exQ.choices?.[exQ.correctIndex] || '' },
+              sourceTitle: exQ.sourceTitle,
+              sourceQuizId: exQ.sourceQuizId,
+            })
+          }
         />
+        {drillModalTarget && (
+          <CreateDrillModal
+            open
+            ownerId={profile.uid}
+            question={drillModalTarget.question}
+            sourceTitle={drillModalTarget.sourceTitle}
+            sourceQuizId={drillModalTarget.sourceQuizId}
+            sourceStarredId={drillModalTarget.sourceStarredId}
+            mainQuizzes={mainQuizzes}
+            onClose={() => setDrillModalTarget(null)}
+            onCreated={() => {
+              void reloadMetaOverrides();
+              setNotice('تم إنشاء وحفظ اختبار التقوية بنجاح تحت اختبارك الأساسي.');
+            }}
+            onStartQuizNow={startSingleQuizNow}
+          />
+        )}
       </div>
     );
   }
@@ -330,8 +487,16 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   /* ---------------- استيراد ---------------- */
   if (mode.kind === 'import') {
-    return <ImportPanel onBack={() => setMode({ kind: 'list' })} onParsed={(title, questions, warnings) =>
-      setMode({ kind: 'edit', editingId: null, title, questions, warnings })} />;
+    return (
+      <ImportPanel
+        ownerId={profile.uid}
+        onBack={() => setMode({ kind: 'list' })}
+        onParsed={(title, questions, warnings) =>
+          setMode({ kind: 'edit', editingId: null, title, questions, warnings })
+        }
+        onBundleSaved={(msg) => finish(msg)}
+      />
+    );
   }
 
   /* ---------------- عرض اختبار ---------------- */
@@ -532,14 +697,31 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                         </span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void removeStarredQuestion(profile.uid, item.id)}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#FF4B4B] text-[11px] font-black text-[#EA2B2B] cursor-pointer"
-                    >
-                      <Star className="w-3.5 h-3.5 fill-[#FFC800] text-[#E5A400]" />
-                      <span>إزالة النجمة</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDrillModalTarget({
+                            question: qq,
+                            sourceTitle: item.sourceTitle,
+                            sourceQuizId: item.sourceQuizId,
+                            sourceStarredId: item.id,
+                          })
+                        }
+                        className="duo-btn flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border border-b-2 border-[#8938D6] text-white text-[11px] font-black cursor-pointer"
+                      >
+                        <Dumbbell className="w-3.5 h-3.5" />
+                        <span>اعمل اختبار تقوية على هذه المسألة</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void removeStarredQuestion(profile.uid, item.id)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#FF4B4B] text-[11px] font-black text-[#EA2B2B] cursor-pointer"
+                      >
+                        <Star className="w-3.5 h-3.5 fill-[#FFC800] text-[#E5A400]" />
+                        <span>إزالة النجمة</span>
+                      </button>
+                    </div>
                   </div>
 
                   <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C] leading-relaxed" />
@@ -735,47 +917,377 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           subtitle="يتم مزامنة الأسئلة والأشكال الهندسية والرسوم البيانية"
           accent="purple"
         />
-      ) : quizzes.length === 0 ? (
+      ) : mergedQuizzes.length === 0 ? (
         <div className={`${card} p-8 text-center text-sm font-bold text-[#777777]`}>
           لا توجد اختبارات بعد. ابدأ بإنشاء اختبار أو استيراده.
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
-          {quizzes.map((q) => (
-            <div key={q.id} className={`${card} p-4 flex flex-col gap-3`}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h3 className="text-base font-black text-[#3C3C3C] truncate">{q.title}</h3>
-                  <p className="text-[11px] font-extrabold text-[#777777]">
-                    {q.questionCount} سؤال · آخر تعديل {formatTimestamp(q.updatedAt)}
-                  </p>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button type="button" onClick={() => setMode({ kind: 'view', quiz: q })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer">
-                  <FolderOpen className="w-3.5 h-3.5" /> فتح
-                </button>
-                <button type="button" onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion), warnings: [] })} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer">
-                  <Pencil className="w-3.5 h-3.5" /> تعديل
-                </button>
-                <button type="button" onClick={() => exportQuiz(q)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer">
-                  <Download className="w-3.5 h-3.5" /> تصدير JSON
-                </button>
-                {confirmDeleteId === q.id ? (
-                  <span className="flex items-center gap-2 text-xs font-black">
-                    <button type="button" disabled={deleting} onClick={() => void confirmDelete(q.id)} className="px-3 py-1.5 rounded-xl bg-[#FF4B4B] text-white cursor-pointer">
-                      {deleting ? '...' : 'تأكيد الحذف'}
+        <div className="flex flex-col gap-4">
+          {mainQuizzes.map((q) => {
+            const children = childrenByParentId[q.id] ?? [];
+            const lastAttempt = getLatestScoreForQuiz(q.id);
+            const lastPct =
+              lastAttempt && lastAttempt.total > 0
+                ? Math.round((lastAttempt.score / lastAttempt.total) * 100)
+                : null;
+
+            return (
+              <div key={q.id} className="flex flex-col gap-2.5">
+                {/* Main Quiz Card */}
+                <div className={`${card} p-4 flex flex-col gap-3`}>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-base font-black text-[#3C3C3C] truncate">{q.title}</h3>
+                        {children.length > 0 && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#F5ECFF] border border-[#A560E8]/60 text-[10px] font-black text-[#8938D6]">
+                            <Layers className="w-3 h-3" />
+                            <span>{children.length} تقوية / قاعدة</span>
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] font-extrabold text-[#777777] mt-0.5">
+                        {q.questionCount} سؤال · آخر تعديل {formatTimestamp(q.updatedAt)}
+                      </p>
+                    </div>
+                    {lastAttempt && lastPct !== null && (
+                      <span
+                        dir="ltr"
+                        className={`px-2.5 py-1 rounded-xl border text-xs font-black font-latin shrink-0 ${
+                          lastPct >= 85
+                            ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                            : lastPct >= 50
+                            ? 'bg-[#FFF4CC] border-[#FFC800] text-[#8A6500]'
+                            : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                        }`}
+                      >
+                        {lastAttempt.score}/{lastAttempt.total} ({lastPct}%)
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startSingleQuizNow(q)}
+                      className="duo-btn flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-xs font-black text-white cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5" /> ابدأ
                     </button>
-                    <button type="button" onClick={() => setConfirmDeleteId(null)} className="text-[#777777] cursor-pointer">إلغاء</button>
-                  </span>
-                ) : (
-                  <button type="button" onClick={() => setConfirmDeleteId(q.id)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] cursor-pointer">
-                    <Trash2 className="w-3.5 h-3.5" /> حذف
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setMode({ kind: 'view', quiz: q })}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" /> فتح
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMode({
+                          kind: 'edit',
+                          editingId: q.id,
+                          title: q.title,
+                          questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion),
+                          warnings: [],
+                        })
+                      }
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                    >
+                      <Pencil className="w-3.5 h-3.5" /> تعديل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => exportQuiz(q, children)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                      title={
+                        children.length > 0
+                          ? 'تصدير الاختبار الأساسي مع جميع اختبارات التقوية التابعة له في ملف JSON واحد'
+                          : 'تصدير الاختبار بصيغة JSON'
+                      }
+                    >
+                      <Download className="w-3.5 h-3.5" />{' '}
+                      {children.length > 0 ? `تصدير الحزمة (${1 + children.length})` : 'تصدير JSON'}
+                    </button>
+                    {confirmDeleteId === q.id ? (
+                      <span className="flex items-center gap-2 text-xs font-black">
+                        <button
+                          type="button"
+                          disabled={deleting}
+                          onClick={() => void confirmDelete(q.id)}
+                          className="px-3 py-1.5 rounded-xl bg-[#FF4B4B] text-white cursor-pointer"
+                        >
+                          {deleting ? '...' : 'تأكيد الحذف'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="text-[#777777] cursor-pointer"
+                        >
+                          إلغاء
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(q.id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> حذف
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Nested Duolingo-style Reinforcement & Rule-Training Skill Tree */}
+                {children.length > 0 && (
+                  <div className="mr-3 sm:mr-5 pr-3 sm:pr-4 border-r-4 border-[#A560E8]/45 flex flex-col gap-2">
+                    <div className="flex items-center gap-1.5 text-[11px] font-black text-[#8938D6]">
+                      <Dumbbell className="w-3.5 h-3.5" />
+                      <span>تمارين التقوية وتدريبات القواعد التابعة ({children.length})</span>
+                    </div>
+                    {children.map((child, cIdx) => {
+                      const cAttempt = getLatestScoreForQuiz(child.id);
+                      const cPct =
+                        cAttempt && cAttempt.total > 0
+                          ? Math.round((cAttempt.score / cAttempt.total) * 100)
+                          : null;
+                      const styleLabel =
+                        child.drillStyle === 'same_values'
+                          ? 'تغيير قيم'
+                          : child.drillStyle === 'same_law_ideas'
+                          ? 'أفكار مختلفة'
+                          : 'متنوع';
+
+                      return (
+                        <div
+                          key={child.id}
+                          className="rounded-2xl border-2 border-b-4 border-[#E2D4F8] bg-gradient-to-l from-[#FAF7FF] to-white p-3.5 flex flex-col gap-2.5"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                              <div className="w-8 h-8 rounded-xl bg-[#A560E8] border-b-2 border-[#8938D6] text-white flex items-center justify-center font-latin font-black text-xs shrink-0">
+                                {cIdx + 1}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <h4 className="text-sm font-black text-[#3C3C3C] truncate">
+                                    {child.title}
+                                  </h4>
+                                  <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] border border-[#A560E8]/50 text-[10px] font-black text-[#8938D6]">
+                                    {child.ruleTitle || styleLabel}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] font-bold text-[#777777]">
+                                  {child.questionCount} سؤال · تقوية تابعة
+                                </p>
+                              </div>
+                            </div>
+
+                            {cAttempt && cPct !== null && (
+                              <span
+                                dir="ltr"
+                                className={`px-2 py-0.5 rounded-lg border text-[11px] font-black font-latin shrink-0 ${
+                                  cPct >= 85
+                                    ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                                    : cPct >= 50
+                                    ? 'bg-[#FFF4CC] border-[#FFC800] text-[#8A6500]'
+                                    : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                                }`}
+                              >
+                                {cAttempt.score}/{cAttempt.total} ({cPct}%)
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => startSingleQuizNow(child)}
+                              className="duo-btn flex items-center gap-1 px-3 py-1.5 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-[11px] font-black cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5" /> ابدأ التدريب
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMode({ kind: 'view', quiz: child })}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#DDF4FF] border border-[#1CB0F6] text-[11px] font-black text-[#1899D6] cursor-pointer"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" /> فتح
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setMode({
+                                  kind: 'edit',
+                                  editingId: child.id,
+                                  title: child.title,
+                                  questions: child.questions.map(
+                                    (x) => JSON.parse(JSON.stringify(x)) as QuizQuestion
+                                  ),
+                                  warnings: [],
+                                })
+                              }
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5" /> تعديل
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => exportQuiz(child)}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" /> تصدير
+                            </button>
+                            {confirmDeleteId === child.id ? (
+                              <span className="flex items-center gap-1.5 text-[11px] font-black">
+                                <button
+                                  type="button"
+                                  disabled={deleting}
+                                  onClick={() => void confirmDelete(child.id)}
+                                  className="px-2.5 py-1 rounded-xl bg-[#FF4B4B] text-white cursor-pointer"
+                                >
+                                  {deleting ? '...' : 'تأكيد'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="text-[#777777] cursor-pointer"
+                                >
+                                  إلغاء
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(child.id)}
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] text-[11px] font-black text-[#EA2B2B] cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" /> حذف
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
+            );
+          })}
+
+          {standaloneDrills.length > 0 && (
+            <div className="flex flex-col gap-2.5 pt-2 border-t-2 border-[#EFE6FF]">
+              <h3 className="flex items-center gap-1.5 text-sm font-black text-[#8938D6]">
+                <Dumbbell className="w-4 h-4" />
+                <span>اختبارات تقوية عامة ({standaloneDrills.length})</span>
+              </h3>
+              {standaloneDrills.map((drill) => {
+                const dAttempt = getLatestScoreForQuiz(drill.id);
+                const dPct =
+                  dAttempt && dAttempt.total > 0
+                    ? Math.round((dAttempt.score / dAttempt.total) * 100)
+                    : null;
+                return (
+                  <div
+                    key={drill.id}
+                    className="rounded-3xl border-2 border-b-4 border-[#E2D4F8] bg-gradient-to-l from-[#FAF7FF] to-white p-4 flex flex-col gap-2.5"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <h4 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
+                          {drill.title}
+                        </h4>
+                        <p className="text-[11px] font-bold text-[#777777]">
+                          {drill.questionCount} سؤال · تقوية مستقلة
+                        </p>
+                      </div>
+                      {dAttempt && dPct !== null && (
+                        <span
+                          dir="ltr"
+                          className={`px-2 py-0.5 rounded-lg border text-xs font-black font-latin shrink-0 ${
+                            dPct >= 85
+                              ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                              : dPct >= 50
+                              ? 'bg-[#FFF4CC] border-[#FFC800] text-[#8A6500]'
+                              : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                          }`}
+                        >
+                          {dAttempt.score}/{dAttempt.total} ({dPct}%)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => startSingleQuizNow(drill)}
+                        className="duo-btn flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#A560E8] border-2 border-b-4 border-[#8938D6] text-xs font-black text-white cursor-pointer"
+                      >
+                        <Play className="w-3.5 h-3.5" /> ابدأ التدريب
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMode({ kind: 'view', quiz: drill })}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#DDF4FF] border-2 border-[#1CB0F6] text-xs font-black text-[#1899D6] cursor-pointer"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" /> فتح
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setMode({
+                            kind: 'edit',
+                            editingId: drill.id,
+                            title: drill.title,
+                            questions: drill.questions.map(
+                              (x) => JSON.parse(JSON.stringify(x)) as QuizQuestion
+                            ),
+                            warnings: [],
+                          })
+                        }
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                      >
+                        <Pencil className="w-3.5 h-3.5" /> تعديل
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => exportQuiz(drill)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" /> تصدير JSON
+                      </button>
+                      {confirmDeleteId === drill.id ? (
+                        <span className="flex items-center gap-2 text-xs font-black">
+                          <button
+                            type="button"
+                            disabled={deleting}
+                            onClick={() => void confirmDelete(drill.id)}
+                            className="px-3 py-1.5 rounded-xl bg-[#FF4B4B] text-white cursor-pointer"
+                          >
+                            {deleting ? '...' : 'تأكيد الحذف'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="text-[#777777] cursor-pointer"
+                          >
+                            إلغاء
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(drill.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#EA2B2B] cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> حذف
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          )}
         </div>
       )}
 
@@ -835,6 +1347,29 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       )}
         </>
       )}
+
+      {drillModalTarget && (
+        <CreateDrillModal
+          open
+          ownerId={profile.uid}
+          question={drillModalTarget.question}
+          sourceTitle={drillModalTarget.sourceTitle}
+          sourceQuizId={drillModalTarget.sourceQuizId}
+          sourceStarredId={drillModalTarget.sourceStarredId}
+          mainQuizzes={mainQuizzes}
+          onClose={() => setDrillModalTarget(null)}
+          onCreated={(items) => {
+            void reloadMetaOverrides();
+            setSubTab('quizzes');
+            setNotice(
+              items.length === 1
+                ? `تم إنشاء اختبار التقوية «${items[0].title}» تحت الاختبار الأساسي!`
+                : `تم إنشاء ${items.length} اختبارات تقوية بنجاح!`
+            );
+          }}
+          onStartQuizNow={startSingleQuizNow}
+        />
+      )}
     </div>
   );
 };
@@ -842,18 +1377,35 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 /* ===================== لوحة الاستيراد ===================== */
 
 const ImportPanel: React.FC<{
+  ownerId: string;
   onBack: () => void;
   onParsed: (title: string, questions: QuizQuestion[], warnings: string[]) => void;
-}> = ({ onBack, onParsed }) => {
+  onBundleSaved: (message: string) => void;
+}> = ({ ownerId, onBack, onParsed, onBundleSaved }) => {
   const [raw, setRaw] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
+  const [includeRuleDrills, setIncludeRuleDrills] = useState(false);
+  const [drillQuestionsPerRule, setDrillQuestionsPerRule] = useState(5);
+  const [drillStyle, setDrillStyle] = useState<DrillStyle>('mixed');
+  const [bundlePreview, setBundlePreview] = useState<ParsedQuizBundle | null>(null);
+  const [savingBundle, setSavingBundle] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const activePrompt = useMemo(
+    () =>
+      buildMainImportPrompt({
+        includeRuleDrills,
+        drillQuestionsPerRule,
+        drillStyle,
+      }),
+    [includeRuleDrills, drillQuestionsPerRule, drillStyle]
+  );
 
   const copyPrompt = async () => {
     try {
-      await navigator.clipboard.writeText(IMPORT_PROMPT);
+      await navigator.clipboard.writeText(activePrompt);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
@@ -862,11 +1414,43 @@ const ImportPanel: React.FC<{
   };
 
   const read = () => {
+    setError(null);
     try {
-      const res = parseQuizJson(raw);
-      onParsed(res.title, res.questions, res.warnings);
+      const res = parseQuizBundleJson(raw);
+      if (res.subQuizzes.length > 0) {
+        setBundlePreview(res);
+      } else {
+        onParsed(res.title, res.questions, res.warnings);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر قراءة الملف.');
+    }
+  };
+
+  const saveBundleAll = async () => {
+    if (!bundlePreview) return;
+    setSavingBundle(true);
+    setError(null);
+    try {
+      const mainTitle = bundlePreview.title || 'اختبار أساسي مستورد';
+      const mainId = await createMyQuiz(ownerId, mainTitle, bundlePreview.questions, {
+        quizKind: 'main',
+      });
+      for (const sub of bundlePreview.subQuizzes) {
+        await createMyQuiz(ownerId, sub.title, sub.questions, {
+          parentQuizId: mainId,
+          quizKind: 'drill',
+          drillStyle: sub.drillStyle || 'mixed',
+          ...(sub.ruleTitle ? { ruleTitle: sub.ruleTitle } : {}),
+        });
+      }
+      onBundleSaved(
+        `تم حفظ الاختبار الأساسي «${mainTitle}» ومعه ${bundlePreview.subQuizzes.length} اختبارات تدريب وتقوية منفصلة للقواعد تحته!`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'تعذر حفظ الحزمة.');
+    } finally {
+      setSavingBundle(false);
     }
   };
 
@@ -877,6 +1461,7 @@ const ImportPanel: React.FC<{
       return;
     }
     setRaw(await f.text());
+    setBundlePreview(null);
     setError(null);
   };
 
@@ -893,9 +1478,75 @@ const ImportPanel: React.FC<{
           <h3 className="text-sm font-black text-[#3C3C3C]">انسخ السكريبت وأعطه للذكاء الاصطناعي</h3>
         </div>
         <p className="text-xs font-bold text-[#777777]">
-          الصق السكريبت في أي ذكاء اصطناعي (ChatGPT / Claude / Gemini) ثم أضف تحته مادتك أو أسئلتك. سيعطيك ملف JSON جاهزاً بنفس الصيغة،
-          بالجذور والكسور مكتوبة بالشكل الصحيح.
+          الصق السكريبت في أي ذكاء اصطناعي (ChatGPT / Claude / Gemini) ثم أضف تحته مادتك أو أسئلتك. يمكنك أيضاً تفعيل إنشاء اختبارات تقوية منفصلة لكل قاعدة تحت الاختبار الأساسي.
         </p>
+
+        {/* Option: Include separate rule-drill subQuizzes */}
+        <div className="p-3 rounded-2xl bg-[#FAF7FF] border-2 border-[#E2D4F8] flex flex-col gap-2.5">
+          <div className="text-xs font-black text-[#5C1A99] flex items-center gap-1.5">
+            <Sparkles className="w-4 h-4 text-[#8938D6]" />
+            <span>هل تطلب من الـ AI إنشاء اختبارات تقوية منفصلة لكل قاعدة تحت الاختبار الأساسي؟</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setIncludeRuleDrills(false)}
+              className={`px-3 py-2 rounded-xl border-2 text-xs font-black cursor-pointer text-right ${
+                !includeRuleDrills
+                  ? 'bg-[#E6F7FF] border-[#1CB0F6] text-[#1899D6]'
+                  : 'bg-white border-[#E5E5E5] text-[#555]'
+              }`}
+            >
+              لا، الاختبار الأساسي فقط
+            </button>
+            <button
+              type="button"
+              onClick={() => setIncludeRuleDrills(true)}
+              className={`px-3 py-2 rounded-xl border-2 text-xs font-black cursor-pointer text-right ${
+                includeRuleDrills
+                  ? 'bg-[#F3E8FF] border-[#A560E8] text-[#8938D6]'
+                  : 'bg-white border-[#E5E5E5] text-[#555]'
+              }`}
+            >
+              نعم، اختبار أساسي + تدريبات منفصلة لكل قاعدة
+            </button>
+          </div>
+
+          {includeRuleDrills && (
+            <div className="flex flex-wrap items-center gap-3 pt-1 text-xs font-bold text-[#3C3C3C]">
+              <div className="flex items-center gap-1.5">
+                <span>أسئلة لكل قاعدة:</span>
+                {[5, 8, 10, 15].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setDrillQuestionsPerRule(n)}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-black font-latin cursor-pointer ${
+                      drillQuestionsPerRule === n
+                        ? 'bg-[#A560E8] border-[#8938D6] text-white'
+                        : 'bg-white border-[#E5E5E5]'
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span>أسلوب التدريب:</span>
+                <select
+                  value={drillStyle}
+                  onChange={(e) => setDrillStyle(e.target.value as DrillStyle)}
+                  className="px-2.5 py-1 rounded-lg border border-[#E5E5E5] bg-white text-[11px] font-black outline-none"
+                >
+                  <option value="mixed">متنوع وشامل</option>
+                  <option value="same_law_ideas">نفس القانون بأفكار مختلفة</option>
+                  <option value="same_values">نفس القالب بتغيير القيم</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => void copyPrompt()} className="duo-btn flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-sm font-black cursor-pointer">
             <ClipboardCopy className="w-4 h-4" /> {copied ? 'تم النسخ ✓' : 'نسخ السكريبت'}
@@ -906,7 +1557,7 @@ const ImportPanel: React.FC<{
         </div>
         {showPrompt && (
           <pre dir="rtl" className="max-h-72 overflow-auto whitespace-pre-wrap rounded-2xl bg-[#F7F7F7] border-2 border-[#E5E5E5] p-3 text-[11px] leading-relaxed font-bold text-[#3C3C3C]">
-            {IMPORT_PROMPT}
+            {activePrompt}
           </pre>
         )}
       </div>
@@ -917,12 +1568,13 @@ const ImportPanel: React.FC<{
           <li>أسئلة الاختيارات: تحتوي <span className="font-latin">choices</span> و<span className="font-latin">correctIndex</span> (يبدأ من 0).</li>
           <li>أسئلة الجداول التفاعلية: تُضاف بصيغة <span className="font-latin">{'"questionType": "table"'}</span> وحقل <span className="font-latin">table</span> لتحديد الخلايا الثابتة والفراغات التفاعلية (<span className="font-latin">number</span> أو <span className="font-latin">text</span> مع تلميح مثل <span className="font-latin">س / أ</span>).</li>
           <li>الأشكال الهندسية والرسوم البيانية: يُضاف <span className="font-latin">figure</span> للهندسة أو <span className="font-latin">chart</span> (<span className="font-latin">bar / hbar / line / pie</span>) للرسوم البيانية.</li>
-          <li>الشرح المفصل بطرق القدرات: يدعم خطوات الحل وجداول Markdown داخل <span className="font-latin">explanation</span> بالإضافة إلى <span className="font-latin">explanationTable</span> و<span className="font-latin">explanationComparison</span>.</li>
+          <li>الحزمة المتكاملة (<span className="font-latin">subQuizzes</span>): إذا أضافها السكريبت أو نزّلتها من اختبار سابق، تُحفظ جميع تدريبات القواعد تلقائياً تحت الاختبار الأساسي.</li>
         </ul>
         <button
           type="button"
           onClick={() => {
             setRaw(EXAMPLE_JSON);
+            setBundlePreview(null);
             setError(null);
           }}
           className="self-start text-xs font-black text-[#7C3AED] hover:underline cursor-pointer"
@@ -942,9 +1594,10 @@ const ImportPanel: React.FC<{
           value={raw}
           onChange={(e) => {
             setRaw(e.target.value);
+            setBundlePreview(null);
             setError(null);
           }}
-          placeholder={'{ "title": "...", "questions": [ ... ] }'}
+          placeholder={'{ "title": "...", "questions": [ ... ], "subQuizzes": [ ... ] }'}
           className="w-full rounded-2xl border-2 border-[#E5E5E5] focus:border-[#1CB0F6] outline-none p-3 text-xs font-latin leading-relaxed bg-[#F7F7F7]"
         />
         <input ref={fileRef} type="file" accept=".json,application/json,text/plain" className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
@@ -953,13 +1606,92 @@ const ImportPanel: React.FC<{
         )}
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={read} disabled={!raw.trim()} className="duo-btn flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#58CC02] border-2 border-[#46A302] border-b-4 text-white text-sm font-black cursor-pointer disabled:opacity-50">
-            عرض الأسئلة ومراجعتها
+            قراءة ومعاينة الأسئلة
           </button>
           <button type="button" onClick={() => fileRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-white border-2 border-[#E5E5E5] border-b-4 text-sm font-black text-[#3C3C3C] cursor-pointer">
             <Upload className="w-4 h-4" /> رفع ملف
           </button>
         </div>
       </div>
+
+      {/* Bundle Preview when subQuizzes are present */}
+      {bundlePreview && (
+        <div className="rounded-3xl border-2 border-b-4 border-[#A560E8] bg-[#FAF7FF] p-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-base font-black text-[#3C3C3C]">
+                تم اكتشاف حزمة متكاملة: الأساسي + {bundlePreview.subQuizzes.length} اختبارات تقوية!
+              </h3>
+              <p className="text-xs font-bold text-[#777777]">
+                سيُحفظ الاختبار الأساسي أولاً، ثم تُربط جميع اختبارات القواعد والتقوية تحته مباشرة.
+              </p>
+            </div>
+          </div>
+
+          <div className="p-3 rounded-2xl bg-white border-2 border-[#58CC02] flex items-center justify-between gap-2">
+            <span className="text-sm font-black text-[#3C3C3C]">
+              الأساسي: {bundlePreview.title || 'اختبار أساسي'}
+            </span>
+            <span className="px-2.5 py-0.5 rounded-lg bg-[#D7FFB8] text-[#46A302] text-xs font-black">
+              {bundlePreview.questions.length} سؤال
+            </span>
+          </div>
+
+          <div className="mr-4 pr-3 border-r-4 border-[#A560E8]/45 flex flex-col gap-2">
+            {bundlePreview.subQuizzes.map((sq, idx) => (
+              <div
+                key={idx}
+                className="p-2.5 rounded-2xl bg-white border border-[#E2D4F8] flex items-center justify-between gap-2 text-xs font-bold"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="w-6 h-6 rounded-lg bg-[#A560E8] text-white flex items-center justify-center font-latin font-black shrink-0">
+                    {idx + 1}
+                  </span>
+                  <span className="font-black text-[#3C3C3C] truncate">{sq.title}</span>
+                  {sq.ruleTitle && (
+                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#8938D6] text-[10px] font-black">
+                      {sq.ruleTitle}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[#8938D6] font-black shrink-0">{sq.questions.length} سؤال</span>
+              </div>
+            ))}
+          </div>
+
+          {bundlePreview.warnings.length > 0 && (
+            <div className="p-2.5 rounded-xl bg-[#FFF4CC] border border-[#FFC800] text-[11px] font-bold text-[#8A6500]">
+              ملاحظات ({bundlePreview.warnings.length}): {bundlePreview.warnings.slice(0, 3).join(' · ')}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={savingBundle}
+              onClick={() => void saveBundleAll()}
+              className="duo-btn flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-sm font-black cursor-pointer disabled:opacity-50"
+            >
+              {savingBundle ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              <span>
+                {savingBundle
+                  ? 'جاري حفظ الحزمة بالكامل...'
+                  : `حفظ الأساسي + (${bundlePreview.subQuizzes.length}) اختبارات قواعد دفعة واحدة`}
+              </span>
+            </button>
+            <button
+              type="button"
+              disabled={savingBundle}
+              onClick={() =>
+                onParsed(bundlePreview.title, bundlePreview.questions, bundlePreview.warnings)
+              }
+              className="px-4 py-2.5 rounded-2xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+            >
+              مراجعة الاختبار الأساسي فقط في المحرر
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

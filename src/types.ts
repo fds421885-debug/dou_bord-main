@@ -358,12 +358,19 @@ export interface QuizQuestion {
   explanationComparison?: ExplanationComparison;
 }
 
+export type DrillStyle = 'same_values' | 'same_law_ideas' | 'mixed';
+
 export interface MyQuiz {
   id: string;
   ownerId: string;
   title: string;
   questions: QuizQuestion[];
   questionCount: number;
+  parentQuizId?: string;
+  quizKind?: 'main' | 'drill';
+  drillStyle?: DrillStyle;
+  sourceStarredId?: string;
+  ruleTitle?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }

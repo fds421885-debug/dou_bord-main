@@ -19,6 +19,27 @@ const numInp =
   'w-24 rounded-2xl border-2 border-[#E5E5E5] focus:border-[#A560E8] outline-none px-3 py-2 text-sm font-black font-latin text-center';
 
 export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
+  const orderedQuizzes = useMemo(() => {
+    const idSet = new Set(quizzes.map((q) => q.id));
+    const mains = quizzes.filter((q) => !q.parentQuizId || !idSet.has(q.parentQuizId));
+    const childrenByParent = new Map<string, MyQuiz[]>();
+    for (const q of quizzes) {
+      if (q.parentQuizId && idSet.has(q.parentQuizId)) {
+        const list = childrenByParent.get(q.parentQuizId) ?? [];
+        list.push(q);
+        childrenByParent.set(q.parentQuizId, list);
+      }
+    }
+    const out: Array<{ quiz: MyQuiz; isNested: boolean }> = [];
+    for (const m of mains) {
+      out.push({ quiz: m, isNested: false });
+      for (const c of childrenByParent.get(m.id) ?? []) {
+        out.push({ quiz: c, isNested: true });
+      }
+    }
+    return out;
+  }, [quizzes]);
+
   const ready = useMemo(() => quizzes.filter((q) => validPool(q).length > 0), [quizzes]);
   const [sourceMode, setSourceMode] = useState<'single' | 'mix'>(ready.length > 1 ? 'mix' : 'single');
   const [singleId, setSingleId] = useState(ready[0]?.id ?? '');
@@ -95,11 +116,23 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
 
         {sourceMode === 'single' ? (
           <div className="flex flex-col gap-1.5">
-            {quizzes.map((q) => {
+            {orderedQuizzes.map(({ quiz: q, isNested }) => {
               const n = validPool(q).length;
               return (
-                <label key={q.id} className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold cursor-pointer ${n === 0 ? 'opacity-50 cursor-not-allowed' : ''} ${singleId === q.id ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'}`}>
+                <label
+                  key={q.id}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold cursor-pointer ${
+                    isNested ? 'mr-5 bg-[#FAF7FF]' : ''
+                  } ${n === 0 ? 'opacity-50 cursor-not-allowed' : ''} ${
+                    singleId === q.id ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
+                  }`}
+                >
                   <input type="radio" name="single" disabled={n === 0} checked={singleId === q.id} onChange={() => setSingleId(q.id)} />
+                  {(isNested || q.quizKind === 'drill') && (
+                    <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                      تقوية
+                    </span>
+                  )}
                   <span className="flex-1 truncate">{q.title}</span>
                   <span className="text-[11px] font-extrabold text-[#777777]">{n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}</span>
                 </label>
@@ -113,11 +146,23 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
                 <button type="button" onClick={() => setMixIds(ready.map((q) => q.id))} className="text-[#1899D6] cursor-pointer">تحديد الكل</button>
                 <button type="button" onClick={() => setMixIds([])} className="text-[#777777] cursor-pointer">إلغاء التحديد</button>
               </div>
-              {quizzes.map((q) => {
+              {orderedQuizzes.map(({ quiz: q, isNested }) => {
                 const n = validPool(q).length;
                 return (
-                  <label key={q.id} className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${n === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${mixIds.includes(q.id) ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'}`}>
+                  <label
+                    key={q.id}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                      isNested ? 'mr-5 bg-[#FAF7FF]' : ''
+                    } ${n === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${
+                      mixIds.includes(q.id) ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
+                    }`}
+                  >
                     <input type="checkbox" disabled={n === 0} checked={mixIds.includes(q.id)} onChange={() => toggleMix(q.id)} />
+                    {(isNested || q.quizKind === 'drill') && (
+                      <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                        تقوية
+                      </span>
+                    )}
                     <span className="flex-1 truncate">{q.title}</span>
                     <span className="text-[11px] font-extrabold text-[#777777]">{n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}</span>
                   </label>

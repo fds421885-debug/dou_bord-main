@@ -1,5 +1,6 @@
 import type { AiSolution } from './aiClient';
 import type {
+  DrillStyle,
   ExplainLayer,
   ExplanationComparison,
   ExplanationTable,
@@ -139,11 +140,27 @@ export interface StoredExamSession {
   updatedAt: number;
 }
 
+export interface MyQuizMetaOverride {
+  parentQuizId?: string;
+  quizKind?: 'main' | 'drill';
+  drillStyle?: DrillStyle;
+  sourceStarredId?: string;
+  ruleTitle?: string;
+}
+
+export interface StoredMyQuizMetaOverridesSnapshot {
+  key: 'my_quizzes_meta';
+  ownerId: string;
+  byQuizId: Record<string, MyQuizMetaOverride>;
+  updatedAt: number;
+}
+
 export type SessionSnapshotRecord =
   | StoredUserProfileSnapshot
   | StoredSavedTestsSnapshot
   | StoredRoomSnapshot
   | StoredMyQuizzesSnapshot
+  | StoredMyQuizMetaOverridesSnapshot
   | StoredMyQuizDraft
   | StoredQuizAttemptsSnapshot
   | StoredStarredQuestionsSnapshot
@@ -353,4 +370,29 @@ export async function deleteSessionSnapshot(key: SessionSnapshotRecord['key']): 
 
 export async function saveMyQuizzesSnapshot(ownerId: string, quizzes: MyQuiz[]): Promise<void> {
   await saveSessionSnapshot({ key: 'my_quizzes', ownerId, quizzes, updatedAt: Date.now() });
+}
+
+export async function loadMyQuizMetaOverrides(
+  ownerId: string
+): Promise<Record<string, MyQuizMetaOverride>> {
+  const snap = await loadSessionSnapshot<StoredMyQuizMetaOverridesSnapshot>('my_quizzes_meta');
+  if (!snap || snap.ownerId !== ownerId || !snap.byQuizId) return {};
+  return snap.byQuizId;
+}
+
+export async function saveMyQuizMetaOverride(
+  ownerId: string,
+  quizId: string,
+  meta: MyQuizMetaOverride
+): Promise<void> {
+  const prev = await loadMyQuizMetaOverrides(ownerId);
+  await saveSessionSnapshot({
+    key: 'my_quizzes_meta',
+    ownerId,
+    byQuizId: {
+      ...prev,
+      [quizId]: meta,
+    },
+    updatedAt: Date.now(),
+  });
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, MinusCircle, Star, XCircle } from 'lucide-react';
+import { CheckCircle2, Dumbbell, MinusCircle, Star, XCircle } from 'lucide-react';
 import type { ExamQuestion } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
@@ -23,6 +23,7 @@ interface Props {
   score: number;
   total: number;
   durationSec: number;
+  onCreateDrill?: (question: ExamQuestion) => void;
 }
 
 export const ExamScoreCard: React.FC<Pick<Props, 'score' | 'total' | 'durationSec'>> = ({
@@ -61,6 +62,7 @@ export const ExamReview: React.FC<Props> = ({
   score,
   total,
   durationSec,
+  onCreateDrill,
 }) => {
   const [onlyWrong, setOnlyWrong] = useState(false);
   const [starredIds, setStarredIds] = useState<Set<string>>(() => new Set());
@@ -123,36 +125,49 @@ export const ExamReview: React.FC<Props> = ({
                 </span>
               </div>
 
-              {ownerId && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const res = await toggleStarredQuestion({
-                      ownerId,
-                      question: q,
-                      currentlyStarred: isStarred,
-                      sourceQuizId: q.sourceQuizId,
-                      sourceTitle: q.sourceTitle,
-                    });
-                    setStarredIds((prev) => {
-                      const next = new Set(prev);
-                      if (res.starred) next.add(res.id);
-                      else next.delete(res.id);
-                      return next;
-                    });
-                  }}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-xl border-2 text-[11px] font-black cursor-pointer ${
-                    isStarred
-                      ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
-                      : 'bg-white border-[#E5E5E5] text-[#777777] hover:border-[#FFC800]'
-                  }`}
-                >
-                  <Star
-                    className={`w-3.5 h-3.5 ${isStarred ? 'fill-[#FFC800] text-[#E5A400]' : ''}`}
-                  />
-                  <span>{isStarred ? 'مميز ★' : 'تمييز'}</span>
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {onCreateDrill && (
+                  <button
+                    type="button"
+                    onClick={() => onCreateDrill(q)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-xl border-2 border-[#A560E8]/60 bg-[#F5ECFF] text-[11px] font-black text-[#8938D6] hover:border-[#8938D6] cursor-pointer"
+                    title="إنشاء اختبار تقوية مخصص على هذه المسألة"
+                  >
+                    <Dumbbell className="w-3.5 h-3.5" />
+                    <span>اختبار تقوية</span>
+                  </button>
+                )}
+                {ownerId && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const res = await toggleStarredQuestion({
+                        ownerId,
+                        question: q,
+                        currentlyStarred: isStarred,
+                        sourceQuizId: q.sourceQuizId,
+                        sourceTitle: q.sourceTitle,
+                      });
+                      setStarredIds((prev) => {
+                        const next = new Set(prev);
+                        if (res.starred) next.add(res.id);
+                        else next.delete(res.id);
+                        return next;
+                      });
+                    }}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-xl border-2 text-[11px] font-black cursor-pointer ${
+                      isStarred
+                        ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                        : 'bg-white border-[#E5E5E5] text-[#777777] hover:border-[#FFC800]'
+                    }`}
+                  >
+                    <Star
+                      className={`w-3.5 h-3.5 ${isStarred ? 'fill-[#FFC800] text-[#E5A400]' : ''}`}
+                    />
+                    <span>{isStarred ? 'مميز ★' : 'تمييز'}</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {q.sourceTitle && (

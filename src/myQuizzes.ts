@@ -1,8 +1,10 @@
 import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from './firestoreTracked';
 import { db, handleFirestoreError, OperationType } from './firebase';
-import type { QuestionKind, QuizQuestion } from './types';
+import type { DrillStyle, MyQuiz, QuestionKind, QuizQuestion } from './types';
 import { chartProblem, parseChart, sanitizeChart } from './quizChart';
 import { figureProblem, parseFigure, sanitizeFigure } from './quizFigure';
+import { saveMyQuizMetaOverride } from './localDraftStore';
+import { notifyRulesUpdateNeeded } from './starredQuestions';
 import {
   parseTableQuestion,
   sanitizeExplanationComparison,
@@ -50,7 +52,53 @@ export function emptyQuestion(questionType: QuestionKind = 'mcq'): QuizQuestion 
 /*  سكريبت الذكاء الاصطناعي الذي ينسخه المستخدم قبل الاستيراد         */
 /* ------------------------------------------------------------------ */
 
-export const IMPORT_PROMPT = String.raw`أنت معلم خبير ومؤلف اختبارات محترف في المناهج الدراسية واختبارات «القدرات العامة» (الكمي واللفظي) والرياضيات والهندسة والعلوم.
+export const DRILL_STYLE_LABELS: Record<DrillStyle, string> = {
+  same_values: 'نفس المسألة بتغيير القيم والأرقام فقط',
+  same_law_ideas: 'نفس القانون بأفكار وزوايا مختلفة',
+  mixed: 'متنوع وشامل (تغيير قيم + أفكار مختلفة + قدرات متدرجة)',
+};
+
+export interface MainImportPromptOptions {
+  includeRuleDrills?: boolean;
+  drillQuestionsPerRule?: number;
+  drillStyle?: DrillStyle;
+}
+
+export function buildMainImportPrompt(options: MainImportPromptOptions = {}): string {
+  const {
+    includeRuleDrills = false,
+    drillQuestionsPerRule = 5,
+    drillStyle = 'mixed',
+  } = options;
+  const clampedPerRule = Math.max(2, Math.min(30, Math.round(drillQuestionsPerRule || 5)));
+
+  const bundleBlock = includeRuleDrills
+    ? `
+================================================================
+وضع الحزمة المتكاملة المطلوب الآن: الاختبار الأساسي + اختبارات تقوية منفصلة لكل قاعدة!
+================================================================
+المطلوب في ملف JSON الناتج أن يحتوي على:
+1) "title" و "questions": الاختبار الأساسي الشامل للمادة كاملة.
+2) "subQuizzes": مصفوفة إلزامية تحتوي على **اختبار تدريب وتقوية منفصل لكل قاعدة أو قانون أو مهارة رئيسية** وردت في المادة، بحيث يظهر كل تدريب تحت الاختبار الأساسي للطالب:
+   "subQuizzes": [
+     {
+       "title": "تدريب قاعدة: اسم القاعدة أو المهارة بوضوح",
+       "ruleTitle": "الاسم المختصر للقاعدة (مثلاً: التدرج المنتظم / الزوايا المتقابلة)",
+       "drillStyle": "${drillStyle}",
+       "questions": [
+         /* أنشئ هنا ${clampedPerRule} أسئلة تدريبية مركزة على هذه القاعدة وحدها، مع شرح مفصل وطرق القدرات */
+       ]
+     }
+   ]
+- عدد الأسئلة داخل كل عنصر في "subQuizzes": نحو ${clampedPerRule} أسئلة متدرجة بأسلوب (${DRILL_STYLE_LABELS[drillStyle]}).
+- تأكد أن كل سؤال داخل "subQuizzes" يلتزم بنفس قواعد الـ JSON والـ LaTeX والجداول التفاعلية والأشكال والرسوم والشرح المفصل المذكورة أدناه، وأن يكون مختلفاً وجديداً للتدريب الفعلي وليس مجرد تكرار حرفي لنفس أرقام الاختبار الأساسي.
+`
+    : '';
+
+  return `${PROMPT_HEAD}${bundleBlock}\n${PROMPT_TAIL}`;
+}
+
+const PROMPT_HEAD = String.raw`أنت معلم خبير ومؤلف اختبارات محترف في المناهج الدراسية واختبارات «القدرات العامة» (الكمي واللفظي) والرياضيات والهندسة والعلوم.
 مهمتك: تحويل المادة أو الأسئلة أو الملف المرفق أدناه إلى اختبار تفاعلي متكامل وإخراج الناتج على شكل **ملف JSON واحد فقط** داخل كتلة كود واحدة (\`\`\`json ... \`\`\`) دون أي كلام أو شرح أو مقدمات قبلها أو بعدها.
 
 ================================================================
@@ -105,9 +153,9 @@ export const IMPORT_PROMPT = String.raw`أنت معلم خبير ومؤلف اخ
       }
     }
   ]
-}
+}`;
 
-================================================================
+const PROMPT_TAIL = String.raw`================================================================
 ثانياً: قواعد صارمة للصياغة والدقة الحسابية
 ================================================================
 1) JSON صالح 100%: علامات اقتباس مزدوجة (") فقط، بدون تعليقات (//)، بدون فواصل زائدة، بدون أي نص خارج كتلة الكود.
@@ -231,6 +279,87 @@ export const IMPORT_PROMPT = String.raw`أنت معلم خبير ومؤلف اخ
 
 المادة أو الأسئلة المطلوب تحويلها إلى اختبار الآن:
 (الصق هنا المادة أو الأسئلة أو أرفق الملف)`;
+
+export const IMPORT_PROMPT = `${PROMPT_HEAD}\n${PROMPT_TAIL}`;
+
+export interface DrillPromptParams {
+  question: QuizQuestion;
+  sourceTitle?: string;
+  questionCount: number;
+  drillStyle: DrillStyle;
+  suggestedTitle?: string;
+  customNote?: string;
+}
+
+export function buildDrillPromptForQuestion(params: DrillPromptParams): string {
+  const {
+    question,
+    sourceTitle,
+    questionCount,
+    drillStyle,
+    suggestedTitle,
+    customNote,
+  } = params;
+  const count = Math.max(1, Math.min(50, Math.round(questionCount || 5)));
+
+  const styleInstructions =
+    drillStyle === 'same_values'
+      ? `**النمط المطلوب: نفس المسألة وقالب السؤال تماماً مع تغيير الأرقام والقيم فقط**
+- حافظ على نفس الصياغة والهيكل والخطوات والقانون حرفياً في كل سؤال جديد.
+- غيّر الأرقام أو المعطيات/الجدول/الزوايا والأبعاد فقط في كل سؤال لتدريب الطالب على سرعة الحل وتثبيت الخطوات بدون أخطاء حسابية.
+- تأكد من إعادة حساب الإجابة الصحيحة، وتحديث الاختيارات أو خلايا الجدول (expectedAnswer) والشرح والجداول التوضيحية والأشكال الهندسية بالأرقام الجديدة في كل سؤال بدقة 100%.`
+      : drillStyle === 'same_law_ideas'
+      ? `**النمط المطلوب: نفس القانون أو المهارة الأساسية بأفكار وزوايا صياغة مختلفة**
+- استخرج القانون الرئيسي أو المهارة الأساسية من المسألة المرجعية.
+- أنشئ ${count} أسئلة تطبيقية تدور جميعها حول نفس القانون، لكن بأفكار ومسائل مختلفة ومتنوعة (مثلاً: عكس المطلوب، معطى غير مباشر، ربط بمجهول س أو ص، سؤال مقارنة بين قيمتين، جدول تفاعلي، مسألة لفظية/هندسية جديدة على نفس المبدأ).
+- في شرح كل سؤال اذكر صراحةً كيف استخدمنا نفس القانون، وقارن بين الحل التقليدي وطريقة القدرات السريعة.`
+      : `**النمط المطلوب: تدريب شامل ومتنوع متدرج الصعوبة**
+- اجمع في الأسئلة الـ ${count} بين ثلاثة مستويات متدرجة على نفس القانون/المهارة:
+  1) الثلث الأول: مسائل مباشرة قريبة من المسألة الأصلية مع تغيير الأرقام لتثبيت الثقة.
+  2) الثلث الثاني: أفكار متوسطة وعكس المطلوب أو أسئلة جداول تفاعلية ("questionType": "table") عندما يناسب ذلك.
+  3) الثلث الثالث: أفكار قدرات متقدمة أو مقارنات ("explanationComparison") وخدع ذكية متكررة في الاختبارات على نفس الفكرة.`;
+
+  const sourcePayload = {
+    questionType: question.questionType === 'table' || question.table ? 'table' : 'mcq',
+    text: question.text,
+    ...(question.table ? { table: question.table } : {}),
+    ...(question.choices?.length ? { choices: question.choices, correctIndex: question.correctIndex } : {}),
+    ...(question.figure ? { figure: question.figure } : {}),
+    ...(question.chart ? { chart: question.chart } : {}),
+    ...(question.explanation ? { explanation: question.explanation } : {}),
+    ...(question.explanationTable ? { explanationTable: question.explanationTable } : {}),
+    ...(question.explanationComparison ? { explanationComparison: question.explanationComparison } : {}),
+  };
+
+  const titleHint = (suggestedTitle || `اختبار تقوية: ${question.text.slice(0, 45)}`).slice(0, 120);
+
+  return `أنت معلم خبير ومؤلف تدريبات تقوية مركزة لرفع إتقان الطالب في المناهج واختبارات القدرات (الكمي واللفظي).
+المهمة: أنشئ **اختبار تقوية وتدريب مخصص** مكون من **${count} أسئلة جديدة** بناءً على المسألة المرجعية التالية التي أراد الطالب التدرب عليها، وأخرج الناتج على شكل **ملف JSON واحد فقط** داخل كتلة كود واحدة (\`\`\`json ... \`\`\`) دون أي كلام خارج كتلة الكود.
+
+================================================================
+المسألة المرجعية المختارة من الطالب${sourceTitle ? ` (من اختبار: ${sourceTitle})` : ''}:
+================================================================
+${JSON.stringify(sourcePayload, null, 2)}
+
+================================================================
+مواصفات اختبار التقوية المطلوب الآن:
+================================================================
+- عنوان الملف في JSON: ضع "title": "${titleHint}"
+- أضف في الجذر: "drillStyle": "${drillStyle}" و "ruleTitle": "اسم القانون أو المهارة المستخلصة من المسألة"
+- عدد الأسئلة المطلوب بدقة: ${count} سؤالاً داخل مصفوفة "questions" (تحقق من العدد والحساب في كل سؤال).
+${styleInstructions}${
+    customNote?.trim()
+      ? `\n- ملاحظة إضافية من الطالب: ${customNote.trim()}`
+      : ''
+  }
+
+================================================================
+هيكل ملف JSON والقواعد الكاملة (الجداول التفاعلية + الهندسة + الرسوم + الشرح التفصيلي):
+================================================================
+${PROMPT_HEAD.slice(PROMPT_HEAD.indexOf('{'))}
+
+${PROMPT_TAIL.slice(0, PROMPT_TAIL.lastIndexOf('المادة أو الأسئلة المطلوب'))}`;
+}
 
 /** مثال كامل جاهز للتجربة داخل شاشة الاستيراد (جداول تفاعلية + قدرات + هندسة مركبة + مقارنات + رسوم بيانية + شرح مفصل) */
 export const EXAMPLE_JSON = JSON.stringify(
@@ -473,39 +602,42 @@ export interface ParsedQuiz {
   title: string;
   questions: QuizQuestion[];
   warnings: string[];
+  ruleTitle?: string;
+  drillStyle?: DrillStyle;
 }
 
-export function parseQuizJson(input: string): ParsedQuiz {
-  if (!input.trim()) throw new Error('الصق محتوى ملف JSON أولاً.');
-  const text = sanitizeJsonBackslashes(extractJsonText(input));
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : '';
-    throw new Error(
-      `الملف ليس JSON صالحاً. تأكد أنك نسخت الناتج كاملاً من الذكاء الاصطناعي بدون أي نص إضافي. (${msg.slice(0, 120)})`
-    );
-  }
+export interface ParsedSubQuiz {
+  title: string;
+  ruleTitle?: string;
+  drillStyle?: DrillStyle;
+  questions: QuizQuestion[];
+  warnings: string[];
+}
 
-  let title = '';
-  let list: unknown[] = [];
-  if (Array.isArray(data)) {
-    list = data;
-  } else if (data && typeof data === 'object') {
-    const o = data as Loose;
-    title = pickStr(o, ['title', 'name', 'عنوان', 'العنوان']);
-    const q = o.questions ?? o['الأسئلة'] ?? o.items;
-    if (!Array.isArray(q)) throw new Error('لم أجد مصفوفة "questions" داخل الملف.');
-    list = q;
-  } else {
-    throw new Error('صيغة الملف غير معروفة: يجب أن يكون كائناً فيه "questions".');
-  }
+export interface ParsedQuizBundle {
+  title: string;
+  questions: QuizQuestion[];
+  warnings: string[];
+  ruleTitle?: string;
+  drillStyle?: DrillStyle;
+  subQuizzes: ParsedSubQuiz[];
+}
 
-  const warnings: string[] = [];
-  if (list.length === 0) throw new Error('الملف لا يحتوي أي سؤال.');
+function normalizeDrillStyle(raw: unknown): DrillStyle | undefined {
+  const s = String(raw || '').trim();
+  if (s === 'same_values' || s === 'same_law_ideas' || s === 'mixed') return s;
+  return undefined;
+}
+
+function parseQuestionsList(
+  rawList: unknown[],
+  warnings: string[],
+  prefixLabel = ''
+): QuizQuestion[] {
+  let list = rawList;
+  const pfx = prefixLabel ? `${prefixLabel} — ` : '';
   if (list.length > LIMITS.maxQuestions) {
-    warnings.push(`الملف فيه ${list.length} سؤالاً، وتمت قراءة أول ${LIMITS.maxQuestions} فقط.`);
+    warnings.push(`${pfx}الملف فيه ${list.length} سؤالاً، وتمت قراءة أول ${LIMITS.maxQuestions} فقط.`);
     list = list.slice(0, LIMITS.maxQuestions);
   }
 
@@ -513,13 +645,13 @@ export function parseQuizJson(input: string): ParsedQuiz {
   list.forEach((item, idx) => {
     const n = idx + 1;
     if (!item || typeof item !== 'object') {
-      warnings.push(`السؤال ${n}: صيغته غير صالحة وتم تجاهله.`);
+      warnings.push(`${pfx}السؤال ${n}: صيغته غير صالحة وتم تجاهله.`);
       return;
     }
     const o = item as Loose;
     const qText = pickStr(o, ['text', 'question', 'q', 'سؤال', 'السؤال', 'نص']).trim();
     if (!qText) {
-      warnings.push(`السؤال ${n}: لا يحتوي نصاً وتم تجاهله.`);
+      warnings.push(`${pfx}السؤال ${n}: لا يحتوي نصاً وتم تجاهله.`);
       return;
     }
 
@@ -530,7 +662,7 @@ export function parseQuizJson(input: string): ParsedQuiz {
     let table: QuizQuestion['table'];
     if (isTable && rawTable !== undefined && rawTable !== null) {
       const pt = parseTableQuestion(rawTable);
-      pt.warnings.forEach((w) => warnings.push(`السؤال ${n} (الجدول): ${w}`));
+      pt.warnings.forEach((w) => warnings.push(`${pfx}السؤال ${n} (الجدول): ${w}`));
       if (pt.table) table = pt.table;
     }
 
@@ -547,11 +679,11 @@ export function parseQuizJson(input: string): ParsedQuiz {
         .filter((c) => c.length > 0);
     }
     if (!isTable && choices.length < 2) {
-      warnings.push(`السؤال ${n}: الأسئلة باختيارات تحتاج خيارين على الأقل، أضفها وحدد الإجابة الصحيحة أثناء المراجعة.`);
+      warnings.push(`${pfx}السؤال ${n}: الأسئلة باختيارات تحتاج خيارين على الأقل، أضفها وحدد الإجابة الصحيحة أثناء المراجعة.`);
       choices = [];
     }
     if (choices.length > LIMITS.maxChoices) {
-      warnings.push(`السؤال ${n}: تم الاكتفاء بأول ${LIMITS.maxChoices} خيارات.`);
+      warnings.push(`${pfx}السؤال ${n}: تم الاكتفاء بأول ${LIMITS.maxChoices} خيارات.`);
       choices = choices.slice(0, LIMITS.maxChoices);
     }
 
@@ -573,13 +705,13 @@ export function parseQuizJson(input: string): ParsedQuiz {
         if (choices.includes(answer)) correctIndex = choices.indexOf(answer);
         else if (lower in LETTER_INDEX && LETTER_INDEX[lower] < choices.length) correctIndex = LETTER_INDEX[lower];
       }
-      if (correctIndex === -1) warnings.push(`السؤال ${n}: لم تُحدد الإجابة الصحيحة، اخترها أثناء التعديل.`);
+      if (correctIndex === -1) warnings.push(`${pfx}السؤال ${n}: لم تُحدد الإجابة الصحيحة، اخترها أثناء التعديل.`);
       answer = correctIndex >= 0 ? choices[correctIndex] : '';
     }
 
     const cut = (s: string, max: number, what: string): string => {
       if (s.length > max) {
-        warnings.push(`السؤال ${n}: ${what} طويل جداً وتم اقتطاعه.`);
+        warnings.push(`${pfx}السؤال ${n}: ${what} طويل جداً وتم اقتطاعه.`);
         return s.slice(0, max);
       }
       return s;
@@ -589,7 +721,7 @@ export function parseQuizJson(input: string): ParsedQuiz {
     const rawChart = o.chart ?? o.graph ?? o['رسم'];
     if (rawChart !== undefined && rawChart !== null) {
       const pc = parseChart(rawChart);
-      pc.warnings.forEach((w) => warnings.push(`السؤال ${n}: ${w}`));
+      pc.warnings.forEach((w) => warnings.push(`${pfx}السؤال ${n}: ${w}`));
       if (pc.chart) chart = pc.chart;
     }
 
@@ -597,7 +729,7 @@ export function parseQuizJson(input: string): ParsedQuiz {
     const rawFigure = o.figure ?? o.geometry ?? o.shape ?? o['شكل'];
     if (rawFigure !== undefined && rawFigure !== null) {
       const pf = parseFigure(rawFigure);
-      pf.warnings.forEach((w) => warnings.push(`السؤال ${n}: ${w}`));
+      pf.warnings.forEach((w) => warnings.push(`${pfx}السؤال ${n}: ${w}`));
       if (pf.figure) figure = pf.figure;
     }
 
@@ -605,7 +737,7 @@ export function parseQuizJson(input: string): ParsedQuiz {
     const rawExpChart = o.explanationChart;
     if (rawExpChart !== undefined && rawExpChart !== null) {
       const pc = parseChart(rawExpChart);
-      pc.warnings.forEach((w) => warnings.push(`السؤال ${n} (رسم الشرح): ${w}`));
+      pc.warnings.forEach((w) => warnings.push(`${pfx}السؤال ${n} (رسم الشرح): ${w}`));
       if (pc.chart) explanationChart = pc.chart;
     }
 
@@ -613,7 +745,7 @@ export function parseQuizJson(input: string): ParsedQuiz {
     const rawExpFigure = o.explanationFigure;
     if (rawExpFigure !== undefined && rawExpFigure !== null) {
       const pf = parseFigure(rawExpFigure);
-      pf.warnings.forEach((w) => warnings.push(`السؤال ${n} (شكل الشرح): ${w}`));
+      pf.warnings.forEach((w) => warnings.push(`${pfx}السؤال ${n} (شكل الشرح): ${w}`));
       if (pf.figure) explanationFigure = pf.figure;
     }
 
@@ -640,29 +772,132 @@ export function parseQuizJson(input: string): ParsedQuiz {
     });
   });
 
-  if (questions.length === 0) throw new Error('لم أستطع قراءة أي سؤال صالح من الملف.');
-  return { title: title.trim().slice(0, LIMITS.title), questions, warnings };
+  return questions;
 }
 
-export function quizToExportJson(title: string, questions: QuizQuestion[]): string {
+export function parseQuizBundleJson(input: string): ParsedQuizBundle {
+  if (!input.trim()) throw new Error('الصق محتوى ملف JSON أولاً.');
+  const text = sanitizeJsonBackslashes(extractJsonText(input));
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '';
+    throw new Error(
+      `الملف ليس JSON صالحاً. تأكد أنك نسخت الناتج كاملاً من الذكاء الاصطناعي بدون أي نص إضافي. (${msg.slice(0, 120)})`
+    );
+  }
+
+  let title = '';
+  let list: unknown[] = [];
+  let ruleTitle = '';
+  let drillStyle: DrillStyle | undefined;
+  let rawSubQuizzes: unknown[] = [];
+
+  if (Array.isArray(data)) {
+    list = data;
+  } else if (data && typeof data === 'object') {
+    const o = data as Loose;
+    title = pickStr(o, ['title', 'name', 'عنوان', 'العنوان']);
+    ruleTitle = pickStr(o, ['ruleTitle', 'rule', 'القاعدة']).trim().slice(0, LIMITS.title);
+    drillStyle = normalizeDrillStyle(o.drillStyle ?? o.style);
+    const q = o.questions ?? o['الأسئلة'] ?? o.items;
+    if (!Array.isArray(q)) throw new Error('لم أجد مصفوفة "questions" داخل الملف.');
+    list = q;
+    const sub = o.subQuizzes ?? o.drillQuizzes ?? o.drills ?? o['اختبارات_التقوية'] ?? o['التدريبات'];
+    if (Array.isArray(sub)) rawSubQuizzes = sub;
+  } else {
+    throw new Error('صيغة الملف غير معروفة: يجب أن يكون كائناً فيه "questions".');
+  }
+
+  const warnings: string[] = [];
+  if (list.length === 0) throw new Error('الملف لا يحتوي أي سؤال.');
+
+  const questions = parseQuestionsList(list, warnings);
+  if (questions.length === 0) throw new Error('لم أستطع قراءة أي سؤال صالح من الملف.');
+
+  const subQuizzes: ParsedSubQuiz[] = [];
+  rawSubQuizzes.forEach((rawSub, idx) => {
+    if (!rawSub || typeof rawSub !== 'object') return;
+    const so = rawSub as Loose;
+    const subTitle =
+      pickStr(so, ['title', 'name', 'عنوان']).trim().slice(0, LIMITS.title) ||
+      `تدريب تقوية #${idx + 1}`;
+    const subList = so.questions ?? so['الأسئلة'] ?? so.items;
+    if (!Array.isArray(subList) || subList.length === 0) return;
+    const subWarnings: string[] = [];
+    const subQuestions = parseQuestionsList(subList, subWarnings, subTitle);
+    if (subQuestions.length === 0) return;
+    subWarnings.forEach((w) => warnings.push(w));
+    const subRule = pickStr(so, ['ruleTitle', 'rule', 'القاعدة']).trim().slice(0, LIMITS.title);
+    const subStyle = normalizeDrillStyle(so.drillStyle ?? so.style);
+    subQuizzes.push({
+      title: subTitle,
+      ...(subRule ? { ruleTitle: subRule } : {}),
+      ...(subStyle ? { drillStyle: subStyle } : {}),
+      questions: subQuestions,
+      warnings: subWarnings,
+    });
+  });
+
+  return {
+    title: title.trim().slice(0, LIMITS.title),
+    questions,
+    warnings,
+    ...(ruleTitle ? { ruleTitle } : {}),
+    ...(drillStyle ? { drillStyle } : {}),
+    subQuizzes,
+  };
+}
+
+export function parseQuizJson(input: string): ParsedQuiz {
+  const b = parseQuizBundleJson(input);
+  return {
+    title: b.title,
+    questions: b.questions,
+    warnings: b.warnings,
+    ...(b.ruleTitle ? { ruleTitle: b.ruleTitle } : {}),
+    ...(b.drillStyle ? { drillStyle: b.drillStyle } : {}),
+  };
+}
+
+function serializeQuestionForExport(q: QuizQuestion) {
+  return {
+    questionType: q.questionType === 'table' || q.table ? 'table' : 'mcq',
+    text: q.text,
+    ...(q.table ? { table: q.table } : {}),
+    choices: q.choices,
+    correctIndex: q.correctIndex,
+    answer: q.answer,
+    explanation: q.explanation,
+    ...(q.chart ? { chart: q.chart } : {}),
+    ...(q.figure ? { figure: q.figure } : {}),
+    ...(q.explanationChart ? { explanationChart: q.explanationChart } : {}),
+    ...(q.explanationFigure ? { explanationFigure: q.explanationFigure } : {}),
+    ...(q.explanationTable ? { explanationTable: q.explanationTable } : {}),
+    ...(q.explanationComparison ? { explanationComparison: q.explanationComparison } : {}),
+  };
+}
+
+export function quizToExportJson(
+  title: string,
+  questions: QuizQuestion[],
+  childDrills: MyQuiz[] = []
+): string {
   return JSON.stringify(
     {
       title,
-      questions: questions.map((q) => ({
-        questionType: q.questionType === 'table' || q.table ? 'table' : 'mcq',
-        text: q.text,
-        ...(q.table ? { table: q.table } : {}),
-        choices: q.choices,
-        correctIndex: q.correctIndex,
-        answer: q.answer,
-        explanation: q.explanation,
-        ...(q.chart ? { chart: q.chart } : {}),
-        ...(q.figure ? { figure: q.figure } : {}),
-        ...(q.explanationChart ? { explanationChart: q.explanationChart } : {}),
-        ...(q.explanationFigure ? { explanationFigure: q.explanationFigure } : {}),
-        ...(q.explanationTable ? { explanationTable: q.explanationTable } : {}),
-        ...(q.explanationComparison ? { explanationComparison: q.explanationComparison } : {}),
-      })),
+      questions: questions.map(serializeQuestionForExport),
+      ...(childDrills.length > 0
+        ? {
+            subQuizzes: childDrills.map((sub) => ({
+              title: sub.title,
+              ...(sub.ruleTitle ? { ruleTitle: sub.ruleTitle } : {}),
+              ...(sub.drillStyle ? { drillStyle: sub.drillStyle } : {}),
+              questions: sub.questions.map(serializeQuestionForExport),
+            })),
+          }
+        : {}),
     },
     null,
     2
@@ -755,21 +990,67 @@ export function validateForSave(title: string, questions: QuizQuestion[]): strin
   return null;
 }
 
-export async function createMyQuiz(uid: string, title: string, questions: QuizQuestion[]): Promise<string> {
+export interface MyQuizMetaInput {
+  parentQuizId?: string;
+  quizKind?: 'main' | 'drill';
+  drillStyle?: DrillStyle;
+  sourceStarredId?: string;
+  ruleTitle?: string;
+}
+
+function buildQuizMetaPayload(meta?: MyQuizMetaInput): Record<string, unknown> {
+  if (!meta) return {};
+  return {
+    ...(meta.parentQuizId ? { parentQuizId: String(meta.parentQuizId).slice(0, 128) } : {}),
+    ...(meta.quizKind === 'main' || meta.quizKind === 'drill' ? { quizKind: meta.quizKind } : {}),
+    ...(meta.drillStyle === 'same_values' ||
+    meta.drillStyle === 'same_law_ideas' ||
+    meta.drillStyle === 'mixed'
+      ? { drillStyle: meta.drillStyle }
+      : {}),
+    ...(meta.sourceStarredId ? { sourceStarredId: String(meta.sourceStarredId).slice(0, 128) } : {}),
+    ...(meta.ruleTitle ? { ruleTitle: String(meta.ruleTitle).slice(0, 120) } : {}),
+  };
+}
+
+export async function createMyQuiz(
+  uid: string,
+  title: string,
+  questions: QuizQuestion[],
+  meta?: MyQuizMetaInput
+): Promise<string> {
   const id = newQuizId();
   const cleaned = cleanQuestions(questions);
   const path = `users/${uid}/myQuizzes/${id}`;
+  const metaPayload = buildQuizMetaPayload(meta);
+  if (Object.keys(metaPayload).length > 0 && meta) {
+    await saveMyQuizMetaOverride(uid, id, meta);
+  }
+  const coreDoc = {
+    id,
+    ownerId: uid,
+    title: title.trim().slice(0, LIMITS.title),
+    questions: cleaned,
+    questionCount: cleaned.length,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
   try {
     await setDoc(doc(db, 'users', uid, 'myQuizzes', id), {
-      id,
-      ownerId: uid,
-      title: title.trim().slice(0, LIMITS.title),
-      questions: cleaned,
-      questionCount: cleaned.length,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      ...coreDoc,
+      ...metaPayload,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/permission-denied|permission_denied/i.test(msg) && Object.keys(metaPayload).length > 0) {
+      notifyRulesUpdateNeeded();
+      try {
+        await setDoc(doc(db, 'users', uid, 'myQuizzes', id), coreDoc);
+        return id;
+      } catch (fallbackErr) {
+        handleFirestoreError(fallbackErr, OperationType.CREATE, path);
+      }
+    }
     handleFirestoreError(err, OperationType.CREATE, path);
   }
   return id;
@@ -779,18 +1060,37 @@ export async function updateMyQuiz(
   uid: string,
   id: string,
   title: string,
-  questions: QuizQuestion[]
+  questions: QuizQuestion[],
+  meta?: MyQuizMetaInput
 ): Promise<void> {
   const cleaned = cleanQuestions(questions);
   const path = `users/${uid}/myQuizzes/${id}`;
+  const metaPayload = buildQuizMetaPayload(meta);
+  if (Object.keys(metaPayload).length > 0 && meta) {
+    await saveMyQuizMetaOverride(uid, id, meta);
+  }
+  const coreUpdate = {
+    title: title.trim().slice(0, LIMITS.title),
+    questions: cleaned,
+    questionCount: cleaned.length,
+    updatedAt: serverTimestamp(),
+  };
   try {
     await updateDoc(doc(db, 'users', uid, 'myQuizzes', id), {
-      title: title.trim().slice(0, LIMITS.title),
-      questions: cleaned,
-      questionCount: cleaned.length,
-      updatedAt: serverTimestamp(),
+      ...coreUpdate,
+      ...metaPayload,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/permission-denied|permission_denied/i.test(msg) && Object.keys(metaPayload).length > 0) {
+      notifyRulesUpdateNeeded();
+      try {
+        await updateDoc(doc(db, 'users', uid, 'myQuizzes', id), coreUpdate);
+        return;
+      } catch (fallbackErr) {
+        handleFirestoreError(fallbackErr, OperationType.UPDATE, path);
+      }
+    }
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
 }

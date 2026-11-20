@@ -62,9 +62,11 @@ import {
 import { fetchServerQuotaStatus, recordFirestoreOperations } from './quotaTracker';
 import {
   loadAllQuizDrafts,
+  loadMyQuizMetaOverrides,
   loadSessionSnapshot,
   saveQuizDraft,
   saveSessionSnapshot,
+  type MyQuizMetaOverride,
   type StoredExamSession,
   type StoredMyQuizDraft,
   type StoredMyQuizzesSnapshot,
@@ -100,12 +102,13 @@ import type {
   UserProfile,
 } from './types';
 
-export const REQUIRED_RULES_VERSION = 'v5_tables_starred_2026_11_19';
+export const REQUIRED_RULES_VERSION = 'v6_drills_tables_starred_2026_11_20';
 
 export const RULES_UPDATE_CHANGES_AR: string[] = [
   'دعم حفظ واسترجاع صيغة «الأسئلة التفاعلية بالجداول» (table) وحقول الشرح المتقدم (explanationTable, explanationComparison).',
   'إضافة صلاحية حفظ إجابات الطالب في الجداول (tableAnswers) داخل سجل محاولات الاختبار (quizAttempts).',
   'إضافة مسار «الأسئلة المميزة ⭐» الخاص بكل طالب (/users/{uid}/starredQuestions/{starredId}) للقراءة والكتابة والحذف بأمان.',
+  'دعم ربط «اختبارات التقوية والتدريب على القواعد» تحت الاختبار الأساسي (parentQuizId, quizKind, drillStyle, sourceStarredId, ruleTitle) في اختباراتي (myQuizzes).',
 ];
 
 export const RULES_UPDATE_STEPS_AR: string[] = [
@@ -115,7 +118,7 @@ export const RULES_UPDATE_STEPS_AR: string[] = [
   '4. انتظر ثانيتين بعد النشر ثم عد هنا واضغط «إعادة فحص القواعد الآن» للتأكد من تفعيلها 100%.',
 ];
 
-const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v5_ok_';
+const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v6_ok_';
 
 export async function checkActiveDatabaseRulesCompliance(
   user: User,
@@ -1609,6 +1612,25 @@ async function collectSourceData(
     } catch {
       // Keep local snapshot
     }
+    try {
+      const metaOverrides = await loadMyQuizMetaOverrides(oldUid);
+      if (Object.keys(metaOverrides).length > 0) {
+        myQuizzes = myQuizzes.map((q) => {
+          const ov = metaOverrides[q.id];
+          if (!ov) return q;
+          return {
+            ...q,
+            parentQuizId: q.parentQuizId || ov.parentQuizId,
+            quizKind: q.quizKind || ov.quizKind,
+            drillStyle: q.drillStyle || ov.drillStyle,
+            sourceStarredId: q.sourceStarredId || ov.sourceStarredId,
+            ruleTitle: q.ruleTitle || ov.ruleTitle,
+          };
+        });
+      }
+    } catch {
+      // Non-fatal
+    }
   }
 
   let quizAttempts: QuizAttempt[] =
@@ -1880,27 +1902,60 @@ async function writePersonalCollectionsToDb(params: {
     const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
     const existingQuiz = await getDoc(quizRef);
     const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+    const metaFields: Record<string, unknown> = {
+      ...(quiz.parentQuizId ? { parentQuizId: String(quiz.parentQuizId).slice(0, 128) } : {}),
+      ...(quiz.quizKind === 'main' || quiz.quizKind === 'drill'
+        ? { quizKind: quiz.quizKind }
+        : {}),
+      ...(quiz.drillStyle === 'same_values' ||
+      quiz.drillStyle === 'same_law_ideas' ||
+      quiz.drillStyle === 'mixed'
+        ? { drillStyle: quiz.drillStyle }
+        : {}),
+      ...(quiz.sourceStarredId
+        ? { sourceStarredId: String(quiz.sourceStarredId).slice(0, 128) }
+        : {}),
+      ...(quiz.ruleTitle ? { ruleTitle: String(quiz.ruleTitle).slice(0, 120) } : {}),
+    };
+    const coreUpdatePayload = {
+      title: (quiz.title || 'اختبار').slice(0, 120),
+      questions,
+      questionCount: questions.length,
+      updatedAt: serverTimestamp(),
+    };
+    const coreCreatePayload = {
+      id: quiz.id,
+      ownerId: targetUid,
+      ...coreUpdatePayload,
+      createdAt: serverTimestamp(),
+    };
+
     if (existingQuiz.exists()) {
       // Always update existing quiz on target DB so edits/additions sync completely
-      await updateDoc(quizRef, {
-        title: (quiz.title || 'اختبار').slice(0, 120),
-        questions,
-        questionCount: questions.length,
-        updatedAt: serverTimestamp(),
-      });
+      try {
+        await updateDoc(quizRef, { ...coreUpdatePayload, ...metaFields });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/permission/i.test(msg) && Object.keys(metaFields).length > 0) {
+          await updateDoc(quizRef, coreUpdatePayload);
+        } else {
+          throw err;
+        }
+      }
       migratedMyQuizzesCount++;
       onItemDone?.('quiz', quiz.title);
       continue;
     }
-    await setDoc(quizRef, {
-      id: quiz.id,
-      ownerId: targetUid,
-      title: (quiz.title || 'اختبار').slice(0, 120),
-      questions,
-      questionCount: questions.length,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    try {
+      await setDoc(quizRef, { ...coreCreatePayload, ...metaFields });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/permission/i.test(msg) && Object.keys(metaFields).length > 0) {
+        await setDoc(quizRef, coreCreatePayload);
+      } else {
+        throw err;
+      }
+    }
     migratedMyQuizzesCount++;
     onItemDone?.('quiz', quiz.title);
   }
@@ -2544,6 +2599,26 @@ export async function runFirebaseMigration(params: {
           quizzes: source.myQuizzes,
           updatedAt: Date.now(),
         });
+        const metaById: Record<string, MyQuizMetaOverride> = {};
+        for (const mq of source.myQuizzes) {
+          if (mq.parentQuizId || mq.quizKind || mq.drillStyle || mq.sourceStarredId || mq.ruleTitle) {
+            metaById[mq.id] = {
+              ...(mq.parentQuizId ? { parentQuizId: mq.parentQuizId } : {}),
+              ...(mq.quizKind ? { quizKind: mq.quizKind } : {}),
+              ...(mq.drillStyle ? { drillStyle: mq.drillStyle } : {}),
+              ...(mq.sourceStarredId ? { sourceStarredId: mq.sourceStarredId } : {}),
+              ...(mq.ruleTitle ? { ruleTitle: mq.ruleTitle } : {}),
+            };
+          }
+        }
+        if (Object.keys(metaById).length > 0) {
+          await saveSessionSnapshot({
+            key: 'my_quizzes_meta',
+            ownerId: targetUid,
+            byQuizId: metaById,
+            updatedAt: Date.now(),
+          });
+        }
       }
       if (source.quizAttempts.length > 0) {
         await saveSessionSnapshot({

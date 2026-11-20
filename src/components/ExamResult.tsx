@@ -17,6 +17,7 @@ interface Props {
   finishedAt: number;
   onBack: () => void;
   onRetake: () => void;
+  onCreateDrill?: (question: ExamQuestion) => void;
 }
 
 export const ExamResult: React.FC<Props> = ({
@@ -30,6 +31,7 @@ export const ExamResult: React.FC<Props> = ({
   finishedAt,
   onBack,
   onRetake,
+  onCreateDrill,
 }) => {
   const [state, setState] = useState<'saving' | 'saved' | 'failed'>('saving');
   const [err, setErr] = useState<string | null>(null);
@@ -103,6 +105,7 @@ export const ExamResult: React.FC<Props> = ({
         score={score}
         total={questions.length}
         durationSec={durationSec}
+        onCreateDrill={onCreateDrill}
       />
 
       <div className="flex flex-wrap gap-2">

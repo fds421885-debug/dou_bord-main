@@ -12,6 +12,7 @@ interface Props {
   settings: ExamSettings;
   questions: ExamQuestion[];
   answers: number[];
+  tableAnswers?: Record<string, Record<string, string>>;
   durationSec: number;
   finishedAt: number;
   onBack: () => void;
@@ -24,6 +25,7 @@ export const ExamResult: React.FC<Props> = ({
   settings,
   questions,
   answers,
+  tableAnswers,
   durationSec,
   finishedAt,
   onBack,
@@ -33,13 +35,15 @@ export const ExamResult: React.FC<Props> = ({
   const [err, setErr] = useState<string | null>(null);
   const started = useRef(false);
 
-  const score = scoreExam(questions, answers);
+  const score = scoreExam(questions, answers, tableAnswers);
 
   const save = async () => {
     setState('saving');
     setErr(null);
     try {
-      await saveAttempt(buildAttempt(ownerId, attemptId, settings, questions, answers, durationSec, finishedAt));
+      await saveAttempt(
+        buildAttempt(ownerId, attemptId, settings, questions, answers, durationSec, finishedAt, tableAnswers)
+      );
       await deleteSessionSnapshot('exam_session');
       setState('saved');
     } catch (e) {
@@ -91,7 +95,15 @@ export const ExamResult: React.FC<Props> = ({
         </div>
       )}
 
-      <ExamReview questions={questions} answers={answers} score={score} total={questions.length} durationSec={durationSec} />
+      <ExamReview
+        ownerId={ownerId}
+        questions={questions}
+        answers={answers}
+        tableAnswers={tableAnswers}
+        score={score}
+        total={questions.length}
+        durationSec={durationSec}
+      />
 
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={onRetake} className="duo-btn flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-white text-sm font-black cursor-pointer">

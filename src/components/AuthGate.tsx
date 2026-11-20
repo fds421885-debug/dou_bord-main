@@ -39,6 +39,7 @@ interface AuthGateProps {
   profile: UserProfile | null;
   isProgrammer?: boolean;
   onOpenProgrammer?: () => void;
+  onOpenQuotaSelector?: () => void;
   onProfileSaved: (profile: UserProfile) => void;
   onQuotaDetected?: () => void;
 }
@@ -48,8 +49,24 @@ type AuthErrorKind =
   | 'auth_provider'
   | 'popup_blocked'
   | 'email_unverified'
+  | 'quota'
   | 'other'
   | null;
+
+async function withAuthTimeout<T>(promise: Promise<T>, ms = 4500): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('timeout')), ms);
+    promise
+      .then((val) => {
+        window.clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
 
 function classifyAuthOrFirestoreError(
   err: unknown,
@@ -61,8 +78,14 @@ function classifyAuthOrFirestoreError(
 
   if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
     return {
+      kind: 'quota',
+      message: 'امتلت الحصة المجانية لقاعدة البيانات الحالية — يمكنك التبديل الآن إلى قاعدة بيانات أخرى متاحة.',
+    };
+  }
+  if (lower === 'timeout') {
+    return {
       kind: 'other',
-      message: 'تم الوصول للحد الأقصى مؤقتاً، جاري التبديل تلقائياً لقاعدة بيانات بديلة...',
+      message: 'استغرق الاتصال بقاعدة البيانات وقتاً أطول من المعتاد. تحقق من اتصالك أو اختر قاعدة بديلة.',
     };
   }
   if (lower.includes('auth/unauthorized-domain')) {
@@ -135,6 +158,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   profile,
   isProgrammer = false,
   onOpenProgrammer,
+  onOpenQuotaSelector,
   onProfileSaved,
   onQuotaDetected,
 }) => {
@@ -231,20 +255,26 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     const profileRef = doc(db, 'users', firebaseUser.uid, 'private', 'profile');
 
     try {
-      const existingSnap = await getDoc(profileRef);
+      const existingSnap = await withAuthTimeout(getDoc(profileRef), 4000);
       if (existingSnap.exists()) {
-        await updateDoc(profileRef, {
-          fullNameQuad: cleaned,
-          updatedAt: serverTimestamp(),
-        });
+        await withAuthTimeout(
+          updateDoc(profileRef, {
+            fullNameQuad: cleaned,
+            updatedAt: serverTimestamp(),
+          }),
+          4000
+        );
       } else {
-        await setDoc(profileRef, {
-          uid: firebaseUser.uid,
-          fullNameQuad: cleaned,
-          email: firebaseUser.email || 'user@example.com',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+        await withAuthTimeout(
+          setDoc(profileRef, {
+            uid: firebaseUser.uid,
+            fullNameQuad: cleaned,
+            email: firebaseUser.email || 'user@example.com',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          }),
+          4000
+        );
       }
 
       try {
@@ -402,6 +432,17 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                       </a>
                     )}
 
+                    {errorKind === 'quota' && onOpenQuotaSelector && (
+                      <button
+                        type="button"
+                        onClick={onOpenQuotaSelector}
+                        className="duo-btn self-start flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>عرض قواعد البيانات وتفعيل قاعدة متاحة للجميع</span>
+                      </button>
+                    )}
+
                     {isCustomFirebaseConfig && (
                       <button
                         type="button"
@@ -469,9 +510,21 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </div>
 
                 {errorMsg && (
-                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
-                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                    <span>{errorMsg}</span>
+                  <div className="flex flex-col gap-2.5 p-3.5 rounded-xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-[#EA2B2B] text-sm font-bold">
+                    <div className="flex items-start gap-2.5">
+                      <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                      <span>{errorMsg}</span>
+                    </div>
+                    {errorKind === 'quota' && onOpenQuotaSelector && (
+                      <button
+                        type="button"
+                        onClick={onOpenQuotaSelector}
+                        className="duo-btn self-start flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>اختر قاعدة بيانات متاحة للجميع</span>
+                      </button>
+                    )}
                   </div>
                 )}
 

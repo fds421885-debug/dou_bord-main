@@ -1,29 +1,48 @@
-import React, { useState } from 'react';
-import { CheckCircle2, XCircle, MinusCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { CheckCircle2, MinusCircle, Star, XCircle } from 'lucide-react';
 import type { ExamQuestion } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
-import { formatDuration } from '../exam';
+import { QuestionTableView } from './QuestionTableView';
+import { RichExplanationView } from './RichExplanationView';
+import { formatDuration, isQuestionAnswered, isQuestionCorrect } from '../exam';
+import {
+  computeStarredQuestionId,
+  subscribeStarredQuestions,
+  toggleStarredQuestion,
+} from '../starredQuestions';
 
 const LETTERS = ['أ', 'ب', 'ج', 'د', 'هـ', 'و', 'ز', 'ح'];
 
 interface Props {
+  ownerId?: string;
   questions: ExamQuestion[];
   answers: number[];
+  tableAnswers?: Record<string, Record<string, string>>;
   score: number;
   total: number;
   durationSec: number;
 }
 
-export const ExamScoreCard: React.FC<Pick<Props, 'score' | 'total' | 'durationSec'>> = ({ score, total, durationSec }) => {
+export const ExamScoreCard: React.FC<Pick<Props, 'score' | 'total' | 'durationSec'>> = ({
+  score,
+  total,
+  durationSec,
+}) => {
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
   const tone =
-    pct >= 85 ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]' : pct >= 50 ? 'bg-[#FFF4CC] border-[#FFC800] text-[#8A6500]' : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]';
+    pct >= 85
+      ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+      : pct >= 50
+      ? 'bg-[#FFF4CC] border-[#FFC800] text-[#8A6500]'
+      : 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]';
   return (
     <div className={`rounded-3xl border-2 border-b-4 p-5 flex items-center justify-between gap-3 ${tone}`}>
       <div>
-        <div dir="ltr" className="text-3xl font-black font-latin text-right">{score} / {total}</div>
+        <div dir="ltr" className="text-3xl font-black font-latin text-right">
+          {score} / {total}
+        </div>
         <div className="text-xs font-extrabold">الدرجة {pct}%</div>
       </div>
       <div className="text-left text-xs font-extrabold">
@@ -34,9 +53,28 @@ export const ExamScoreCard: React.FC<Pick<Props, 'score' | 'total' | 'durationSe
   );
 };
 
-export const ExamReview: React.FC<Props> = ({ questions, answers, score, total, durationSec }) => {
+export const ExamReview: React.FC<Props> = ({
+  ownerId,
+  questions,
+  answers,
+  tableAnswers,
+  score,
+  total,
+  durationSec,
+}) => {
   const [onlyWrong, setOnlyWrong] = useState(false);
-  const wrongCount = questions.filter((q, i) => answers[i] !== q.correctIndex).length;
+  const [starredIds, setStarredIds] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    if (!ownerId) return;
+    return subscribeStarredQuestions(ownerId, (items) => {
+      setStarredIds(new Set(items.map((x) => x.id)));
+    });
+  }, [ownerId]);
+
+  const wrongCount = questions.filter(
+    (q, i) => !isQuestionCorrect(q, i, answers, tableAnswers)
+  ).length;
 
   return (
     <div className="flex flex-col gap-4" dir="rtl">
@@ -49,7 +87,9 @@ export const ExamReview: React.FC<Props> = ({ questions, answers, score, total, 
           onClick={() => setOnlyWrong((v) => !v)}
           disabled={wrongCount === 0}
           className={`px-3 py-1.5 rounded-xl border-2 text-xs font-black cursor-pointer disabled:opacity-40 ${
-            onlyWrong ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white' : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+            onlyWrong
+              ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
+              : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
           }`}
         >
           {onlyWrong ? 'عرض الكل' : `الأخطاء وغير المجاب فقط (${wrongCount})`}
@@ -58,55 +98,116 @@ export const ExamReview: React.FC<Props> = ({ questions, answers, score, total, 
 
       {questions.map((q, i) => {
         const chosen = answers[i] ?? -1;
-        const right = chosen === q.correctIndex;
+        const answered = isQuestionAnswered(q, i, answers, tableAnswers);
+        const right = isQuestionCorrect(q, i, answers, tableAnswers);
         if (onlyWrong && right) return null;
-        const Icon = right ? CheckCircle2 : chosen === -1 ? MinusCircle : XCircle;
-        const tone = right ? 'text-[#46A302]' : chosen === -1 ? 'text-[#777777]' : 'text-[#EA2B2B]';
+        const Icon = right ? CheckCircle2 : !answered ? MinusCircle : XCircle;
+        const tone = right ? 'text-[#46A302]' : !answered ? 'text-[#777777]' : 'text-[#EA2B2B]';
+        const isTable = q.questionType === 'table' || Boolean(q.table);
+        const qStarId = computeStarredQuestionId(q);
+        const isStarred = starredIds.has(qStarId);
+
         return (
-          <div key={q.id + i} className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">السؤال {i + 1}</span>
-              <span className={`flex items-center gap-1 text-xs font-black ${tone}`}>
-                <Icon className="w-4 h-4" />
-                {right ? 'صحيحة' : chosen === -1 ? 'بلا إجابة' : 'خاطئة'}
-              </span>
+          <div
+            key={q.id + i}
+            className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">
+                  السؤال {i + 1}
+                </span>
+                <span className={`flex items-center gap-1 text-xs font-black ${tone}`}>
+                  <Icon className="w-4 h-4" />
+                  {right ? 'صحيحة' : !answered ? 'بلا إجابة' : 'خاطئة'}
+                </span>
+              </div>
+
+              {ownerId && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await toggleStarredQuestion({
+                      ownerId,
+                      question: q,
+                      currentlyStarred: isStarred,
+                      sourceQuizId: q.sourceQuizId,
+                      sourceTitle: q.sourceTitle,
+                    });
+                    setStarredIds((prev) => {
+                      const next = new Set(prev);
+                      if (res.starred) next.add(res.id);
+                      else next.delete(res.id);
+                      return next;
+                    });
+                  }}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-xl border-2 text-[11px] font-black cursor-pointer ${
+                    isStarred
+                      ? 'bg-[#FFF4CC] border-[#FFC800] text-[#9A6B00]'
+                      : 'bg-white border-[#E5E5E5] text-[#777777] hover:border-[#FFC800]'
+                  }`}
+                >
+                  <Star
+                    className={`w-3.5 h-3.5 ${isStarred ? 'fill-[#FFC800] text-[#E5A400]' : ''}`}
+                  />
+                  <span>{isStarred ? 'مميز ★' : 'تمييز'}</span>
+                </button>
+              )}
             </div>
-            {q.sourceTitle && <div className="text-[10px] font-extrabold text-[#777777]">من: {q.sourceTitle}</div>}
+
+            {q.sourceTitle && (
+              <div className="text-[10px] font-extrabold text-[#777777]">من: {q.sourceTitle}</div>
+            )}
             <MathText text={q.text} className="text-sm font-black text-[#3C3C3C]" />
             {q.chart && <ChartView chart={q.chart} />}
             {q.figure && <FigureView figure={q.figure} />}
-            <div className="flex flex-col gap-1.5">
-              {q.choices.map((c, ci) => {
-                const isCorrect = ci === q.correctIndex;
-                const isWrongPick = ci === chosen && !isCorrect;
-                return (
-                  <div
-                    key={ci}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
-                      isCorrect
-                        ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
-                        : isWrongPick
-                        ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
-                        : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
-                    }`}
-                  >
-                    <span className="w-6 h-6 shrink-0 rounded-full bg-white/70 border border-current text-[11px] font-black flex items-center justify-center">
-                      {LETTERS[ci] ?? ci + 1}
-                    </span>
-                    <MathText text={c} className="flex-1" />
-                    {isCorrect && <span className="text-[10px] font-black">الصحيحة</span>}
-                    {isWrongPick && <span className="text-[10px] font-black">إجابتك</span>}
-                  </div>
-                );
-              })}
-            </div>
-            {(q.explanation || q.explanationChart || q.explanationFigure) && (
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
-                <span className="font-black text-[#777777] text-[11px]">شرح الإجابة:</span>
-                {q.explanation && <MathText text={q.explanation} />}
-                {q.explanationChart && <ChartView chart={q.explanationChart} />}
-                {q.explanationFigure && <FigureView figure={q.explanationFigure} />}
+
+            {isTable && q.table ? (
+              <QuestionTableView
+                table={q.table}
+                mode="review"
+                answers={tableAnswers?.[String(i)] ?? {}}
+              />
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {q.choices.map((c, ci) => {
+                  const isCorrect = ci === q.correctIndex;
+                  const isWrongPick = ci === chosen && !isCorrect;
+                  return (
+                    <div
+                      key={ci}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                        isCorrect
+                          ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                          : isWrongPick
+                          ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                          : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                      }`}
+                    >
+                      <span className="w-6 h-6 shrink-0 rounded-full bg-white/70 border border-current text-[11px] font-black flex items-center justify-center">
+                        {LETTERS[ci] ?? ci + 1}
+                      </span>
+                      <MathText text={c} className="flex-1" />
+                      {isCorrect && <span className="text-[10px] font-black">الصحيحة</span>}
+                      {isWrongPick && <span className="text-[10px] font-black">إجابتك</span>}
+                    </div>
+                  );
+                })}
               </div>
+            )}
+
+            {(q.explanation ||
+              q.explanationTable ||
+              q.explanationComparison ||
+              q.explanationChart ||
+              q.explanationFigure) && (
+              <RichExplanationView
+                explanation={q.explanation}
+                explanationTable={q.explanationTable}
+                explanationComparison={q.explanationComparison}
+                explanationChart={q.explanationChart}
+                explanationFigure={q.explanationFigure}
+              />
             )}
           </div>
         );

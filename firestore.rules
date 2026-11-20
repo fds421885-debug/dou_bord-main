@@ -158,7 +158,8 @@ service cloud.firestore {
           'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'figure', 'sourceQuizTitle',
+          'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'figure',
+          'questionType', 'table', 'explanationTable', 'explanationComparison', 'sourceQuizTitle',
           'status', 'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds',
           'createdAt', 'updatedAt'
         ])
@@ -174,6 +175,10 @@ service cloud.firestore {
         ))
         && (!('chart' in data) || data.chart is map)
         && (!('figure' in data) || data.figure is map)
+        && (!('questionType' in data) || data.questionType in ['mcq', 'table'])
+        && (!('table' in data) || data.table is map)
+        && (!('explanationTable' in data) || data.explanationTable is map)
+        && (!('explanationComparison' in data) || data.explanationComparison is map)
         && (!('sourceQuizTitle' in data) || (data.sourceQuizTitle is string && data.sourceQuizTitle.size() <= 120))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.attemptsUsed is int && data.attemptsUsed >= 0 && data.attemptsUsed <= 2
@@ -213,7 +218,7 @@ service cloud.firestore {
           'score', 'total', 'durationSec', 'finishedAt', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerId', 'title', 'settings', 'questions', 'answers',
+          'id', 'ownerId', 'title', 'settings', 'questions', 'answers', 'tableAnswers',
           'score', 'total', 'durationSec', 'finishedAt', 'createdAt'
         ])
         && isValidId(data.id)
@@ -222,11 +227,29 @@ service cloud.firestore {
         && data.settings is map
         && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
         && data.answers is list && data.answers.size() == data.questions.size()
+        && (!('tableAnswers' in data) || data.tableAnswers is map)
         && data.score is int && data.score >= 0
         && data.total is int && data.total >= 1 && data.total <= 100
         && data.score <= data.total
         && data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 172800
         && data.finishedAt is int && data.finishedAt > 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidStarredQuestion(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'question', 'starredAt', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'sourceQuizId', 'sourceTitle', 'question', 'starredAt', 'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && (!('sourceQuizId' in data) || (data.sourceQuizId is string && data.sourceQuizId.size() <= 120))
+        && (!('sourceTitle' in data) || (data.sourceTitle is string && data.sourceTitle.size() <= 160))
+        && data.question is map
+        && data.starredAt is int && data.starredAt > 0
         && data.createdAt is timestamp;
     }
 
@@ -277,7 +300,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'ownerId', 'orderIndex', 'text', 'imageData',
-          'choices', 'correctIndex', 'explanation', 'chart', 'figure', 'explanationChart', 'explanationFigure', 'winnerTimeMs',
+          'choices', 'correctIndex', 'explanation', 'chart', 'figure', 'explanationChart', 'explanationFigure',
+          'questionType', 'table', 'explanationTable', 'explanationComparison', 'winnerTimeMs',
           'status', 'winnerName', 'boards', 'createdAt'
         ])
         && isValidId(data.id)
@@ -293,6 +317,10 @@ service cloud.firestore {
         && (!('figure' in data) || data.figure is map)
         && (!('explanationChart' in data) || data.explanationChart is map)
         && (!('explanationFigure' in data) || data.explanationFigure is map)
+        && (!('questionType' in data) || data.questionType in ['mcq', 'table'])
+        && (!('table' in data) || data.table is map)
+        && (!('explanationTable' in data) || data.explanationTable is map)
+        && (!('explanationComparison' in data) || data.explanationComparison is map)
         && (!('winnerTimeMs' in data) || (data.winnerTimeMs is int && data.winnerTimeMs >= 0 && data.winnerTimeMs <= 172800000))
         && data.status in ['solving', 'correct', 'unanswered']
         && data.winnerName is string && data.winnerName.size() <= 120
@@ -513,6 +541,21 @@ service cloud.firestore {
         && incoming().createdAt == request.time;
       allow update: if false;
       allow delete: if isValidId(userId) && isValidId(attemptId) && isOwner(userId);
+    }
+
+    match /users/{userId}/starredQuestions/{starredId} {
+      allow get: if isValidId(userId) && isValidId(starredId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(starredId) && isOwner(userId)
+        && isValidStarredQuestion(incoming())
+        && incoming().id == starredId
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(userId) && isValidId(starredId) && isOwner(userId)
+        && isValidStarredQuestion(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(userId) && isValidId(starredId) && isOwner(userId);
     }
 
     match /users/{userId}/myQuizzes/{quizId} {

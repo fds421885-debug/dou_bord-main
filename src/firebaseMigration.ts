@@ -24,6 +24,11 @@ import {
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
+  sanitizeExplanationComparison,
+  sanitizeExplanationTable,
+  sanitizeTableQuestion,
+} from './quizTable';
+import {
   activateCustomFirebaseConfig,
   activeFirebaseConfig,
   auth as sourceAuth,
@@ -66,6 +71,7 @@ import {
   type StoredQuizAttemptsSnapshot,
   type StoredRoomSnapshot,
   type StoredSavedTestsSnapshot,
+  type StoredStarredQuestionsSnapshot,
   type StoredUserProfileSnapshot,
 } from './localDraftStore';
 import type {
@@ -89,9 +95,95 @@ import type {
   SharedExplainBoard,
   SharedQuiz,
   SlideLayer,
+  StarredQuestion,
   StudentBoard,
   UserProfile,
 } from './types';
+
+export const REQUIRED_RULES_VERSION = 'v5_tables_starred_2026_11_19';
+
+export const RULES_UPDATE_CHANGES_AR: string[] = [
+  'دعم حفظ واسترجاع صيغة «الأسئلة التفاعلية بالجداول» (table) وحقول الشرح المتقدم (explanationTable, explanationComparison).',
+  'إضافة صلاحية حفظ إجابات الطالب في الجداول (tableAnswers) داخل سجل محاولات الاختبار (quizAttempts).',
+  'إضافة مسار «الأسئلة المميزة ⭐» الخاص بكل طالب (/users/{uid}/starredQuestions/{starredId}) للقراءة والكتابة والحذف بأمان.',
+];
+
+export const RULES_UPDATE_STEPS_AR: string[] = [
+  '1. اضغط على زر «نسخ firestore.rules المحدّثة» بالأسفل لنسخ ملف القواعد الجديد بالكامل.',
+  '2. اضغط على رابط «فتح Rules في Firebase Console» للمشروع الحالي (ولكل قاعدة بيانات مسجلة لديك).',
+  '3. احذف القواعد القديمة بالكامل داخل محرر Firebase Rules، ثم ألصق القواعد الجديدة واضغط على زر Publish.',
+  '4. انتظر ثانيتين بعد النشر ثم عد هنا واضغط «إعادة فحص القواعد الآن» للتأكد من تفعيلها 100%.',
+];
+
+const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v5_ok_';
+
+export async function checkActiveDatabaseRulesCompliance(
+  user: User,
+  config: FirebaseAppConfig = activeFirebaseConfig,
+  bypassCache = false
+): Promise<{
+  compliant: boolean;
+  checkedProjectId: string;
+  checkedDbId: string;
+  reason?: string;
+}> {
+  const cleanCfg = sanitizeFirebaseConfig(config) || activeFirebaseConfig;
+  const projectId = cleanCfg.projectId;
+  const dbSegment = cleanCfg.firestoreDatabaseId?.trim() || '(default)';
+  const cacheKey = `${RULES_COMPLIANCE_SESSION_PREFIX}${projectId}__${dbSegment}`;
+
+  if (!bypassCache && typeof sessionStorage !== 'undefined') {
+    try {
+      if (sessionStorage.getItem(cacheKey) === REQUIRED_RULES_VERSION) {
+        return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  try {
+    const idToken = await withTimeout(user.getIdToken(false), 3500);
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(dbSegment)}/documents/users/${encodeURIComponent(
+      user.uid
+    )}/starredQuestions/rules_v5_check?key=${encodeURIComponent(cleanCfg.apiKey)}`;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
+    window.clearTimeout(timer);
+
+    if (resp.status === 403) {
+      return {
+        compliant: false,
+        checkedProjectId: projectId,
+        checkedDbId: dbSegment,
+        reason: 'تم رفض الوصول لمسار starredQuestions (403) — قواعد الأمان بحاجة إلى تحديث ونشر في Firebase Console.',
+      };
+    }
+
+    if (resp.ok || resp.status === 404) {
+      try {
+        sessionStorage.setItem(cacheKey, REQUIRED_RULES_VERSION);
+      } catch {
+        // Ignore storage errors
+      }
+      return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
+    }
+  } catch {
+    // Offline or transient network issue -> avoid false alarm
+  }
+
+  return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
+}
 
 export interface MigrationProgress {
   step:
@@ -705,53 +797,63 @@ export async function verifyDatabaseBeforeAdd(params: {
     const probeDocId = `verify_probe_${Date.now()}`;
     const probePath = `/users/${encodeURIComponent(currentUser.uid)}/private/${probeDocId}`;
     const profilePath = `/users/${encodeURIComponent(currentUser.uid)}/private/profile`;
+    const starredCheckPath = `/users/${encodeURIComponent(
+      currentUser.uid
+    )}/starredQuestions/rules_v5_check`;
 
-    const [rogueResp, roomReadResp, migrationReadResp, createProbeResp, existingProfileResp] =
-      await Promise.all([
-        firestoreRestRequest(':commit', {
-          method: 'POST',
-          body: JSON.stringify({
-            writes: [
-              {
-                update: {
-                  name: `${firestoreDbDocPrefix}/platform/rules_probe_check`,
-                  fields: {
-                    probe: { booleanValue: true },
-                    ts: { integerValue: String(Date.now()) },
-                  },
+    const [
+      rogueResp,
+      roomReadResp,
+      migrationReadResp,
+      createProbeResp,
+      starredReadResp,
+      existingProfileResp,
+    ] = await Promise.all([
+      firestoreRestRequest(':commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: `${firestoreDbDocPrefix}/platform/rules_probe_check`,
+                fields: {
+                  probe: { booleanValue: true },
+                  ts: { integerValue: String(Date.now()) },
                 },
               },
-            ],
-          }),
+            },
+          ],
         }),
-        firestoreRestRequest('/rooms/verify_probe_room_check', { method: 'GET' }),
-        firestoreRestRequest('/platform/migration', { method: 'GET' }),
-        firestoreRestRequest(':commit', {
-          method: 'POST',
-          body: JSON.stringify({
-            writes: [
-              {
-                currentDocument: { exists: false },
-                update: {
-                  name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/${probeDocId}`,
-                  fields: {
-                    uid: { stringValue: currentUser.uid },
-                    fullNameQuad: { stringValue: quadCandidate },
-                    email: { stringValue: emailCandidate },
-                  },
+      }),
+      firestoreRestRequest('/rooms/verify_probe_room_check', { method: 'GET' }),
+      firestoreRestRequest('/platform/migration', { method: 'GET' }),
+      firestoreRestRequest(':commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          writes: [
+            {
+              currentDocument: { exists: false },
+              update: {
+                name: `${firestoreDbDocPrefix}/users/${currentUser.uid}/private/${probeDocId}`,
+                fields: {
+                  uid: { stringValue: currentUser.uid },
+                  fullNameQuad: { stringValue: quadCandidate },
+                  email: { stringValue: emailCandidate },
                 },
-                updateTransforms: [
-                  { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
-                  { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
-                ],
               },
-            ],
-          }),
+              updateTransforms: [
+                { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+              ],
+            },
+          ],
         }),
-        role === 'player'
-          ? firestoreRestRequest(profilePath, { method: 'GET' })
-          : Promise.resolve(null),
-      ]);
+      }),
+      firestoreRestRequest(starredCheckPath, { method: 'GET' }),
+      role === 'player'
+        ? firestoreRestRequest(profilePath, { method: 'GET' })
+        : Promise.resolve(null),
+    ]);
 
     // Check 4A negative probe
     if (rogueResp.ok) {
@@ -841,6 +943,17 @@ export async function verifyDatabaseBeforeAdd(params: {
           : `فشل اختبار كتابة الملف الشخصي (${createProbeResp.status}): ${createErr || createProbeResp.statusText}`,
         fixHint:
           'اضغط "نسخ firestore.rules" وتأكد من استبدال النص كاملاً داخل Rules ثم اضغط Publish.',
+      };
+    }
+
+    // Check 4D latest v5 rules compliance (starredQuestions + tableAnswers + table fields)
+    if (role === 'player' && starredReadResp.status === 403) {
+      return {
+        ok: false,
+        retryablePropagation: true,
+        detail: `قاعدة ${projectId} (${dbSegment}) تستخدم نسخة قديمة من firestore.rules لا تدعم «الأسئلة المميزة ⭐» وجداول الاختبارات المحدّثة!`,
+        fixHint:
+          'اضغط «نسخ firestore.rules» بالأسفل لاستبدال القواعد القديمة في Firebase Console -> Firestore -> Rules ثم اضغط Publish وأعد الفحص.',
       };
     }
 
@@ -1010,18 +1123,27 @@ interface CollectedSourceData {
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
   myQuizzes: MyQuiz[];
   quizAttempts: QuizAttempt[];
+  starredQuestions: StarredQuestion[];
 }
 
 function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<string, unknown> {
   const chart = q.chart ? sanitizeChart(q.chart) : null;
   const figure = q.figure ? sanitizeFigure(q.figure) : null;
+  const table = q.table ? sanitizeTableQuestion(q.table) : null;
   const expChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
   const expFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
+  const expTable = q.explanationTable ? sanitizeExplanationTable(q.explanationTable) : null;
+  const expComp = q.explanationComparison
+    ? sanitizeExplanationComparison(q.explanationComparison)
+    : null;
   return {
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
+    ...(table ? { questionType: 'table', table } : {}),
     ...(expChart ? { explanationChart: expChart } : {}),
     ...(expFigure ? { explanationFigure: expFigure } : {}),
+    ...(expTable ? { explanationTable: expTable } : {}),
+    ...(expComp ? { explanationComparison: expComp } : {}),
     id: String(q.id || '').slice(0, 64) || `q_${Math.random().toString(36).slice(2, 10)}`,
     text: String(q.text || '').slice(0, 2000),
     choices: Array.isArray(q.choices)
@@ -1029,7 +1151,25 @@ function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<s
       : [],
     correctIndex: Number.isInteger(q.correctIndex) ? q.correctIndex : -1,
     answer: String(q.answer || '').slice(0, 1000),
-    explanation: String(q.explanation || '').slice(0, 2000),
+    explanation: String(q.explanation || '').slice(0, 4000),
+  };
+}
+
+function cleanStarredQuestionForFirestore(
+  item: StarredQuestion,
+  ownerUid: string
+): Record<string, unknown> {
+  const baseQ = cleanQuizQuestionForFirestore(item.question);
+  return {
+    id: String(item.id || '').slice(0, 128),
+    ownerId: ownerUid,
+    ...(item.sourceQuizId ? { sourceQuizId: String(item.sourceQuizId).slice(0, 120) } : {}),
+    ...(item.sourceTitle ? { sourceTitle: String(item.sourceTitle).slice(0, 160) } : {}),
+    question: baseQ,
+    starredAt:
+      Number.isFinite(Number(item.starredAt)) && Number(item.starredAt) > 0
+        ? Math.round(Number(item.starredAt))
+        : Date.now(),
   };
 }
 
@@ -1039,8 +1179,13 @@ function cleanSavedQuestionForFirestore(
 ): Record<string, unknown> {
   const chart = sq.chart ? sanitizeChart(sq.chart) : null;
   const figure = sq.figure ? sanitizeFigure(sq.figure) : null;
+  const table = sq.table ? sanitizeTableQuestion(sq.table) : null;
   const expChart = sq.explanationChart ? sanitizeChart(sq.explanationChart) : null;
   const expFigure = sq.explanationFigure ? sanitizeFigure(sq.explanationFigure) : null;
+  const expTable = sq.explanationTable ? sanitizeExplanationTable(sq.explanationTable) : null;
+  const expComp = sq.explanationComparison
+    ? sanitizeExplanationComparison(sq.explanationComparison)
+    : null;
 
   return {
     id: sq.id,
@@ -1054,11 +1199,14 @@ function cleanSavedQuestionForFirestore(
     ...(typeof sq.correctIndex === 'number' && Number.isInteger(sq.correctIndex)
       ? { correctIndex: Math.max(-1, Math.min(7, sq.correctIndex)) }
       : {}),
-    ...(sq.explanation ? { explanation: String(sq.explanation).slice(0, 2000) } : {}),
+    ...(sq.explanation ? { explanation: String(sq.explanation).slice(0, 4000) } : {}),
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
+    ...(table ? { questionType: 'table', table } : {}),
     ...(expChart ? { explanationChart: expChart } : {}),
     ...(expFigure ? { explanationFigure: expFigure } : {}),
+    ...(expTable ? { explanationTable: expTable } : {}),
+    ...(expComp ? { explanationComparison: expComp } : {}),
     ...(typeof sq.winnerTimeMs === 'number' && Number.isFinite(sq.winnerTimeMs)
       ? { winnerTimeMs: Math.max(0, Math.min(172800000, Math.round(sq.winnerTimeMs))) }
       : {}),
@@ -1316,6 +1464,7 @@ async function collectSourceData(
   const cachedSaved = await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
   const cachedQuizzes = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
   const cachedAttempts = await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
+  const cachedStarred = await loadSessionSnapshot<StoredStarredQuestionsSnapshot>('starred_questions');
 
   let fallbackQuad = '';
   try {
@@ -1482,6 +1631,29 @@ async function collectSourceData(
     }
   }
 
+  let starredQuestions: StarredQuestion[] =
+    cachedStarred && (!oldUid || cachedStarred.ownerId === oldUid) ? cachedStarred.items : [];
+  if (oldUid) {
+    try {
+      const starSnap = await withTimeout(
+        getDocs(
+          query(
+            collection(fromDb, 'users', oldUid, 'starredQuestions'),
+            where('ownerId', '==', oldUid)
+          )
+        ),
+        7000
+      );
+      const live: StarredQuestion[] = [];
+      starSnap.forEach((d) => live.push(d.data() as StarredQuestion));
+      if (live.length > 0) {
+        starredQuestions = live;
+      }
+    } catch {
+      // Keep local snapshot (also safe if source DB has older rules without starredQuestions)
+    }
+  }
+
   return {
     oldUid,
     profile,
@@ -1491,6 +1663,7 @@ async function collectSourceData(
     savedQuestionsByTestId,
     myQuizzes,
     quizAttempts,
+    starredQuestions,
   };
 }
 
@@ -1600,11 +1773,13 @@ async function writePersonalCollectionsToDb(params: {
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
   myQuizzes: MyQuiz[];
   quizAttempts: QuizAttempt[];
-  onItemDone?: (kind: 'saved' | 'quiz' | 'attempt', label: string) => void;
+  starredQuestions?: StarredQuestion[];
+  onItemDone?: (kind: 'saved' | 'quiz' | 'attempt' | 'starred', label: string) => void;
 }): Promise<{
   migratedSavedTestsCount: number;
   migratedMyQuizzesCount: number;
   migratedAttemptsCount: number;
+  migratedStarredCount: number;
 }> {
   const {
     targetDb,
@@ -1613,6 +1788,7 @@ async function writePersonalCollectionsToDb(params: {
     savedQuestionsByTestId,
     myQuizzes,
     quizAttempts,
+    starredQuestions = [],
     onItemDone,
   } = params;
 
@@ -1753,20 +1929,25 @@ async function writePersonalCollectionsToDb(params: {
       };
     });
     const answers = qs.map((_, i) => (Number.isInteger(at.answers?.[i]) ? at.answers[i] : -1));
+    const tableAnswers =
+      at.tableAnswers && typeof at.tableAnswers === 'object' ? at.tableAnswers : undefined;
     const score = Math.min(
       qs.length,
       Math.max(
         0,
-        qs.reduce((n, q, i) => n + (answers[i] === Number(q.correctIndex) ? 1 : 0), 0)
+        Number.isFinite(Number(at.score))
+          ? Math.round(Number(at.score))
+          : qs.reduce((n, q, i) => n + (answers[i] === Number(q.correctIndex) ? 1 : 0), 0)
       )
     );
-    await setDoc(atRef, {
+    const attemptPayload: Record<string, unknown> = {
       id: at.id,
       ownerId: targetUid,
       title: String(at.title || 'اختبار').slice(0, 200),
       settings: at.settings && typeof at.settings === 'object' ? at.settings : {},
       questions: qs,
       answers,
+      ...(tableAnswers && Object.keys(tableAnswers).length > 0 ? { tableAnswers } : {}),
       score,
       total: qs.length,
       durationSec: Math.max(0, Math.min(172800, Math.round(Number(at.durationSec) || 0))),
@@ -1775,15 +1956,43 @@ async function writePersonalCollectionsToDb(params: {
           ? Math.round(Number(at.finishedAt))
           : Date.now(),
       createdAt: serverTimestamp(),
-    });
+    };
+    try {
+      await setDoc(atRef, attemptPayload);
+    } catch (err) {
+      if (attemptPayload.tableAnswers) {
+        const retryPayload = { ...attemptPayload };
+        delete retryPayload.tableAnswers;
+        await setDoc(atRef, retryPayload);
+      } else {
+        throw err;
+      }
+    }
     migratedAttemptsCount++;
     onItemDone?.('attempt', at.title);
+  }
+
+  let migratedStarredCount = 0;
+  for (const st of starredQuestions) {
+    if (!st?.id || !st?.question) continue;
+    try {
+      const stRef = doc(targetDb, 'users', targetUid, 'starredQuestions', st.id);
+      const existingSt = await getDoc(stRef);
+      if (!existingSt.exists()) {
+        await setDoc(stRef, cleanStarredQuestionForFirestore(st, targetUid));
+      }
+      migratedStarredCount++;
+      onItemDone?.('starred', st.sourceTitle || 'سؤال مميز');
+    } catch {
+      // Isolated fallback in case target DB hasn't updated rules yet
+    }
   }
 
   return {
     migratedSavedTestsCount,
     migratedMyQuizzesCount,
     migratedAttemptsCount,
+    migratedStarredCount,
   };
 }
 
@@ -1825,6 +2034,7 @@ async function cleanupMigratedPersonalDocsOnDb(params: {
   savedQuestionsByTestId: Record<string, SavedQuestion[]>;
   myQuizzes: MyQuiz[];
   quizAttempts: QuizAttempt[];
+  starredQuestions?: StarredQuestion[];
   deleteProfile?: boolean;
 }): Promise<number> {
   const {
@@ -1834,6 +2044,7 @@ async function cleanupMigratedPersonalDocsOnDb(params: {
     savedQuestionsByTestId,
     myQuizzes,
     quizAttempts,
+    starredQuestions = [],
     deleteProfile = true,
   } = params;
 
@@ -1850,6 +2061,9 @@ async function cleanupMigratedPersonalDocsOnDb(params: {
   }
   for (const at of quizAttempts) {
     refs.push(doc(srcDb, 'users', oldUid, 'quizAttempts', at.id));
+  }
+  for (const st of starredQuestions) {
+    refs.push(doc(srcDb, 'users', oldUid, 'starredQuestions', st.id));
   }
   if (deleteProfile) {
     refs.push(doc(srcDb, 'users', oldUid, 'private', 'profile'));
@@ -2195,6 +2409,7 @@ export async function runFirebaseMigration(params: {
   };
   const mergedMyQuizzesMap = new Map<string, MyQuiz>();
   const mergedAttemptsMap = new Map<string, QuizAttempt>();
+  const mergedStarredMap = new Map<string, StarredQuestion>();
 
   for (const bundle of [primaryCollected, ...extraCollections]) {
     for (const r of bundle.rooms) {
@@ -2228,6 +2443,11 @@ export async function runFirebaseMigration(params: {
         mergedAttemptsMap.set(at.id, at);
       }
     }
+    for (const sq of bundle.starredQuestions ?? []) {
+      if (!mergedStarredMap.has(sq.id)) {
+        mergedStarredMap.set(sq.id, sq);
+      }
+    }
   }
 
   const source: CollectedSourceData = {
@@ -2242,6 +2462,7 @@ export async function runFirebaseMigration(params: {
     savedQuestionsByTestId: mergedSavedQuestionsMap,
     myQuizzes: Array.from(mergedMyQuizzesMap.values()),
     quizAttempts: Array.from(mergedAttemptsMap.values()),
+    starredQuestions: Array.from(mergedStarredMap.values()),
   };
   const mergedSourceDbsCount = Math.max(1, sourceHandles.length);
   const allOldUids = Array.from(
@@ -2329,6 +2550,14 @@ export async function runFirebaseMigration(params: {
           key: 'quiz_attempts',
           ownerId: targetUid,
           attempts: source.quizAttempts,
+          updatedAt: Date.now(),
+        });
+      }
+      if (source.starredQuestions.length > 0) {
+        await saveSessionSnapshot({
+          key: 'starred_questions',
+          ownerId: targetUid,
+          items: source.starredQuestions,
           updatedAt: Date.now(),
         });
       }
@@ -2578,6 +2807,7 @@ export async function runFirebaseMigration(params: {
             if (!qSnap.exists()) {
               const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
               const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
+              const sanitizedTable = q.table ? sanitizeTableQuestion(q.table) : null;
               const sanitizedChoices =
                 Array.isArray(q.choices) && q.choices.length > 0
                   ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
@@ -2591,6 +2821,7 @@ export async function runFirebaseMigration(params: {
                 ...(sanitizedChoices ? { choices: sanitizedChoices } : {}),
                 ...(sanitizedChart ? { chart: sanitizedChart } : {}),
                 ...(sanitizedFigure ? { figure: sanitizedFigure } : {}),
+                ...(sanitizedTable ? { questionType: 'table', table: sanitizedTable } : {}),
                 ...(q.sourceQuizTitle
                   ? { sourceQuizTitle: String(q.sourceQuizTitle).slice(0, 120) }
                   : {}),
@@ -2986,6 +3217,7 @@ export async function runFirebaseMigration(params: {
         savedQuestionsByTestId: source.savedQuestionsByTestId,
         myQuizzes: source.myQuizzes,
         quizAttempts: source.quizAttempts,
+        starredQuestions: source.starredQuestions,
         onItemDone: (kind, label) => {
           completedUnits++;
           const step =
@@ -2999,6 +3231,8 @@ export async function runFirebaseMigration(params: {
               ? 'جاري نقل وتحديث أرشيف الاختبارات المحفوظة...'
               : kind === 'quiz'
               ? 'جاري نقل وتحديث نماذج «اختباراتي»...'
+              : kind === 'starred'
+              ? 'جاري نقل الأسئلة المميزة ⭐...'
               : 'جاري نقل سجل المحاولات والتقارير...';
           onProgress({
             step,
@@ -3270,6 +3504,7 @@ export async function runFirebaseMigration(params: {
               savedQuestionsByTestId: handle.collected.savedQuestionsByTestId,
               myQuizzes: handle.collected.myQuizzes,
               quizAttempts: handle.collected.quizAttempts,
+              starredQuestions: handle.collected.starredQuestions,
               deleteProfile: true,
             });
           })
@@ -3423,17 +3658,20 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         savedQuestionsByTestId: srcData.savedQuestionsByTestId,
         myQuizzes: srcData.myQuizzes,
         quizAttempts: srcData.quizAttempts,
+        starredQuestions: srcData.starredQuestions,
       });
 
       totalSyncedItems +=
         counts.migratedSavedTestsCount +
         counts.migratedMyQuizzesCount +
-        counts.migratedAttemptsCount;
+        counts.migratedAttemptsCount +
+        counts.migratedStarredCount;
 
       if (
         counts.migratedSavedTestsCount > 0 ||
         counts.migratedMyQuizzesCount > 0 ||
         counts.migratedAttemptsCount > 0 ||
+        counts.migratedStarredCount > 0 ||
         srcData.profile
       ) {
         await cleanupMigratedPersonalDocsOnDb({
@@ -3443,6 +3681,7 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
           savedQuestionsByTestId: srcData.savedQuestionsByTestId,
           myQuizzes: srcData.myQuizzes,
           quizAttempts: srcData.quizAttempts,
+          starredQuestions: srcData.starredQuestions,
           deleteProfile: true,
         });
       }
@@ -3464,6 +3703,8 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
       const cachedQuizzes = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
       const cachedAttempts =
         await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
+      const cachedStarred =
+        await loadSessionSnapshot<StoredStarredQuestionsSnapshot>('starred_questions');
 
       const counts = await writePersonalCollectionsToDb({
         targetDb: sourceDb,
@@ -3472,11 +3713,13 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         savedQuestionsByTestId: cachedSaved?.questionsByTestId ?? {},
         myQuizzes: cachedQuizzes?.quizzes ?? [],
         quizAttempts: cachedAttempts?.attempts ?? [],
+        starredQuestions: cachedStarred?.items ?? [],
       });
       totalSyncedItems +=
         counts.migratedSavedTestsCount +
         counts.migratedMyQuizzesCount +
-        counts.migratedAttemptsCount;
+        counts.migratedAttemptsCount +
+        counts.migratedStarredCount;
     } catch {
       // Non-fatal
     }
@@ -3555,6 +3798,7 @@ export async function restoreActiveSupervisorRoomFromSnapshot(params: {
     for (const q of cachedRoom.questions) {
       const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
       const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
+      const sanitizedTable = q.table ? sanitizeTableQuestion(q.table) : null;
       const sanitizedChoices =
         Array.isArray(q.choices) && q.choices.length > 0
           ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
@@ -3568,6 +3812,7 @@ export async function restoreActiveSupervisorRoomFromSnapshot(params: {
         ...(sanitizedChoices ? { choices: sanitizedChoices } : {}),
         ...(sanitizedChart ? { chart: sanitizedChart } : {}),
         ...(sanitizedFigure ? { figure: sanitizedFigure } : {}),
+        ...(sanitizedTable ? { questionType: 'table', table: sanitizedTable } : {}),
         ...(q.sourceQuizTitle
           ? { sourceQuizTitle: String(q.sourceQuizTitle).slice(0, 120) }
           : {}),
@@ -4774,6 +5019,58 @@ export async function removeProgrammerMember(
   saveLocalRegistryState(next);
   await writeFirestoreRegistryDoc(sourceDb, next, user.uid, fullNameQuad || MASTER_PROGRAMMER_NAME);
   return { ok: true, state: next };
+}
+
+export async function writePlatformMigrationPointer(params: {
+  targetDb: Firestore;
+  uid: string;
+  displayName?: string;
+  targetConfig: FirebaseAppConfig;
+  previousConfigs?: FirebaseAppConfig[];
+  migratedRoomId?: string | null;
+}): Promise<boolean> {
+  const { targetDb, uid, displayName, targetConfig, previousConfigs = [], migratedRoomId } = params;
+  const dedupedPrev = previousConfigs
+    .filter((cfg) => !isSameFirebaseTarget(cfg, targetConfig))
+    .slice(0, 12)
+    .map((cfg) => ({
+      apiKey: cfg.apiKey,
+      authDomain: cfg.authDomain,
+      projectId: cfg.projectId,
+      appId: cfg.appId,
+      ...(cfg.storageBucket ? { storageBucket: cfg.storageBucket } : {}),
+      ...(cfg.messagingSenderId ? { messagingSenderId: cfg.messagingSenderId } : {}),
+      ...(cfg.measurementId ? { measurementId: cfg.measurementId } : {}),
+      ...(cfg.firestoreDatabaseId ? { firestoreDatabaseId: cfg.firestoreDatabaseId } : {}),
+    }));
+
+  try {
+    await withTimeout(
+      setDoc(doc(targetDb, 'platform', 'migration'), {
+        id: 'migration',
+        projectId: targetConfig.projectId,
+        apiKey: targetConfig.apiKey,
+        authDomain: targetConfig.authDomain,
+        appId: targetConfig.appId,
+        ...(targetConfig.storageBucket ? { storageBucket: targetConfig.storageBucket } : {}),
+        ...(targetConfig.messagingSenderId ? { messagingSenderId: targetConfig.messagingSenderId } : {}),
+        ...(targetConfig.measurementId ? { measurementId: targetConfig.measurementId } : {}),
+        ...(targetConfig.firestoreDatabaseId
+          ? { firestoreDatabaseId: targetConfig.firestoreDatabaseId }
+          : {}),
+        migratedBy: uid,
+        migratedByName: (displayName || 'مستخدم المنصة').slice(0, 120),
+        ...(migratedRoomId ? { migratedRoomId: migratedRoomId.slice(0, 16) } : {}),
+        migrationEpoch: CURRENT_DB_EPOCH,
+        previousConfigs: dedupedPrev,
+        updatedAt: serverTimestamp(),
+      }),
+      3500
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export { getBackupFirebaseConfigs };

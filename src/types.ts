@@ -97,6 +97,10 @@ export interface Question {
   choices?: string[];
   chart?: QuizChart;
   figure?: QuizFigure;
+  questionType?: QuestionKind;
+  table?: QuizTableQuestion;
+  explanationTable?: ExplanationTable;
+  explanationComparison?: ExplanationComparison;
   sourceQuizTitle?: string;
   status: QuestionStatus;
   attemptsUsed: number;
@@ -154,6 +158,10 @@ export interface SavedQuestion {
   figure?: QuizFigure;
   explanationChart?: QuizChart;
   explanationFigure?: QuizFigure;
+  questionType?: QuestionKind;
+  table?: QuizTableQuestion;
+  explanationTable?: ExplanationTable;
+  explanationComparison?: ExplanationComparison;
   winnerTimeMs?: number;
   status: QuestionStatus;
   winnerName: string;
@@ -292,19 +300,62 @@ export interface QuizFigure {
   elements: FigureElement[];
 }
 
+export type QuestionKind = 'mcq' | 'table';
+export type TableCellInputType = 'number' | 'text';
+
+export interface TableCellConfig {
+  /** النص الثابت الظاهر في الخلية (عند عدم كونها فراغاً، أو كنص توضيحي) */
+  value: string;
+  /** هل هذه الخلية فراغ يملؤه الطالب؟ */
+  isBlank?: boolean;
+  /** نوع الإجابة المطلوبة في هذا الفراغ: رقم أم نص */
+  inputType?: TableCellInputType;
+  /** حرف أو رمز ظاهر داخل الفراغ مثل س أو ص أو أ (اختياري) */
+  cue?: string;
+  /** الإجابة الصحيحة المتوقعة لهذا الفراغ */
+  expectedAnswer?: string;
+}
+
+export interface QuizTableQuestion {
+  title?: string;
+  caption?: string;
+  hasHeaderRow?: boolean;
+  headers?: string[];
+  rows: TableCellConfig[][];
+}
+
+export interface ExplanationTable {
+  title?: string;
+  headers: string[];
+  rows: string[][];
+}
+
+export interface ExplanationComparison {
+  title?: string;
+  firstLabel: string;
+  firstValue: string;
+  secondLabel: string;
+  secondValue: string;
+  verdict?: string;
+}
+
 /** سؤال داخل "اختباراتي" — النصوص قد تحتوي رياضيات بصيغة $...$ */
 export interface QuizQuestion {
   id: string;
+  questionType?: QuestionKind;
   text: string;
   choices: string[];
-  /** فهرس الإجابة الصحيحة (يبدأ من 0)، أو -1 إن لم تُحدد */
+  /** فهرس الإجابة الصحيحة (يبدأ من 0)، أو -1 إن لم تُحدد أو كان السؤال جدولاً */
   correctIndex: number;
   answer: string;
   explanation: string;
+  table?: QuizTableQuestion;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;
   explanationFigure?: QuizFigure;
+  explanationTable?: ExplanationTable;
+  explanationComparison?: ExplanationComparison;
 }
 
 export interface MyQuiz {
@@ -339,14 +390,18 @@ export interface ExamQuestion {
   id: string;
   sourceQuizId: string;
   sourceTitle: string;
+  questionType?: QuestionKind;
   text: string;
   choices: string[];
   correctIndex: number;
   explanation: string;
+  table?: QuizTableQuestion;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;
   explanationFigure?: QuizFigure;
+  explanationTable?: ExplanationTable;
+  explanationComparison?: ExplanationComparison;
 }
 
 export interface QuizAttempt {
@@ -355,13 +410,25 @@ export interface QuizAttempt {
   title: string;
   settings: ExamSettings;
   questions: ExamQuestion[];
-  /** الخيار المختار لكل سؤال (-1 = بلا إجابة) */
+  /** الخيار المختار لكل سؤال (-1 = بلا إجابة؛ لسؤال الجدول 1 = صحيح، 0 = خطأ، -1 = ناقص) */
   answers: number[];
+  /** إجابات خلايا الجدول لكل سؤال مفهرسة برقم السؤال ثم "row_col" */
+  tableAnswers?: Record<string, Record<string, string>>;
   score: number;
   total: number;
   durationSec: number;
   /** وقت الانتهاء بالملي ثانية (يبقى ثابتاً عند النقل بين القواعد) */
   finishedAt: number;
+  createdAt?: unknown;
+}
+
+export interface StarredQuestion {
+  id: string;
+  ownerId: string;
+  sourceQuizId?: string;
+  sourceTitle?: string;
+  question: QuizQuestion;
+  starredAt: number;
   createdAt?: unknown;
 }
 

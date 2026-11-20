@@ -696,9 +696,23 @@ function buildPublicPayload(state: PlatformState): {
   backupConfigs: SanitizedFirebaseConfig[];
   poolUpdatedAt: number;
   quotaStatus: ServerProjectQuotaStatus;
+  quotaByProject: Record<string, ServerProjectQuotaStatus>;
 } {
   const activeCfg = state.activeTargetConfig || defaultAppletConfig;
   const quotaStatus = buildQuotaStatusFromRecord(getOrCreateProjectQuotaRecord(activeCfg.projectId));
+  const quotaByProject: Record<string, ServerProjectQuotaStatus> = {};
+  const projectIdsForQuota = Array.from(
+    new Set(
+      [
+        activeCfg.projectId,
+        defaultAppletConfig.projectId,
+        ...state.playerDatabases.map((p) => p.config.projectId),
+      ].filter((id): id is string => Boolean(id))
+    )
+  );
+  for (const pid of projectIdsForQuota) {
+    quotaByProject[pid] = buildQuotaStatusFromRecord(getOrCreateProjectQuotaRecord(pid));
+  }
   const backupConfigs = state.backupDatabases.map((b) => b.config);
   const publicPlayerDatabases = state.playerDatabases.map((p) => ({
     id: p.id,
@@ -744,6 +758,7 @@ function buildPublicPayload(state: PlatformState): {
     backupConfigs,
     poolUpdatedAt: state.updatedAt,
     quotaStatus,
+    quotaByProject,
   };
 }
 
@@ -1287,6 +1302,153 @@ async function startServer(): Promise<void> {
       saveQuotaStateFile();
     }
     res.json({ ok: true, triggeredAlert: false, quotaStatus: status });
+  });
+
+  // Global quota failover: allows any user to activate an alternative registered Player DB
+  // for EVERYONE when the current database reaches quota exhaustion and auto-migration didn't run.
+  app.post('/api/platform/quota-failover', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const targetProjectId =
+      typeof body.targetProjectId === 'string' ? body.targetProjectId.trim() : '';
+    const targetDbId =
+      typeof body.targetFirestoreDatabaseId === 'string'
+        ? body.targetFirestoreDatabaseId.trim()
+        : '';
+
+    if (!targetProjectId) {
+      res.status(400).json({ error: 'يرجى تحديد معرف القاعدة المستهدفة.' });
+      return;
+    }
+
+    const activeCfg = platformState.activeTargetConfig || defaultAppletConfig;
+    const matchedPlayer = platformState.playerDatabases.find(
+      (d) =>
+        d.config.projectId === targetProjectId &&
+        (d.config.firestoreDatabaseId || '') === targetDbId
+    );
+    const matchedDefault =
+      defaultAppletConfig.projectId === targetProjectId &&
+      (defaultAppletConfig.firestoreDatabaseId || '') === targetDbId
+        ? defaultAppletConfig
+        : null;
+
+    const targetConfig = matchedPlayer?.config || matchedDefault;
+    if (!targetConfig) {
+      res.status(404).json({
+        error: 'هذه القاعدة غير مسجلة في قائمة قواعد البيانات المعتمدة للمنصة.',
+      });
+      return;
+    }
+
+    if (isSameConfig(activeCfg, targetConfig)) {
+      res.json({ ok: true, alreadyActive: true, ...buildPublicPayload(platformState) });
+      return;
+    }
+
+    // Verify either caller is an authenticated programmer, active quota is known exhausted/low,
+    // REST probe on active DB confirms 429, or client reported resource-exhausted while target DB is healthy.
+    const activeRec = getOrCreateProjectQuotaRecord(activeCfg.projectId);
+    const activeQuota = buildQuotaStatusFromRecord(activeRec);
+    let canFailover =
+      activeRec.exhausted ||
+      activeQuota.minRemainingPct <= 20 ||
+      Boolean(body.quotaExceededReported);
+
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!canFailover && bearer) {
+      const authRes = await authenticateRequest(req, body).catch(() => null);
+      if (authRes?.ok && authRes.isProgrammer) {
+        canFailover = true;
+      }
+    }
+
+    // Quick REST check on active & target DBs
+    const probeRestHealth = async (cfg: SanitizedFirebaseConfig): Promise<'ok' | 'quota' | 'error'> => {
+      try {
+        const dbSeg = cfg.firestoreDatabaseId || '(default)';
+        const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+          cfg.projectId
+        )}/databases/${encodeURIComponent(dbSeg)}/documents/platform/migration?key=${encodeURIComponent(
+          cfg.apiKey
+        )}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1800);
+        const r = await fetch(url, { cache: 'no-store', signal: controller.signal });
+        clearTimeout(timer);
+        if (r.status === 429) return 'quota';
+        if (r.ok || r.status === 404 || r.status === 403) return 'ok';
+        return 'error';
+      } catch {
+        return 'ok';
+      }
+    };
+
+    const [activeHealth, targetHealth] = await Promise.all([
+      activeRec.exhausted ? Promise.resolve('quota' as const) : probeRestHealth(activeCfg),
+      probeRestHealth(targetConfig),
+    ]);
+
+    if (activeHealth === 'quota') {
+      activeRec.exhausted = true;
+      activeRec.updatedAt = Date.now();
+      canFailover = true;
+    }
+
+    if (!canFailover) {
+      res.status(403).json({
+        error: 'القاعدة الحالية لم تستنفد حصتها بعد ولا يوجد تفويض تبديل طارئ.',
+      });
+      return;
+    }
+
+    if (targetHealth === 'quota') {
+      const tRec = getOrCreateProjectQuotaRecord(targetConfig.projectId);
+      tRec.exhausted = true;
+      tRec.updatedAt = Date.now();
+      saveQuotaStateFile();
+      res.status(409).json({
+        error: `القاعدة المختارة (${targetConfig.projectId}) ممتلئة الحصة أيضاً. يرجى اختيار قاعدة أخرى متاحة.`,
+      });
+      return;
+    }
+
+    if (body.quotaExceededReported) {
+      activeRec.exhausted = true;
+      activeRec.updatedAt = Date.now();
+    }
+
+    const now = Date.now();
+    if (!platformState.previousConfigs.some((c) => isSameConfig(c, activeCfg))) {
+      platformState.previousConfigs = [activeCfg, ...platformState.previousConfigs].slice(0, 12);
+    }
+    if (matchedPlayer) {
+      matchedPlayer.lastUsedAt = now;
+    }
+
+    const targetRec = getOrCreateProjectQuotaRecord(targetConfig.projectId);
+    if (targetRec.exhausted && targetHealth === 'ok') {
+      targetRec.exhausted = false;
+      targetRec.updatedAt = now;
+    }
+    saveQuotaStateFile();
+
+    platformState.activeTargetConfig = targetConfig;
+    platformState.activePlayerDatabaseId = matchedPlayer ? matchedPlayer.id : null;
+    platformState.revision += 1;
+    platformState.updatedAt = now;
+    platformState.updatedByEmail =
+      typeof body.requesterEmail === 'string' && body.requesterEmail
+        ? body.requesterEmail.slice(0, 120)
+        : 'quota-failover';
+    savePlatformState(platformState);
+    broadcastState();
+
+    res.json({
+      ok: true,
+      switchedTo: targetConfig,
+      ...buildPublicPayload(platformState),
+    });
   });
 
   app.post('/api/programmer/quota/calibrate', async (req: Request, res: Response) => {

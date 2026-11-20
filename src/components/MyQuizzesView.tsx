@@ -5,17 +5,29 @@ import {
   CheckCircle2,
   ClipboardCopy,
   Download,
+  Eye,
+  EyeOff,
   FileJson,
   FilePlus2,
   FolderOpen,
   History,
+  ListChecks,
   Pencil,
   Play,
+  Star,
   Trash2,
   Upload,
 } from 'lucide-react';
 import { db, formatTimestamp, getTimestampMillis } from '../firebase';
-import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion, UserProfile } from '../types';
+import type {
+  ExamQuestion,
+  ExamSettings,
+  MyQuiz,
+  QuizAttempt,
+  QuizQuestion,
+  StarredQuestion,
+  UserProfile,
+} from '../types';
 import {
   deleteSessionSnapshot,
   loadSessionSnapshot,
@@ -27,13 +39,16 @@ import {
   type StoredQuizAttemptsSnapshot,
 } from '../localDraftStore';
 import { deleteMyQuiz, EXAMPLE_JSON, IMPORT_PROMPT, parseQuizJson, quizToExportJson } from '../myQuizzes';
+import { removeStarredQuestion, subscribeStarredQuestions } from '../starredQuestions';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
+import { QuestionTableView } from './QuestionTableView';
+import { RichExplanationView } from './RichExplanationView';
 import { ExamSetup } from './ExamSetup';
 import { ExamRunner, type ExamInitialState } from './ExamRunner';
 import { ExamResult } from './ExamResult';
 import { ExamReview } from './ExamReview';
-import { deleteAttempt, describeTiming, formatDuration, newAttemptId } from '../exam';
+import { deleteAttempt, describeTiming, formatDuration, isExamReady, isQuestionAnswered, newAttemptId } from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 import { DuoLoading } from './DuoLoading';
@@ -57,6 +72,7 @@ type Mode =
       settings: ExamSettings;
       questions: ExamQuestion[];
       answers: number[];
+      tableAnswers?: Record<string, Record<string, string>>;
       durationSec: number;
       finishedAt: number;
     }
@@ -70,7 +86,10 @@ const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white';
 
 export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [mode, setMode] = useState<Mode>({ kind: 'list' });
+  const [subTab, setSubTab] = useState<'quizzes' | 'starred'>('quizzes');
   const [quizzes, setQuizzes] = useState<MyQuiz[]>([]);
+  const [starredItems, setStarredItems] = useState<StarredQuestion[]>([]);
+  const [revealedStarExplanations, setRevealedStarExplanations] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -146,10 +165,14 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         console.error('quizAttempts listener error', err);
       }
     );
+    const unsubStarred = subscribeStarredQuestions(profile.uid, (items) => {
+      if (alive) setStarredItems(items);
+    });
     return () => {
       alive = false;
       unsub();
       unsubAttempts();
+      unsubStarred();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.uid]);
@@ -209,13 +232,14 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           setMode({ kind: 'list' });
           void refreshDraft();
         }}
-        onFinish={(answers, durationSec) =>
+        onFinish={(answers, durationSec, tableAnswers) =>
           setMode({
             kind: 'examResult',
             attemptId: newAttemptId(),
             settings: mode.settings,
             questions: mode.questions,
             answers,
+            tableAnswers,
             durationSec,
             finishedAt: Date.now(),
           })
@@ -233,6 +257,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         settings={mode.settings}
         questions={mode.questions}
         answers={mode.answers}
+        tableAnswers={mode.tableAnswers}
         durationSec={mode.durationSec}
         finishedAt={mode.finishedAt}
         onBack={() => {
@@ -257,7 +282,15 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             {new Date(a.finishedAt).toLocaleString('ar')} · {describeTiming(a.settings)}
           </p>
         </div>
-        <ExamReview questions={a.questions} answers={a.answers} score={a.score} total={a.total} durationSec={a.durationSec} />
+        <ExamReview
+          ownerId={profile.uid}
+          questions={a.questions}
+          answers={a.answers}
+          tableAnswers={a.tableAnswers}
+          score={a.score}
+          total={a.total}
+          durationSec={a.durationSec}
+        />
       </div>
     );
   }
@@ -316,7 +349,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C]" />
             {qq.chart && <ChartView chart={qq.chart} />}
             {qq.figure && <FigureView figure={qq.figure} />}
-            {qq.choices.length > 0 ? (
+            {qq.questionType === 'table' && qq.table ? (
+              <QuestionTableView table={qq.table} mode="preview" />
+            ) : qq.choices.length > 0 ? (
               <div className="flex flex-col gap-1.5">
                 {qq.choices.map((c, ci) => (
                   <div key={ci} className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${ci === qq.correctIndex ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]' : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'}`}>
@@ -330,13 +365,18 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                 <MathText text={qq.answer} />
               </div>
             ) : null}
-            {(qq.explanation || qq.explanationChart || qq.explanationFigure) && (
-              <div className="px-3.5 py-2.5 rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] text-xs sm:text-sm font-bold text-[#3C3C3C] flex flex-col gap-2">
-                <span className="font-black text-[#777777] text-[11px]">شرح الإجابة:</span>
-                {qq.explanation && <MathText text={qq.explanation} />}
-                {qq.explanationChart && <ChartView chart={qq.explanationChart} />}
-                {qq.explanationFigure && <FigureView figure={qq.explanationFigure} />}
-              </div>
+            {(qq.explanation ||
+              qq.explanationTable ||
+              qq.explanationComparison ||
+              qq.explanationChart ||
+              qq.explanationFigure) && (
+              <RichExplanationView
+                explanation={qq.explanation}
+                explanationTable={qq.explanationTable}
+                explanationComparison={qq.explanationComparison}
+                explanationChart={qq.explanationChart}
+                explanationFigure={qq.explanationFigure}
+              />
             )}
           </div>
         ))}
@@ -351,13 +391,214 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     );
   }
 
+  const startStarredExam = () => {
+    const readyQuestions: ExamQuestion[] = starredItems
+      .filter((st) => isExamReady(st.question))
+      .slice(0, 100)
+      .map((st) => ({
+        id: st.id,
+        sourceQuizId: st.sourceQuizId || 'starred',
+        sourceTitle: st.sourceTitle || 'الأسئلة المميزة',
+        ...(st.question.questionType === 'table' || st.question.table
+          ? { questionType: 'table' as const, table: st.question.table }
+          : {}),
+        text: st.question.text,
+        choices: st.question.choices,
+        correctIndex: st.question.correctIndex,
+        explanation: st.question.explanation || '',
+        ...(st.question.chart ? { chart: st.question.chart } : {}),
+        ...(st.question.figure ? { figure: st.question.figure } : {}),
+        ...(st.question.explanationChart ? { explanationChart: st.question.explanationChart } : {}),
+        ...(st.question.explanationFigure ? { explanationFigure: st.question.explanationFigure } : {}),
+        ...(st.question.explanationTable ? { explanationTable: st.question.explanationTable } : {}),
+        ...(st.question.explanationComparison
+          ? { explanationComparison: st.question.explanationComparison }
+          : {}),
+      }));
+    if (readyQuestions.length === 0) return;
+    void deleteSessionSnapshot('exam_session');
+    setMode({
+      kind: 'examRun',
+      settings: {
+        sourceMode: 'single',
+        mixMode: 'total',
+        quizIds: ['starred'],
+        quizTitles: ['الأسئلة المميزة ⭐'],
+        questionCount: readyQuestions.length,
+        timing: 'none',
+        seconds: 0,
+        shuffleQuestions: false,
+        shuffleChoices: false,
+      },
+      questions: readyQuestions,
+    });
+  };
+
   /* ---------------- القائمة ---------------- */
   return (
     <div className="max-w-3xl mx-auto w-full flex flex-col gap-4" dir="rtl">
-      <div>
-        <h2 className="text-xl font-black text-[#3C3C3C]">اختباراتي</h2>
-        <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها من ملف JSON، ثم راجعها وعدّلها واحفظها.</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-black text-[#3C3C3C]">اختباراتي</h2>
+          <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها من JSON، وتابع أسئلتك المميزة للمراجعة.</p>
+        </div>
+        <div className="inline-flex rounded-2xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black">
+          <button
+            type="button"
+            onClick={() => setSubTab('quizzes')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors ${
+              subTab === 'quizzes'
+                ? 'bg-white text-[#8938D6] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <ListChecks className="w-4 h-4" />
+            <span>النماذج والمحاولات</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('starred')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors ${
+              subTab === 'starred'
+                ? 'bg-[#FFF4CC] text-[#9A6B00] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <Star className={`w-4 h-4 ${subTab === 'starred' ? 'fill-[#FFC800] text-[#E5A400]' : ''}`} />
+            <span>أسئلة مميزة</span>
+            {starredItems.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-lg bg-white border border-[#FFC800] text-[10px] font-latin">
+                {starredItems.length}
+              </span>
+            )}
+          </button>
+        </div>
       </div>
+
+      {subTab === 'starred' ? (
+        <div className="flex flex-col gap-3">
+          <div className="rounded-3xl border-2 border-[#FFC800] bg-[#FFF4CC]/60 p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <Star className="w-6 h-6 fill-[#FFC800] text-[#E5A400] shrink-0" />
+              <div>
+                <h3 className="text-sm font-black text-[#3C3C3C]">بنك الأسئلة المميزة للمراجعة</h3>
+                <p className="text-[11px] font-bold text-[#8A6500]">
+                  أي سؤال تضغط على نجمته أثناء الاختبار أو المراجعة يُحفظ هنا لتعود إليه وتختبر نفسك فيه في أي وقت.
+                </p>
+              </div>
+            </div>
+            {starredItems.length > 0 && (
+              <button
+                type="button"
+                onClick={startStarredExam}
+                className="duo-btn flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-[#FFC800] hover:bg-[#FFD426] border-2 border-b-4 border-[#E5A400] text-[#3C3C3C] text-xs font-black cursor-pointer shrink-0"
+              >
+                <Play className="w-4 h-4" />
+                <span>اختبر نفسي بالأسئلة المميزة ({starredItems.length})</span>
+              </button>
+            )}
+          </div>
+
+          {starredItems.length === 0 ? (
+            <div className={`${card} p-8 text-center flex flex-col items-center gap-2 text-[#777777]`}>
+              <Star className="w-8 h-8 text-[#FFC800]" />
+              <p className="text-sm font-black text-[#3C3C3C]">لا توجد أسئلة مميزة بعد</p>
+              <p className="text-xs font-bold max-w-md">
+                أثناء دخولك لأي اختبار اضغط على أيقونة النجمة ⭐ أعلى السؤال لحفظه هنا والرجوع إليه للمراجعة.
+              </p>
+            </div>
+          ) : (
+            starredItems.map((item, idx) => {
+              const qq = item.question;
+              const isTable = qq.questionType === 'table' && Boolean(qq.table);
+              const expShown = Boolean(revealedStarExplanations[item.id]);
+              const hasExp = Boolean(
+                qq.explanation ||
+                  qq.explanationTable ||
+                  qq.explanationComparison ||
+                  qq.explanationChart ||
+                  qq.explanationFigure
+              );
+              return (
+                <div key={item.id} className={`${card} p-4 flex flex-col gap-2.5`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-1 rounded-full bg-[#FFF4CC] border border-[#FFC800] text-[#9A6B00] text-xs font-black">
+                        سؤال مميز #{idx + 1}
+                      </span>
+                      {item.sourceTitle && (
+                        <span className="text-[11px] font-bold text-[#777777]">
+                          من: {item.sourceTitle}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void removeStarredQuestion(profile.uid, item.id)}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#FF4B4B] text-[11px] font-black text-[#EA2B2B] cursor-pointer"
+                    >
+                      <Star className="w-3.5 h-3.5 fill-[#FFC800] text-[#E5A400]" />
+                      <span>إزالة النجمة</span>
+                    </button>
+                  </div>
+
+                  <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C] leading-relaxed" />
+                  {qq.chart && <ChartView chart={qq.chart} />}
+                  {qq.figure && <FigureView figure={qq.figure} />}
+
+                  {isTable && qq.table ? (
+                    <QuestionTableView table={qq.table} mode="preview" />
+                  ) : qq.choices.length > 0 ? (
+                    <div className="flex flex-col gap-1.5">
+                      {qq.choices.map((c, ci) => (
+                        <div
+                          key={ci}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                            ci === qq.correctIndex
+                              ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                              : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                          }`}
+                        >
+                          {ci === qq.correctIndex && <CheckCircle2 className="w-4 h-4 shrink-0" />}
+                          <MathText text={c} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {hasExp && (
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setRevealedStarExplanations((prev) => ({
+                            ...prev,
+                            [item.id]: !prev[item.id],
+                          }))
+                        }
+                        className="self-start flex items-center gap-1.5 text-xs font-black text-[#1899D6] cursor-pointer"
+                      >
+                        {expShown ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        <span>{expShown ? 'إخفاء شرح الحل' : 'عرض شرح الحل المفصل'}</span>
+                      </button>
+                      {expShown && (
+                        <RichExplanationView
+                          explanation={qq.explanation}
+                          explanationTable={qq.explanationTable}
+                          explanationComparison={qq.explanationComparison}
+                          explanationChart={qq.explanationChart}
+                          explanationFigure={qq.explanationFigure}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      ) : (
+        <>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <button
@@ -401,7 +642,11 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           <span className="text-xs font-extrabold text-[#5C1A99]">
             {session.finished
               ? 'لديك نتيجة اختبار لم تُحفظ بعد.'
-              : `لديك اختبار غير مكتمل (${session.answers.filter((a) => a >= 0).length} من ${session.questions.length} مُجاب) — تابع من حيث توقفت.`}
+              : `لديك اختبار غير مكتمل (${
+                  session.questions.filter((qq, i) =>
+                    isQuestionAnswered(qq, i, session.answers, session.tableAnswers)
+                  ).length
+                } من ${session.questions.length} مُجاب) — تابع من حيث توقفت.`}
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -414,6 +659,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       settings: session.settings,
                       questions: session.questions,
                       answers: session.answers,
+                      tableAnswers: session.tableAnswers,
                       durationSec: Math.round(session.elapsedMs / 1000),
                       finishedAt: session.updatedAt,
                     })
@@ -423,6 +669,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       questions: session.questions,
                       initial: {
                         answers: session.answers,
+                        tableAnswers: session.tableAnswers,
                         index: session.index,
                         remainingMs: session.remainingMs,
                         elapsedMs: session.elapsedMs,
@@ -586,6 +833,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           })}
         </div>
       )}
+        </>
+      )}
     </div>
   );
 };
@@ -663,12 +912,12 @@ const ImportPanel: React.FC<{
       </div>
 
       <div className={`${card} p-4 flex flex-col gap-2`}>
-        <h3 className="text-sm font-black text-[#3C3C3C]">كيف تُضاف الأشكال الهندسية والرسوم البيانية؟</h3>
+        <h3 className="text-sm font-black text-[#3C3C3C]">كيف تُضاف الجداول التفاعلية والأشكال الهندسية والرسوم والشرح التفصيلي؟</h3>
         <ul className="text-xs font-bold text-[#555] leading-relaxed list-disc pr-5 flex flex-col gap-1">
-          <li>كل الأسئلة باختيارات: <span className="font-latin">choices</span> مصفوفة الخيارات، و <span className="font-latin">correctIndex</span> رقم الخيار الصحيح ويبدأ من 0.</li>
-          <li>للأشكال الهندسية البسيطة والمركّبة (مثلثات، زوايا متقابلة، متوازيان وقاطع، دائرة داخل مربع، مجاهيل <span className="font-latin">س / x</span>): يضيف السكريبت الحقل <span className="font-latin">figure</span> تلقائياً ويرسمها البرنامج متجهياً بدقة.</li>
-          <li>للأعمدة والخطوط والقطاعات الدائرية: يضيف الحقل <span className="font-latin">chart</span> بأنواعه (<span className="font-latin">bar / hbar / line / pie</span>).</li>
-          <li>بعد الاستيراد تستطيع تعديل الأشكال الهندسية والزوايا والأطوال والرسوم والشرح من شاشة التعديل.</li>
+          <li>أسئلة الاختيارات: تحتوي <span className="font-latin">choices</span> و<span className="font-latin">correctIndex</span> (يبدأ من 0).</li>
+          <li>أسئلة الجداول التفاعلية: تُضاف بصيغة <span className="font-latin">{'"questionType": "table"'}</span> وحقل <span className="font-latin">table</span> لتحديد الخلايا الثابتة والفراغات التفاعلية (<span className="font-latin">number</span> أو <span className="font-latin">text</span> مع تلميح مثل <span className="font-latin">س / أ</span>).</li>
+          <li>الأشكال الهندسية والرسوم البيانية: يُضاف <span className="font-latin">figure</span> للهندسة أو <span className="font-latin">chart</span> (<span className="font-latin">bar / hbar / line / pie</span>) للرسوم البيانية.</li>
+          <li>الشرح المفصل بطرق القدرات: يدعم خطوات الحل وجداول Markdown داخل <span className="font-latin">explanation</span> بالإضافة إلى <span className="font-latin">explanationTable</span> و<span className="font-latin">explanationComparison</span>.</li>
         </ul>
         <button
           type="button"
@@ -678,7 +927,7 @@ const ImportPanel: React.FC<{
           }}
           className="self-start text-xs font-black text-[#7C3AED] hover:underline cursor-pointer"
         >
-          تجربة مثال كامل (هندسة مركبة + أعمدة + دائري + جذور)
+          تجربة مثال قدرات شامل (جدول تفاعلي + هندسة مركبة + أعمدة + دائري + مقارنة وشرح مفصل)
         </button>
       </div>
 

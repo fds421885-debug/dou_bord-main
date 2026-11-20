@@ -1,10 +1,14 @@
 import type { AiSolution } from './aiClient';
 import type {
   ExplainLayer,
+  ExplanationComparison,
+  ExplanationTable,
   MyQuiz,
+  QuestionKind,
   QuizChart,
   QuizFigure,
   QuizQuestion,
+  QuizTableQuestion,
   QuizAttempt,
   ExamSettings,
   ExamQuestion,
@@ -16,6 +20,7 @@ import type {
   SavedTest,
   SharedExplainBoard,
   SlideLayer,
+  StarredQuestion,
   Stroke,
   StudentBoard,
 } from './types';
@@ -28,14 +33,18 @@ export interface StoredPdfDoc {
 }
 
 export interface StoredQuizAnswerMeta {
+  questionType?: QuestionKind;
   choices: string[];
   correctIndex: number;
   answer: string;
   explanation: string;
+  table?: QuizTableQuestion;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;
   explanationFigure?: QuizFigure;
+  explanationTable?: ExplanationTable;
+  explanationComparison?: ExplanationComparison;
   sourceQuizTitle?: string;
 }
 
@@ -107,6 +116,13 @@ export interface StoredQuizAttemptsSnapshot {
   updatedAt: number;
 }
 
+export interface StoredStarredQuestionsSnapshot {
+  key: 'starred_questions';
+  ownerId: string;
+  items: StarredQuestion[];
+  updatedAt: number;
+}
+
 /** اختبار جارٍ (أو منتهٍ ولم تُحفظ نتيجته بعد) — يُستكمل من حيث توقف */
 export interface StoredExamSession {
   key: 'exam_session';
@@ -114,6 +130,7 @@ export interface StoredExamSession {
   settings: ExamSettings;
   questions: ExamQuestion[];
   answers: number[];
+  tableAnswers?: Record<string, Record<string, string>>;
   index: number;
   /** الوقت المتبقي بالملي ثانية (للكلي: كل الاختبار، لكل سؤال: السؤال الحالي) */
   remainingMs: number;
@@ -129,6 +146,7 @@ export type SessionSnapshotRecord =
   | StoredMyQuizzesSnapshot
   | StoredMyQuizDraft
   | StoredQuizAttemptsSnapshot
+  | StoredStarredQuestionsSnapshot
   | StoredExamSession;
 
 const DB_NAME = 'duoboard_local_store';

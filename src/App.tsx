@@ -64,6 +64,7 @@ import {
   type ServerPlatformPointer,
 } from './firebase';
 import {
+  checkActiveDatabaseRulesCompliance,
   fetchProgrammerSession,
   getFallbackProgrammerState,
   noteCloudRegistrySnapshot,
@@ -72,6 +73,7 @@ import {
   type MigrationProgress,
   type PlatformMigrationPointer,
 } from './firebaseMigration';
+import { subscribeRulesUpdateNeeded } from './starredQuestions';
 import {
   deleteSessionSnapshot,
   loadSessionSnapshot,
@@ -106,8 +108,24 @@ import { SavedTestsView } from './components/SavedTestsView';
 import { MyQuizzesView } from './components/MyQuizzesView';
 import { ProgrammerDashboard } from './components/ProgrammerDashboard';
 import { QuickMigrateModal } from './components/QuickMigrateModal';
+import { QuotaFullDbSelectorModal } from './components/QuotaFullDbSelectorModal';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
+
+async function withAppTimeout<T>(promise: Promise<T>, ms = 4500): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('timeout')), ms);
+    promise
+      .then((val) => {
+        window.clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -248,6 +266,13 @@ export default function App() {
   const [consolidatedNoticeProject, setConsolidatedNoticeProject] = useState<
     string | null
   >(() => (justConsolidatedFrom ? null : consumeConsolidatedProjectNotice()));
+  const [quotaSelectorOpen, setQuotaSelectorOpen] = useState<boolean>(false);
+  const [rulesOutdatedReason, setRulesOutdatedReason] = useState<{
+    projectId: string;
+    reason: string;
+  } | null>(null);
+  const [rulesAlertDismissed, setRulesAlertDismissed] = useState<boolean>(false);
+  const quotaSelectorTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!justConsolidatedFrom) return;
@@ -446,16 +471,39 @@ export default function App() {
     }
   }, [applyRemotePlatformPointer]);
 
+  const triggerQuotaFailoverCheck = useCallback(() => {
+    void checkBackupAnnouncementSignal();
+    if (quotaSelectorTimerRef.current) {
+      window.clearTimeout(quotaSelectorTimerRef.current);
+    }
+    quotaSelectorTimerRef.current = window.setTimeout(() => {
+      quotaSelectorTimerRef.current = null;
+      if (!switchingInProgressRef.current) {
+        setQuotaSelectorOpen(true);
+      }
+    }, 1800);
+  }, [checkBackupAnnouncementSignal]);
+
   useEffect(() => {
     const unsubErr = subscribeQuotaError(() => {
       setQuotaAlert(true);
       reportFirestoreQuotaExhausted(activeProjectId);
-      void checkBackupAnnouncementSignal();
+      triggerQuotaFailoverCheck();
     });
     const unsubQuota = subscribeQuotaStatus((status) => {
       if (status.projectId === activeProjectId) {
         setLiveQuotaStatus(status);
+        if (status.exhausted && !quotaSelectorTimerRef.current) {
+          setQuotaAlert(true);
+          triggerQuotaFailoverCheck();
+        }
       }
+    });
+    const unsubRules = subscribeRulesUpdateNeeded((info) => {
+      setRulesOutdatedReason({
+        projectId: info.projectId,
+        reason: 'قواعد الأمان الحالية لا تسمح بالوصول إلى الأسئلة المميزة وجداول الاختبارات المحدّثة.',
+      });
     });
     void fetchServerQuotaStatus(activeProjectId);
     const quotaPoll = window.setInterval(() => {
@@ -466,9 +514,14 @@ export default function App() {
     return () => {
       unsubErr();
       unsubQuota();
+      unsubRules();
       window.clearInterval(quotaPoll);
+      if (quotaSelectorTimerRef.current) {
+        window.clearTimeout(quotaSelectorTimerRef.current);
+        quotaSelectorTimerRef.current = null;
+      }
     };
-  }, [checkBackupAnnouncementSignal]);
+  }, [triggerQuotaFailoverCheck]);
 
   // Fire supervisor/programmer notification at <= 5.0% remaining AND on every 0.5% decrement (4.5%, 4.0%, ... 0.0%)
   const canReceiveQuotaAlerts = Boolean(
@@ -624,10 +677,43 @@ export default function App() {
       setIsProgrammer(false);
       setIsMasterProgrammer(false);
       setProgrammerState(null);
+      setRulesOutdatedReason(null);
       return;
     }
     void refreshProgrammerState(firebaseUser, profile?.fullNameQuad);
   }, [firebaseUser?.uid, firebaseUser?.email, profile?.fullNameQuad, refreshProgrammerState]);
+
+  const checkProgrammerRulesCompliance = useCallback(
+    async (user: User, bypassCache = false) => {
+      const res = await checkActiveDatabaseRulesCompliance(
+        user,
+        activeFirebaseConfig,
+        bypassCache
+      );
+      if (!res.compliant) {
+        setRulesOutdatedReason({
+          projectId: res.checkedProjectId,
+          reason:
+            res.reason ||
+            'قواعد الأمان (firestore.rules) في القاعدة الحالية تحتاج إلى تحديث لدعم الجداول والأسئلة المميزة.',
+        });
+      } else {
+        setRulesOutdatedReason(null);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    const isProgCandidate =
+      isProgrammer ||
+      isMasterProgrammerIdentity({
+        email: firebaseUser?.email,
+        fullNameQuad: profile?.fullNameQuad || firebaseUser?.displayName,
+      });
+    if (!firebaseUser || !isProgCandidate) return;
+    void checkProgrammerRulesCompliance(firebaseUser);
+  }, [firebaseUser?.uid, isProgrammer, profile?.fullNameQuad, checkProgrammerRulesCompliance]);
 
   // Clear self-migration marker once reloaded onto the migrated DB
   useEffect(() => {
@@ -979,7 +1065,7 @@ export default function App() {
     const path = `users/${user.uid}/private/profile`;
     try {
       const profileRef = doc(db, 'users', user.uid, 'private', 'profile');
-      const snap = await getDoc(profileRef);
+      const snap = await withAppTimeout(getDoc(profileRef), 4500);
       let resolvedProfile: UserProfile | null = null;
 
       if (snap.exists()) {
@@ -1013,13 +1099,13 @@ export default function App() {
           // Profile is already present on current DB -> enter immediately and sync history in background!
           void runSyncTask();
         } else {
-          // Missing profile -> bound sync at 4.5s so fullscreen login verification never stalls.
+          // Missing profile -> bound sync at 2.5s so fullscreen login verification never stalls.
           try {
             await Promise.race([
               runSyncTask(),
-              new Promise<void>((resolve) => window.setTimeout(resolve, 4500)),
+              new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
             ]);
-            const refreshedSnap = await getDoc(profileRef);
+            const refreshedSnap = await withAppTimeout(getDoc(profileRef), 2500);
             if (refreshedSnap.exists()) {
               resolvedProfile = refreshedSnap.data() as UserProfile;
             }
@@ -1049,13 +1135,16 @@ export default function App() {
         }
         const cleanedQuad = cachedQuad.trim().replace(/\s+/g, ' ');
         if (isQuadNameValid(cleanedQuad) && user.emailVerified) {
-          await setDoc(profileRef, {
-            uid: user.uid,
-            fullNameQuad: cleanedQuad,
-            email: user.email || cachedProfile?.email || 'user@example.com',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          await withAppTimeout(
+            setDoc(profileRef, {
+              uid: user.uid,
+              fullNameQuad: cleanedQuad,
+              email: user.email || cachedProfile?.email || 'user@example.com',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            }),
+            3500
+          );
           resolvedProfile = {
             uid: user.uid,
             fullNameQuad: cleanedQuad,
@@ -1085,7 +1174,7 @@ export default function App() {
         const candidateRoom = getCandidateSavedRoom(user.uid) || pendingRoom;
         if (candidateRoom) {
           try {
-            const rSnap = await getDoc(doc(db, 'rooms', candidateRoom));
+            const rSnap = await withAppTimeout(getDoc(doc(db, 'rooms', candidateRoom)), 2500);
             if (rSnap.exists()) {
               const rData = rSnap.data() as Room;
               if (rData.status === 'finished') {
@@ -1098,22 +1187,25 @@ export default function App() {
                 clearPendingRejoinRoom();
               } else {
                 const pRef = doc(db, 'rooms', candidateRoom, 'participants', user.uid);
-                const pSnap = await getDoc(pRef);
+                const pSnap = await withAppTimeout(getDoc(pRef), 2500);
                 if (pSnap.exists()) {
                   setActiveRoomId(candidateRoom);
                   persistActiveRoom(user.uid, candidateRoom);
                   clearPendingRejoinRoom();
                 } else if (pendingRoom) {
                   // Auto-join student onto the newly migrated room
-                  await setDoc(pRef, {
-                    uid: user.uid,
-                    roomId: candidateRoom,
-                    fullNameQuad: resolvedProfile.fullNameQuad.slice(0, 120),
-                    score: 0,
-                    correctCount: 0,
-                    joinedAt: serverTimestamp(),
-                    updatedAt: serverTimestamp(),
-                  });
+                  await withAppTimeout(
+                    setDoc(pRef, {
+                      uid: user.uid,
+                      roomId: candidateRoom,
+                      fullNameQuad: resolvedProfile.fullNameQuad.slice(0, 120),
+                      score: 0,
+                      correctCount: 0,
+                      joinedAt: serverTimestamp(),
+                      updatedAt: serverTimestamp(),
+                    }),
+                    2500
+                  );
                   setActiveRoomId(candidateRoom);
                   persistActiveRoom(user.uid, candidateRoom);
                   clearPendingRejoinRoom();
@@ -1129,11 +1221,14 @@ export default function App() {
                 cachedRoomSnap.room?.id === pendingRoom &&
                 cachedRoomSnap.myRole === 'supervisor'
               ) {
-                const restored = await restoreActiveSupervisorRoomFromSnapshot({
-                  targetUser: user,
-                  resolvedQuadName: resolvedProfile.fullNameQuad,
-                  roomId: pendingRoom,
-                });
+                const restored = await withAppTimeout(
+                  restoreActiveSupervisorRoomFromSnapshot({
+                    targetUser: user,
+                    resolvedQuadName: resolvedProfile.fullNameQuad,
+                    roomId: pendingRoom,
+                  }),
+                  4000
+                ).catch(() => false);
                 if (restored) {
                   setActiveRoomId(pendingRoom);
                   persistActiveRoom(user.uid, pendingRoom);
@@ -1165,16 +1260,44 @@ export default function App() {
       } catch (wrapped) {
         console.error(wrapped);
       }
+
       if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
         setQuotaAlert(true);
-        void checkBackupAnnouncementSignal();
+        triggerQuotaFailoverCheck();
         setProfileLoadError(
-          'تم الوصول للحد اليومي للقاعدة الحالية — يرجى تحديث الصفحة بعد قيام المبرمج بتفعيل قاعدة بديلة.'
+          'تم الوصول للحد اليومي للقاعدة الحالية — يمكنك التبديل الآن لأي قاعدة بيانات متاحة لتفعيلها عند الجميع.'
         );
       } else if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
         setProfileLoadError(
           'تعذر تحميل بيانات الحساب بسبب صلاحيات قاعدة البيانات. تأكد من تفعيل بريد الحساب أو أعد تسجيل الدخول.'
         );
+      } else if (lower === 'timeout' || lower.includes('offline') || lower.includes('unavailable')) {
+        // Check local snapshot / localStorage cache so user isn't locked on slow boot
+        const cachedProfile =
+          await loadSessionSnapshot<StoredUserProfileSnapshot>('user_profile').catch(() => null);
+        let fallbackQuad = '';
+        try {
+          fallbackQuad = localStorage.getItem(`duoboard_quad_${user.uid}`) || '';
+        } catch {
+          // Ignore storage
+        }
+        const validQuad =
+          cachedProfile?.uid === user.uid && isQuadNameValid(cachedProfile.fullNameQuad)
+            ? cachedProfile.fullNameQuad
+            : isQuadNameValid(fallbackQuad)
+            ? fallbackQuad
+            : '';
+        if (validQuad) {
+          setProfile({
+            uid: user.uid,
+            fullNameQuad: validQuad,
+            email: user.email || cachedProfile?.email || 'user@example.com',
+          });
+        } else {
+          setProfileLoadError(
+            'انتهت مهلة الاتصال بقاعدة البيانات. تحقق من الشبكة أو جرب إعادة المحاولة أو التبديل لقاعدة أخرى.'
+          );
+        }
       } else {
         setProfileLoadError(
           `تعذر الاتصال بالمنصة لتحميل بيانات حسابك (${raw}).`
@@ -1188,7 +1311,16 @@ export default function App() {
 
   // Auth listener & room session restore on refresh (enforces fresh sign-in right after DB switch)
   useEffect(() => {
+    let resolvedOnce = false;
+    const bootSafetyTimer = window.setTimeout(() => {
+      if (!resolvedOnce) {
+        setAuthReady(true);
+      }
+    }, 2800);
+
     const unsub = onAuthStateChanged(auth, async (user) => {
+      resolvedOnce = true;
+      window.clearTimeout(bootSafetyTimer);
       if (!user) {
         clearSwitchRequiresLogin();
         setFirebaseUser(null);
@@ -1206,14 +1338,21 @@ export default function App() {
         setAuthReady(false);
         setProfile(null);
         setActiveRoomId(null);
-        await signOut(auth).catch(() => {});
+        await Promise.race([
+          signOut(auth).catch(() => {}),
+          new Promise<void>((resolve) => window.setTimeout(resolve, 1500)),
+        ]);
+        setAuthReady(true);
         return;
       }
 
       setFirebaseUser(user);
       await loadUserProfile(user);
     });
-    return () => unsub();
+    return () => {
+      window.clearTimeout(bootSafetyTimer);
+      unsub();
+    };
   }, []);
 
   // Room & Participants real-time listeners
@@ -1475,6 +1614,14 @@ export default function App() {
               )}
               <button
                 type="button"
+                onClick={() => setQuotaSelectorOpen(true)}
+                className="duo-btn flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-sm font-black cursor-pointer"
+              >
+                <Database className="w-4 h-4" />
+                <span>اختيار قاعدة بيانات متاحة للجميع</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => void loadUserProfile(firebaseUser)}
                 className="duo-btn flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-sm font-black cursor-pointer"
               >
@@ -1492,6 +1639,12 @@ export default function App() {
             </div>
           </div>
         </div>
+        <QuotaFullDbSelectorModal
+          open={quotaSelectorOpen}
+          onClose={() => setQuotaSelectorOpen(false)}
+          firebaseUser={firebaseUser}
+          quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
+        />
         {autoSwitchNotice && (
           <DuoLoading
             variant="overlay"
@@ -1529,6 +1682,23 @@ export default function App() {
             </div>
           </div>
         )}
+        {quotaAlert && (
+          <div className="bg-[#FFDFE0] border-b-2 border-[#FF4B4B] px-4 py-3">
+            <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3 text-[#EA2B2B] text-xs sm:text-sm font-black">
+              <span>
+                القاعدة الحالية ({activeProjectId}) امتلت حصتها — يمكنك اختيار قاعدة بديلة وتفعيلها للجميع فوراً.
+              </span>
+              <button
+                type="button"
+                onClick={() => setQuotaSelectorOpen(true)}
+                className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+              >
+                <Database className="w-4 h-4" />
+                <span>عرض القواعد واختيار قاعدة متاحة</span>
+              </button>
+            </div>
+          </div>
+        )}
         {firebaseUser && needsInteractiveSync && (
           <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-4 py-3">
             <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
@@ -1560,6 +1730,7 @@ export default function App() {
               void refreshProgrammerState(firebaseUser, firebaseUser.displayName, true);
             }
           }}
+          onOpenQuotaSelector={() => setQuotaSelectorOpen(true)}
           onProfileSaved={(saved) => {
             setProfileLoadError(null);
             setProfile(saved);
@@ -1568,8 +1739,15 @@ export default function App() {
             }
           }}
           onQuotaDetected={() => {
-            void checkBackupAnnouncementSignal();
+            setQuotaAlert(true);
+            triggerQuotaFailoverCheck();
           }}
+        />
+        <QuotaFullDbSelectorModal
+          open={quotaSelectorOpen}
+          onClose={() => setQuotaSelectorOpen(false)}
+          firebaseUser={firebaseUser}
+          quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
         />
         {personalSyncProgress && (
           <DuoLoading
@@ -1808,6 +1986,16 @@ export default function App() {
                     <span>إدارة القواعد (مبرمج)</span>
                   </button>
                 )}
+                {(quotaAlert || liveQuotaStatus.exhausted) && (
+                  <button
+                    type="button"
+                    onClick={() => setQuotaSelectorOpen(true)}
+                    className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs sm:text-sm font-black cursor-pointer"
+                  >
+                    <Database className="w-4 h-4" />
+                    <span>اختيار قاعدة متاحة للجميع</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -1819,6 +2007,49 @@ export default function App() {
                   }}
                   className="p-1.5 rounded-lg text-[#3C3C3C] hover:bg-white/60 cursor-pointer"
                   title="تم الاستلام (سيتكرر التنبيه عند النقص 0.5% القادم)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Programmer Alert Banner when Firestore Rules need update for Tables & Starred Questions */}
+        {effectiveIsProgrammer && rulesOutdatedReason && !rulesAlertDismissed && tab !== 'programmer' && (
+          <div className="bg-[#F3E8FF] border-b-2 border-[#A560E8] px-3 sm:px-6 py-3">
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5 text-[#6D28D9] text-xs sm:text-sm font-black">
+                <Code2 className="w-5 h-5 shrink-0 mt-0.5" />
+                <div>
+                  <p>
+                    تنبيه للمبرمج: يجب تحديث قواعد الأمان (firestore.rules) في القاعدة{' '}
+                    <span className="font-latin text-[#3C3C3C]">({rulesOutdatedReason.projectId})</span>{' '}
+                    لدعم صيغة الجداول الجديدة، إجابات الجداول، والأسئلة المميزة ⭐.
+                  </p>
+                  <p className="text-[11px] font-bold text-[#7C3AED] mt-0.5">
+                    {rulesOutdatedReason.reason}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProgrammerState((prev) => prev || getFallbackProgrammerState());
+                    setActiveRoomId(null);
+                    setTab('programmer');
+                  }}
+                  className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-xs sm:text-sm font-black cursor-pointer"
+                >
+                  <Code2 className="w-4 h-4" />
+                  <span>عرض خطوات التحديث ونسخ القواعد</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRulesAlertDismissed(true)}
+                  className="p-1.5 rounded-lg text-[#6D28D9] hover:bg-white/60 cursor-pointer"
+                  title="إخفاء مؤقتاً"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2232,6 +2463,12 @@ export default function App() {
           </div>
         </div>
       )}
+      <QuotaFullDbSelectorModal
+        open={quotaSelectorOpen}
+        onClose={() => setQuotaSelectorOpen(false)}
+        firebaseUser={firebaseUser}
+        quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
+      />
       {personalSyncProgress && (
         <DuoLoading
           variant="overlay"

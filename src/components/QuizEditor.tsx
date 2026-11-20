@@ -7,9 +7,11 @@ import {
   Copy,
   Eye,
   EyeOff,
+  ListChecks,
   Loader2,
   PlusCircle,
   Save,
+  Table2,
   Trash2,
   X,
 } from 'lucide-react';
@@ -18,6 +20,9 @@ import { MathText } from '../mathText';
 import { applySnippet, MathToolbar } from './MathToolbar';
 import { QuizChartEditor } from './QuizChartEditor';
 import { QuizFigureEditor } from './QuizFigureEditor';
+import { QuestionTableView, QuizTableEditor } from './QuestionTableView';
+import { RichExplanationView } from './RichExplanationView';
+import { createDefaultTableQuestion } from '../quizTable';
 import { DuoLoading } from './DuoLoading';
 import {
   cleanQuestions,
@@ -101,6 +106,15 @@ export const QuizEditor: React.FC<Props> = ({
   const [questions, setQuestions] = useState<QuizQuestion[]>(() =>
     initialQuestions.length
       ? initialQuestions.map((q) => {
+          if (q.questionType === 'table' || (q.table && q.choices.length === 0)) {
+            return {
+              ...q,
+              questionType: 'table',
+              table: q.table ?? createDefaultTableQuestion(),
+              choices: [],
+              correctIndex: -1,
+            };
+          }
           if (q.choices.length >= 2) return q;
           const choices = [...q.choices];
           while (choices.length < 4) choices.push('');
@@ -196,8 +210,8 @@ export const QuizEditor: React.FC<Props> = ({
   const remove = (id: string) =>
     setQuestions((qs) => (qs.length <= 1 ? [emptyQuestion()] : qs.filter((q) => q.id !== id)));
 
-  const addQuestion = () =>
-    setQuestions((qs) => (qs.length >= LIMITS.maxQuestions ? qs : [...qs, emptyQuestion()]));
+  const addQuestion = (kind: 'mcq' | 'table' = 'mcq') =>
+    setQuestions((qs) => (qs.length >= LIMITS.maxQuestions ? qs : [...qs, emptyQuestion(kind)]));
 
   const filled = useMemo(() => cleanQuestions(questions).length, [questions]);
 
@@ -291,13 +305,51 @@ export const QuizEditor: React.FC<Props> = ({
       </div>
 
       {questions.map((q, idx) => {
-        const hasChoices = q.choices.length > 0;
+        const isTable = q.questionType === 'table' || (Boolean(q.table) && q.choices.length === 0);
+        const hasChoices = !isTable && q.choices.length > 0;
         return (
           <div key={q.id} className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <span className="px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">
-                السؤال {idx + 1}
-              </span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">
+                  السؤال {idx + 1}
+                </span>
+                <div className="inline-flex rounded-xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-0.5 text-[11px] font-black">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      patch(q.id, {
+                        questionType: 'mcq',
+                        choices: q.choices.length >= 2 ? q.choices : ['', '', '', ''],
+                        table: undefined,
+                      })
+                    }
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg cursor-pointer transition-colors ${
+                      !isTable ? 'bg-white text-[#1899D6] shadow-xs' : 'text-[#777777] hover:text-[#3C3C3C]'
+                    }`}
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                    <span>اختيارات</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      patch(q.id, {
+                        questionType: 'table',
+                        table: q.table ?? createDefaultTableQuestion(),
+                        choices: [],
+                        correctIndex: -1,
+                      })
+                    }
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-lg cursor-pointer transition-colors ${
+                      isTable ? 'bg-white text-[#8938D6] shadow-xs' : 'text-[#777777] hover:text-[#3C3C3C]'
+                    }`}
+                  >
+                    <Table2 className="w-3.5 h-3.5" />
+                    <span>جدول تفاعلي</span>
+                  </button>
+                </div>
+              </div>
               <div className="flex items-center gap-1">
                 <button type="button" onClick={() => move(idx, -1)} disabled={idx === 0} title="للأعلى" className="p-1.5 rounded-lg text-[#777777] hover:bg-[#F7F7F7] disabled:opacity-30 cursor-pointer">
                   <ArrowUp className="w-4 h-4" />
@@ -320,7 +372,11 @@ export const QuizEditor: React.FC<Props> = ({
               value={q.text}
               onChange={(v) => patch(q.id, { text: v })}
               maxLength={LIMITS.text}
-              placeholder="اكتب نص السؤال… (استخدم شريط الرموز للجذور والكسور)"
+              placeholder={
+                isTable
+                  ? 'اكتب رأس السؤال للجدول (مثال: أكمل الخانات الفارغة في الجدول التالي...)'
+                  : 'اكتب نص السؤال… (استخدم شريط الرموز للجذور والكسور)'
+              }
               onFocusField={onFocusField}
             />
             {showPreview && q.text.trim() && (
@@ -334,8 +390,20 @@ export const QuizEditor: React.FC<Props> = ({
               <QuizFigureEditor figure={q.figure} onChange={(f) => patch(q.id, { figure: f })} />
             </div>
 
-            {/* الخيارات */}
-            {hasChoices ? (
+            {isTable ? (
+              <div className="flex flex-col gap-3">
+                <QuizTableEditor
+                  table={q.table ?? createDefaultTableQuestion()}
+                  onChange={(t) => patch(q.id, { questionType: 'table', table: t, choices: [], correctIndex: -1 })}
+                />
+                {showPreview && q.table && (
+                  <div className="rounded-2xl bg-[#F8FAFC] border border-[#E5E5E5] p-3 flex flex-col gap-1.5">
+                    <span className="text-[11px] font-black text-[#777777]">معاينة الجدول كما سيظهر للطالب:</span>
+                    <QuestionTableView table={q.table} mode="preview" />
+                  </div>
+                )}
+              </div>
+            ) : hasChoices ? (
               <div className="flex flex-col gap-2">
                 <span className="text-xs font-black text-[#3C3C3C]">الخيارات (اختر الصحيح بالدائرة)</span>
                 {q.choices.map((c, ci) => (
@@ -403,23 +471,31 @@ export const QuizEditor: React.FC<Props> = ({
 
             <div className="flex flex-col gap-2">
               <label className="flex flex-col gap-1.5">
-                <span className="text-xs font-black text-[#3C3C3C]">شرح الحل (اختياري — يدعم الكسور والجذور والأشكال)</span>
+                <span className="text-xs font-black text-[#3C3C3C]">شرح الحل (اختياري — يدعم الكسور والجذور والجداول والمقارنات والأشكال)</span>
                 <MathField
                   multiline
                   rows={2}
                   value={q.explanation}
                   onChange={(v) => patch(q.id, { explanation: v })}
                   maxLength={LIMITS.explanation}
-                  placeholder="خطوات الحل أو المعادلات باستخدام شريط الرموز…"
+                  placeholder="خطوات الحل أو القوانين أو جدول مقارنة بصيغة Markdown باستخدام | ..."
                   onFocusField={onFocusField}
                 />
               </label>
-              {showPreview && q.explanation.trim() && (
-                <div className="rounded-2xl bg-[#F7F7F7] border border-[#E5E5E5] px-3 py-2 text-sm font-bold text-[#3C3C3C]">
-                  <span className="block text-[11px] font-black text-[#777777] mb-0.5">معاينة الشرح:</span>
-                  <MathText text={q.explanation} />
-                </div>
-              )}
+              {showPreview &&
+                (q.explanation.trim() ||
+                  q.explanationTable ||
+                  q.explanationComparison ||
+                  q.explanationChart ||
+                  q.explanationFigure) && (
+                  <RichExplanationView
+                    explanation={q.explanation}
+                    explanationTable={q.explanationTable}
+                    explanationComparison={q.explanationComparison}
+                    explanationChart={q.explanationChart}
+                    explanationFigure={q.explanationFigure}
+                  />
+                )}
               <div className="flex flex-wrap items-start gap-2">
                 <QuizChartEditor
                   chart={q.explanationChart}
@@ -449,11 +525,19 @@ export const QuizEditor: React.FC<Props> = ({
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={addQuestion}
+          onClick={() => addQuestion('mcq')}
           disabled={questions.length >= LIMITS.maxQuestions}
           className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-white border-2 border-[#E5E5E5] border-b-4 text-sm font-black text-[#1899D6] cursor-pointer disabled:opacity-50"
         >
-          <PlusCircle className="w-4 h-4" /> إضافة سؤال
+          <PlusCircle className="w-4 h-4" /> إضافة سؤال خيارات
+        </button>
+        <button
+          type="button"
+          onClick={() => addQuestion('table')}
+          disabled={questions.length >= LIMITS.maxQuestions}
+          className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-[#F5ECFF] border-2 border-[#CE82FF] border-b-4 text-sm font-black text-[#8938D6] cursor-pointer disabled:opacity-50"
+        >
+          <Table2 className="w-4 h-4" /> إضافة سؤال جدول تفاعلي
         </button>
       </div>
 

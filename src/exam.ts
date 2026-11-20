@@ -3,6 +3,13 @@ import { db, handleFirestoreError, OperationType } from './firebase';
 import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion } from './types';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
+import {
+  gradeTableQuestion,
+  sanitizeExplanationComparison,
+  sanitizeExplanationTable,
+  sanitizeTableQuestion,
+  tableQuestionProblem,
+} from './quizTable';
 
 export const EXAM_MAX_QUESTIONS = 100;
 
@@ -19,14 +26,17 @@ export function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-/** السؤال صالح للاختبار: خياران على الأقل وإجابة صحيحة محددة. */
+/** السؤال صالح للاختبار: خيارات صالحة أو جدول به فراغات متوقعة. */
 export function isExamReady(q: QuizQuestion): boolean {
+  if (!q.text.trim()) return false;
+  if (q.questionType === 'table' || (q.table && q.choices.length === 0)) {
+    return tableQuestionProblem(q.table) === null;
+  }
   return (
     q.choices.length >= 2 &&
     q.correctIndex >= 0 &&
     q.correctIndex < q.choices.length &&
-    q.choices.every((c) => c.trim().length > 0) &&
-    q.text.trim().length > 0
+    q.choices.every((c) => c.trim().length > 0)
   );
 }
 
@@ -44,21 +54,29 @@ export function availableCount(quizzes: MyQuiz[], settings: Pick<ExamSettings, '
 }
 
 function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean): ExamQuestion {
-  let choices = q.choices.slice();
-  let correctIndex = q.correctIndex;
-  if (shuffleChoices) {
+  const isTable = q.questionType === 'table' || Boolean(q.table && q.choices.length === 0);
+  let choices = isTable ? [] : q.choices.slice();
+  let correctIndex = isTable ? -1 : q.correctIndex;
+  if (!isTable && shuffleChoices) {
     const order = shuffle(choices.map((_, i) => i));
     choices = order.map((i) => q.choices[i]);
     correctIndex = order.indexOf(q.correctIndex);
   }
+  const table = isTable && q.table ? sanitizeTableQuestion(q.table) : null;
   const chart = q.chart ? sanitizeChart(q.chart) : null;
   const figure = q.figure ? sanitizeFigure(q.figure) : null;
   const explanationChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
   const explanationFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
+  const explanationTable = q.explanationTable ? sanitizeExplanationTable(q.explanationTable) : null;
+  const explanationComparison = q.explanationComparison
+    ? sanitizeExplanationComparison(q.explanationComparison)
+    : null;
   return {
     id: `${quiz.id}:${q.id}`.slice(0, 120),
     sourceQuizId: quiz.id,
     sourceTitle: quiz.title,
+    ...(isTable ? { questionType: 'table' as const } : {}),
+    ...(table ? { table } : {}),
     text: q.text,
     choices,
     correctIndex,
@@ -67,6 +85,8 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     ...(figure ? { figure } : {}),
     ...(explanationChart ? { explanationChart } : {}),
     ...(explanationFigure ? { explanationFigure } : {}),
+    ...(explanationTable ? { explanationTable } : {}),
+    ...(explanationComparison ? { explanationComparison } : {}),
   };
 }
 
@@ -118,8 +138,36 @@ export function buildExam(quizzes: MyQuiz[], settings: ExamSettings): ExamQuesti
   return ordered.slice(0, EXAM_MAX_QUESTIONS).map((it) => toExamQuestion(it.q, it.quiz, settings.shuffleChoices));
 }
 
-export function scoreExam(questions: ExamQuestion[], answers: number[]): number {
-  return questions.reduce((n, q, i) => n + (answers[i] === q.correctIndex ? 1 : 0), 0);
+export function isQuestionAnswered(
+  q: ExamQuestion,
+  idx: number,
+  answers: number[],
+  tableAnswers?: Record<string, Record<string, string>>
+): boolean {
+  if (q.questionType === 'table' || q.table) {
+    return gradeTableQuestion(q.table, tableAnswers?.[String(idx)]).answeredBlanks > 0;
+  }
+  return (answers[idx] ?? -1) >= 0;
+}
+
+export function isQuestionCorrect(
+  q: ExamQuestion,
+  idx: number,
+  answers: number[],
+  tableAnswers?: Record<string, Record<string, string>>
+): boolean {
+  if (q.questionType === 'table' || q.table) {
+    return gradeTableQuestion(q.table, tableAnswers?.[String(idx)]).isAllCorrect;
+  }
+  return answers[idx] === q.correctIndex;
+}
+
+export function scoreExam(
+  questions: ExamQuestion[],
+  answers: number[],
+  tableAnswers?: Record<string, Record<string, string>>
+): number {
+  return questions.reduce((n, q, i) => n + (isQuestionCorrect(q, i, answers, tableAnswers) ? 1 : 0), 0);
 }
 
 export function defaultExamTitle(settings: ExamSettings): string {
@@ -149,16 +197,26 @@ export function buildAttempt(
   questions: ExamQuestion[],
   answers: number[],
   durationSec: number,
-  finishedAt: number
+  finishedAt: number,
+  tableAnswers?: Record<string, Record<string, string>>
 ): Omit<QuizAttempt, 'createdAt'> {
+  const hasTableAnswers = Boolean(tableAnswers && Object.keys(tableAnswers).length > 0);
   return {
     id,
     ownerId,
     title: defaultExamTitle(settings).slice(0, 200),
     settings,
     questions,
-    answers: questions.map((_, i) => (Number.isInteger(answers[i]) ? answers[i] : -1)),
-    score: scoreExam(questions, answers),
+    answers: questions.map((q, i) => {
+      if (q.questionType === 'table' || q.table) {
+        const g = gradeTableQuestion(q.table, tableAnswers?.[String(i)]);
+        if (g.answeredBlanks === 0) return -1;
+        return g.isAllCorrect ? 1 : 0;
+      }
+      return Number.isInteger(answers[i]) ? answers[i] : -1;
+    }),
+    ...(hasTableAnswers ? { tableAnswers } : {}),
+    score: scoreExam(questions, answers, tableAnswers),
     total: questions.length,
     durationSec: Math.max(0, Math.round(durationSec)),
     finishedAt,
@@ -173,6 +231,17 @@ export async function saveAttempt(attempt: Omit<QuizAttempt, 'createdAt'>): Prom
       createdAt: serverTimestamp(),
     });
   } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    // Fallback if older firestore.rules are still active on the database and reject top-level tableAnswers
+    if (/permission/i.test(raw) && attempt.tableAnswers) {
+      const stripped = { ...attempt };
+      delete stripped.tableAnswers;
+      await setDoc(doc(db, 'users', attempt.ownerId, 'quizAttempts', attempt.id), {
+        ...stripped,
+        createdAt: serverTimestamp(),
+      });
+      return;
+    }
     handleFirestoreError(err, OperationType.CREATE, path);
   }
 }

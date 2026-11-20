@@ -797,7 +797,7 @@ export async function syncPlatformDbBeforeBoot(
 
   try {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3200);
+    const timer = window.setTimeout(() => controller.abort(), 1800);
     const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
       cache: 'no-store',
       signal: controller.signal,
@@ -858,7 +858,10 @@ export async function syncPlatformDbBeforeBoot(
         storedCustomDifferent ||
         getPreviousFirebaseConfigs().length > 0))
   ) {
-    restPtr = await resolveLatestFirestoreMigrationRest().catch(() => null);
+    restPtr = await Promise.race([
+      resolveLatestFirestoreMigrationRest().catch(() => null),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2000)),
+    ]);
   }
 
   if (backendAvailable || restPtr) {

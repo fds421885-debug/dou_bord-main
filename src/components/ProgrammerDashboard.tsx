@@ -35,6 +35,7 @@ import {
   addBackupDatabase,
   addPlayerDatabase,
   announceViaBackupDatabase,
+  checkActiveDatabaseRulesCompliance,
   getOrInitFirebaseApp,
   MigrationNeedsSetupError,
   parseFirebaseConfigSnippet,
@@ -43,6 +44,8 @@ import {
   removeBackupDatabase,
   removePlayerDatabase,
   removeProgrammerMember,
+  RULES_UPDATE_CHANGES_AR,
+  RULES_UPDATE_STEPS_AR,
   runFirebaseMigration,
   verifyDatabaseBeforeAdd,
   type MigrationProgress,
@@ -120,6 +123,17 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [copiedRules, setCopiedRules] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const [showRulesPreview, setShowRulesPreview] = useState(false);
+  const [rulesCompliance, setRulesCompliance] = useState<{
+    checking: boolean;
+    compliant: boolean | null;
+    checkedProjectId: string;
+    reason?: string;
+  }>({
+    checking: true,
+    compliant: null,
+    checkedProjectId: activeProjectId,
+  });
+  const [showRulesGuideDetails, setShowRulesGuideDetails] = useState(false);
   const [quotaStatus, setQuotaStatus] = useState<ProjectQuotaStatus>(() =>
     getCachedProjectQuotaStatus(activeProjectId)
   );
@@ -128,6 +142,38 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   }));
   const [justAddedDbId, setJustAddedDbId] = useState<string | null>(null);
   const [calibratingQuota, setCalibratingQuota] = useState(false);
+
+  const recheckActiveRules = async (bypassCache = true) => {
+    setRulesCompliance((prev) => ({ ...prev, checking: true }));
+    try {
+      const res = await checkActiveDatabaseRulesCompliance(
+        firebaseUser,
+        activeFirebaseConfig,
+        bypassCache
+      );
+      setRulesCompliance({
+        checking: false,
+        compliant: res.compliant,
+        checkedProjectId: res.checkedProjectId,
+        reason: res.reason,
+      });
+      if (!res.compliant) {
+        setShowRulesGuideDetails(true);
+      } else if (bypassCache) {
+        playDuoSound('correct');
+      }
+    } catch {
+      setRulesCompliance((prev) => ({
+        ...prev,
+        checking: false,
+      }));
+    }
+  };
+
+  useEffect(() => {
+    void recheckActiveRules(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firebaseUser.uid]);
 
   const registeredProjectIdsKey = useMemo(
     () =>
@@ -889,6 +935,161 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Rules Compliance & Step-by-Step Update Guide Card */}
+      {(() => {
+        const isOutdated = rulesCompliance.compliant === false;
+        const isUpToDate = rulesCompliance.compliant === true;
+        const expanded = isOutdated || showRulesGuideDetails;
+        const registeredProjects = Array.from(
+          new Set([
+            activeProjectId,
+            ...poolState.playerDatabases.map((d) => d.config.projectId),
+            ...poolState.backupDatabases.map((d) => d.config.projectId),
+          ])
+        );
+
+        return (
+          <div
+            className={`duo-card p-4 sm:p-5 border-2 flex flex-col gap-3 ${
+              isOutdated
+                ? 'bg-[#FFF5F5] border-[#FF4B4B]'
+                : isUpToDate
+                ? 'bg-[#F4FFE8] border-[#58CC02]'
+                : 'bg-[#F8FAFC] border-[#1CB0F6]'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                    isOutdated
+                      ? 'bg-[#FF4B4B] text-white'
+                      : isUpToDate
+                      ? 'bg-[#58CC02] text-white'
+                      : 'bg-[#1CB0F6] text-white'
+                  }`}
+                >
+                  {rulesCompliance.checking ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : isOutdated ? (
+                    <ShieldAlert className="w-5 h-5" />
+                  ) : (
+                    <ShieldCheck className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm sm:text-base font-black text-[#3C3C3C]">
+                      تحديث قواعد الأمان (firestore.rules) للنسخة الجديدة
+                    </h2>
+                    <span
+                      className={`px-2.5 py-0.5 rounded-lg text-[11px] font-black border ${
+                        rulesCompliance.checking
+                          ? 'bg-[#E6F7FF] border-[#1CB0F6] text-[#1899D6]'
+                          : isOutdated
+                          ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
+                          : isUpToDate
+                          ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]'
+                          : 'bg-white border-[#E5E5E5] text-[#777777]'
+                      }`}
+                    >
+                      {rulesCompliance.checking
+                        ? 'جاري فحص القواعد...'
+                        : isOutdated
+                        ? '⚠️ القواعد تحتاج تحديثاً فوراً'
+                        : isUpToDate
+                        ? 'القواعد محدثة ✓'
+                        : 'لم يكتمل الفحص'}
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold text-[#666666] mt-0.5">
+                    {isOutdated
+                      ? rulesCompliance.reason ||
+                        `القاعدة النشطة (${rulesCompliance.checkedProjectId}) تعمل على نسخة قديمة من firestore.rules؛ حدّثها لتفعيل الأسئلة المميزة ⭐ والجداول التفاعلية.`
+                      : isUpToDate
+                      ? `القاعدة النشطة (${rulesCompliance.checkedProjectId}) تدعم الجداول التفاعلية والأسئلة المميزة ⭐ بالكامل.`
+                      : 'تحقق من توافق قواعد الأمان على مشاريع Firebase المسجلة.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={rulesCompliance.checking}
+                  onClick={() => void recheckActiveRules(true)}
+                  className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] hover:border-[#1CB0F6] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-60"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-[#1899D6] ${rulesCompliance.checking ? 'animate-spin' : ''}`} />
+                  <span>إعادة فحص القواعد الآن</span>
+                </button>
+                {!isOutdated && (
+                  <button
+                    type="button"
+                    onClick={() => setShowRulesGuideDetails((v) => !v)}
+                    className="duo-btn px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-xs font-black text-[#1899D6] cursor-pointer"
+                  >
+                    {expanded ? 'إخفاء دليل التحديث' : 'عرض خطوات تحديث القواعد'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {expanded && (
+              <div className="pt-3 border-t border-black/10 flex flex-col gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="p-3 rounded-xl bg-white border border-[#E5E5E5] flex flex-col gap-1.5">
+                    <div className="text-xs font-black text-[#3C3C3C]">
+                      ما الجديد الذي أُضيف في ملف القواعد؟
+                    </div>
+                    <ul className="list-disc pr-4 text-[11px] font-bold text-[#555555] flex flex-col gap-1 leading-relaxed">
+                      {RULES_UPDATE_CHANGES_AR.map((item, idx) => (
+                        <li key={idx}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-white border border-[#E5E5E5] flex flex-col gap-1.5">
+                    <div className="text-xs font-black text-[#3C3C3C]">
+                      الخطوات التفصيلية للتطبيق والنشر في Firebase Console:
+                    </div>
+                    <ol className="text-[11px] font-bold text-[#555555] flex flex-col gap-1 leading-relaxed">
+                      {RULES_UPDATE_STEPS_AR.map((stepText, idx) => (
+                        <li key={idx}>{stepText}</li>
+                      ))}
+                    </ol>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyRules()}
+                    className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer"
+                  >
+                    {copiedRules ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedRules ? 'تم نسخ firestore.rules المحدّثة ✓' : 'نسخ firestore.rules المحدّثة'}</span>
+                  </button>
+
+                  {registeredProjects.map((pid) => (
+                    <a
+                      key={pid}
+                      href={`https://console.firebase.google.com/project/${encodeURIComponent(pid)}/firestore/rules`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] hover:border-[#1CB0F6] text-xs font-black text-[#3C3C3C]"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5 text-[#1899D6]" />
+                      <span>فتح Rules في Firebase Console ({pid})</span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Sub-tabs */}
       <div className="grid grid-cols-2 gap-3">

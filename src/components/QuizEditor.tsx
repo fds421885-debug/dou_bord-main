@@ -28,6 +28,7 @@ import {
   cleanQuestions,
   createMyQuizzesAutoSplit,
   emptyQuestion,
+  formatQuizSaveError,
   LIMITS,
   newQuestionId,
   updateMyQuiz,
@@ -258,15 +259,7 @@ export const QuizEditor: React.FC<Props> = ({
         }
       }
     } catch (e) {
-      let msg = 'تعذر الحفظ. تحقق من الاتصال وحاول مرة أخرى. مسودتك محفوظة على جهازك.';
-      const raw = e instanceof Error ? e.message : '';
-      if (/permission-denied|permission_denied/i.test(raw)) {
-        msg =
-          'قاعدة البيانات رفضت الحفظ لأن قواعد الأمان (firestore.rules) لم تُحدَّث بعد بالإصدار الجديد. انسخها من المشروع وانشرها في Firebase، ثم أعد المحاولة. مسودتك محفوظة.';
-      } else if (/quota|resource-exhausted/i.test(raw)) {
-        msg = 'انتهت حصة قاعدة البيانات مؤقتاً. مسودتك محفوظة على جهازك، حاول لاحقاً أو انقل البيانات لقاعدة أخرى.';
-      }
-      setError(msg);
+      setError(formatQuizSaveError(e));
     } finally {
       setSaving(false);
     }

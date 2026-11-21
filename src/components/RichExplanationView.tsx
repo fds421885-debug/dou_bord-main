@@ -2,6 +2,7 @@ import React from 'react';
 import { Lightbulb, Scale, Table2 } from 'lucide-react';
 import type { ExplanationComparison, ExplanationTable, QuizChart, QuizFigure } from '../types';
 import { MathText } from '../mathText';
+import { unwrapRowArray } from '../quizTable';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
 
@@ -192,18 +193,21 @@ export const RichExplanationView: React.FC<Props> = ({
                 </thead>
               )}
               <tbody>
-                {explanationTable.rows.map((r, ri) => (
-                  <tr key={ri} className="border-b last:border-b-0 border-[#E5E5E5] even:bg-[#FAFAFA]">
-                    {r.map((cell, ci) => (
-                      <td
-                        key={ci}
-                        className="px-3 py-2 text-right font-bold text-[#3C3C3C] border-l last:border-l-0 border-[#E5E5E5]"
-                      >
-                        <MathText text={cell} />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
+                {explanationTable.rows.map((rawRow, ri) => {
+                  const cells = unwrapRowArray(rawRow) as string[];
+                  return (
+                    <tr key={ri} className="border-b last:border-b-0 border-[#E5E5E5] even:bg-[#FAFAFA]">
+                      {cells.map((cell, ci) => (
+                        <td
+                          key={ci}
+                          className="px-3 py-2 text-right font-bold text-[#3C3C3C] border-l last:border-l-0 border-[#E5E5E5]"
+                        >
+                          <MathText text={String(cell ?? '')} />
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

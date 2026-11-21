@@ -24,9 +24,14 @@ import {
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
+  decodeExamAttemptFromFirestore,
+  decodeMyQuizFromFirestore,
+  decodeQuizQuestionFromFirestore,
+  decodeSharedQuizFromFirestore,
+  decodeStarredQuestionFromFirestore,
+  encodeExplanationTableForFirestore,
+  encodeTableForFirestore,
   sanitizeExplanationComparison,
-  sanitizeExplanationTable,
-  sanitizeTableQuestion,
 } from './quizTable';
 import {
   activateCustomFirebaseConfig,
@@ -45,6 +50,7 @@ import {
   getSyncedSourceKeys,
   getTargetFirebaseAppName,
   getTimestampMillis,
+  isFirestorePermissionError,
   isMasterProgrammerIdentity,
   isQuadNameValid,
   isSameFirebaseTarget,
@@ -818,7 +824,7 @@ function classifyMigrationError(err: unknown, projectId: string): Error {
   const raw = err instanceof Error ? err.message : String(err);
   const lower = raw.toLowerCase();
 
-  if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
+  if (isFirestorePermissionError(err)) {
     return new MigrationNeedsSetupError(
       'firestore_rules',
       projectId,
@@ -1448,7 +1454,7 @@ export async function verifyDatabaseBeforeAdd(params: {
     const raw = err instanceof Error ? err.message : String(err);
     const lower = raw.toLowerCase();
     const isAbort = lower.includes('abort') || lower.includes('timeout');
-    const isPerm = lower.includes('permission-denied') || lower.includes('permission_denied');
+    const isPerm = isFirestorePermissionError(err);
     const msg = isAbort
       ? `انتهت مهلة الاتصال بخادم Firestore أثناء فحص القواعد (${projectId}). تأكد من الشبكة وأعد المحاولة.`
       : isPerm
@@ -1520,10 +1526,10 @@ interface CollectedSourceData {
 function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<string, unknown> {
   const chart = q.chart ? sanitizeChart(q.chart) : null;
   const figure = q.figure ? sanitizeFigure(q.figure) : null;
-  const table = q.table ? sanitizeTableQuestion(q.table) : null;
+  const table = q.table ? encodeTableForFirestore(q.table) : null;
   const expChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
   const expFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
-  const expTable = q.explanationTable ? sanitizeExplanationTable(q.explanationTable) : null;
+  const expTable = q.explanationTable ? encodeExplanationTableForFirestore(q.explanationTable) : null;
   const expComp = q.explanationComparison
     ? sanitizeExplanationComparison(q.explanationComparison)
     : null;
@@ -1570,10 +1576,10 @@ function cleanSavedQuestionForFirestore(
 ): Record<string, unknown> {
   const chart = sq.chart ? sanitizeChart(sq.chart) : null;
   const figure = sq.figure ? sanitizeFigure(sq.figure) : null;
-  const table = sq.table ? sanitizeTableQuestion(sq.table) : null;
+  const table = sq.table ? encodeTableForFirestore(sq.table) : null;
   const expChart = sq.explanationChart ? sanitizeChart(sq.explanationChart) : null;
   const expFigure = sq.explanationFigure ? sanitizeFigure(sq.explanationFigure) : null;
-  const expTable = sq.explanationTable ? sanitizeExplanationTable(sq.explanationTable) : null;
+  const expTable = sq.explanationTable ? encodeExplanationTableForFirestore(sq.explanationTable) : null;
   const expComp = sq.explanationComparison
     ? sanitizeExplanationComparison(sq.explanationComparison)
     : null;
@@ -1654,7 +1660,9 @@ async function collectRoomDetails(
       )
     );
     const list: Question[] = [];
-    qSnap.forEach((d) => list.push(d.data() as Question));
+    qSnap.forEach((d) =>
+      list.push(decodeQuizQuestionFromFirestore(d.data() as Record<string, unknown>) as unknown as Question)
+    );
     list.sort((a, b) => a.orderIndex - b.orderIndex);
     if (list.length > 0) questions = list;
   } catch {
@@ -1757,7 +1765,7 @@ async function collectRoomDetails(
         query(collection(fromDb, 'rooms', room.id, 'sharedQuizzes'), where('roomId', '==', room.id))
       )
     );
-    sqSnap.forEach((d) => sharedQuizzes.push(d.data() as SharedQuiz));
+    sqSnap.forEach((d) => sharedQuizzes.push(decodeSharedQuizFromFirestore(d.data() as SharedQuiz)));
   } catch {
     // Ignore
   }
@@ -1995,7 +2003,7 @@ async function collectSourceData(
         9000
       );
       const live: MyQuiz[] = [];
-      qzSnap.forEach((d) => live.push(d.data() as MyQuiz));
+      qzSnap.forEach((d) => live.push(decodeMyQuizFromFirestore(d.data() as MyQuiz)));
       myQuizzes = live;
     } catch {
       // Keep local snapshot
@@ -2034,7 +2042,7 @@ async function collectSourceData(
         9000
       );
       const live: QuizAttempt[] = [];
-      atSnap.forEach((d) => live.push(d.data() as QuizAttempt));
+      atSnap.forEach((d) => live.push(decodeExamAttemptFromFirestore(d.data() as QuizAttempt)));
       quizAttempts = live;
     } catch {
       // Keep local snapshot
@@ -2055,7 +2063,7 @@ async function collectSourceData(
         7000
       );
       const live: StarredQuestion[] = [];
-      starSnap.forEach((d) => live.push(d.data() as StarredQuestion));
+      starSnap.forEach((d) => live.push(decodeStarredQuestionFromFirestore(d.data() as StarredQuestion)));
       if (live.length > 0) {
         starredQuestions = live;
       }
@@ -2323,8 +2331,7 @@ async function writePersonalCollectionsToDb(params: {
       try {
         await updateDoc(quizRef, { ...coreUpdatePayload, ...metaFields });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/permission/i.test(msg) && Object.keys(metaFields).length > 0) {
+        if (isFirestorePermissionError(err) && Object.keys(metaFields).length > 0) {
           await updateDoc(quizRef, coreUpdatePayload);
         } else {
           throw err;
@@ -2337,8 +2344,7 @@ async function writePersonalCollectionsToDb(params: {
     try {
       await setDoc(quizRef, { ...coreCreatePayload, ...metaFields });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/permission/i.test(msg) && Object.keys(metaFields).length > 0) {
+      if (isFirestorePermissionError(err) && Object.keys(metaFields).length > 0) {
         await setDoc(quizRef, coreCreatePayload);
       } else {
         throw err;
@@ -3270,7 +3276,7 @@ export async function runFirebaseMigration(params: {
             if (!qSnap.exists()) {
               const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
               const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
-              const sanitizedTable = q.table ? sanitizeTableQuestion(q.table) : null;
+              const sanitizedTable = q.table ? encodeTableForFirestore(q.table) : null;
               const sanitizedChoices =
                 Array.isArray(q.choices) && q.choices.length > 0
                   ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)
@@ -4261,7 +4267,7 @@ export async function restoreActiveSupervisorRoomFromSnapshot(params: {
     for (const q of cachedRoom.questions) {
       const sanitizedChart = q.chart ? sanitizeChart(q.chart) : null;
       const sanitizedFigure = q.figure ? sanitizeFigure(q.figure) : null;
-      const sanitizedTable = q.table ? sanitizeTableQuestion(q.table) : null;
+      const sanitizedTable = q.table ? encodeTableForFirestore(q.table) : null;
       const sanitizedChoices =
         Array.isArray(q.choices) && q.choices.length > 0
           ? q.choices.map((c) => String(c).slice(0, 500)).slice(0, 8)

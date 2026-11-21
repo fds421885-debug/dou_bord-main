@@ -1,11 +1,23 @@
 import { deleteDoc, doc, serverTimestamp, setDoc, updateDoc } from './firestoreTracked';
-import { db, handleFirestoreError, OperationType } from './firebase';
+import {
+  auth,
+  db,
+  extractErrorMessage,
+  handleFirestoreError,
+  isFirestoreDocumentTooLargeError,
+  isFirestoreInvalidArgumentError,
+  isFirestoreNetworkError,
+  isFirestorePermissionError,
+  isQuotaError,
+  OperationType,
+} from './firebase';
 import type { DrillStyle, MyQuiz, QuestionKind, QuizQuestion } from './types';
 import { chartProblem, parseChart, sanitizeChart } from './quizChart';
 import { figureProblem, parseFigure, sanitizeFigure } from './quizFigure';
 import { saveMyQuizMetaOverride } from './localDraftStore';
 import { notifyRulesUpdateNeeded } from './starredQuestions';
 import {
+  encodeQuestionFieldsForFirestore,
   parseTableQuestion,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
@@ -21,7 +33,7 @@ export const LIMITS = {
   maxChoices: 8,
   answer: 1000,
   explanation: 4000,
-  maxBytes: 880_000, // حد المستند في Firestore ≈ 1MB
+  maxBytes: 680_000, // هامش أمان مريح تحت حد 1MB الفعلي في Firestore
 } as const;
 
 function rand(): string {
@@ -985,10 +997,21 @@ export function validateForSave(
     }
   }
   if (!options.allowAutoSplit) {
-    const bytes = new TextEncoder().encode(JSON.stringify(cleaned)).length;
+    const encoded = cleaned.map((q) =>
+      encodeQuestionFieldsForFirestore(q as unknown as Record<string, unknown>)
+    );
+    const bytes = new TextEncoder().encode(JSON.stringify(encoded)).length;
     if (bytes > LIMITS.maxBytes) return 'حجم الاختبار كبير جداً للتعديل في مستند واحد، أنشئه كاختبار جديد ليُحفظ تلقائياً بأجزائه.';
   }
   return null;
+}
+
+export function prepareQuestionsForFirestore(
+  questions: QuizQuestion[]
+): Array<Record<string, unknown>> {
+  return cleanQuestions(questions).map((q) =>
+    encodeQuestionFieldsForFirestore(q as unknown as Record<string, unknown>)
+  );
 }
 
 export function splitQuestionsForFirestore(
@@ -998,8 +1021,11 @@ export function splitQuestionsForFirestore(
 ): QuizQuestion[][] {
   const cleaned = cleanQuestions(questions);
   if (cleaned.length === 0) return [];
+  const encodedList = cleaned.map((q) =>
+    encodeQuestionFieldsForFirestore(q as unknown as Record<string, unknown>)
+  );
   const encoder = new TextEncoder();
-  const fullBytes = encoder.encode(JSON.stringify(cleaned)).length;
+  const fullBytes = encoder.encode(JSON.stringify(encodedList)).length;
   if (fullBytes <= maxBytes && cleaned.length <= maxItemsPerChunk) {
     return [cleaned];
   }
@@ -1008,8 +1034,10 @@ export function splitQuestionsForFirestore(
   let current: QuizQuestion[] = [];
   let currentBytes = 2; // []
 
-  for (const q of cleaned) {
-    const qBytes = encoder.encode(JSON.stringify(q)).length + 1; // + comma
+  for (let i = 0; i < cleaned.length; i++) {
+    const q = cleaned[i];
+    const encodedQ = encodedList[i];
+    const qBytes = encoder.encode(JSON.stringify(encodedQ)).length + 1; // + comma
     if (
       current.length > 0 &&
       (currentBytes + qBytes > maxBytes || current.length >= maxItemsPerChunk)
@@ -1055,8 +1083,14 @@ export async function createMyQuiz(
   questions: QuizQuestion[],
   meta?: MyQuizMetaInput
 ): Promise<string> {
+  if (!auth.currentUser || auth.currentUser.uid !== uid) {
+    throw new Error('AUTH_SESSION_EXPIRED');
+  }
   const id = newQuizId();
-  const cleaned = cleanQuestions(questions);
+  const firestoreQuestions = prepareQuestionsForFirestore(questions);
+  if (firestoreQuestions.length === 0) {
+    throw new Error('EMPTY_QUIZ_QUESTIONS');
+  }
   const path = `users/${uid}/myQuizzes/${id}`;
   const metaPayload = buildQuizMetaPayload(meta);
   if (Object.keys(metaPayload).length > 0 && meta) {
@@ -1065,9 +1099,9 @@ export async function createMyQuiz(
   const coreDoc = {
     id,
     ownerId: uid,
-    title: title.trim().slice(0, LIMITS.title),
-    questions: cleaned,
-    questionCount: cleaned.length,
+    title: title.trim().slice(0, LIMITS.title) || 'اختبار',
+    questions: firestoreQuestions,
+    questionCount: firestoreQuestions.length,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
@@ -1077,8 +1111,7 @@ export async function createMyQuiz(
       ...metaPayload,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/permission-denied|permission_denied/i.test(msg) && Object.keys(metaPayload).length > 0) {
+    if (isFirestorePermissionError(err) && Object.keys(metaPayload).length > 0) {
       notifyRulesUpdateNeeded();
       try {
         await setDoc(doc(db, 'users', uid, 'myQuizzes', id), coreDoc);
@@ -1125,12 +1158,17 @@ export async function createMyQuizzesAutoSplit(
   try {
     return await saveChunks(chunks);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
     const hasOver100Chunk = chunks.some((c) => c.length > 100);
-    if (hasOver100Chunk && /permission|insufficient/i.test(msg)) {
+    if (hasOver100Chunk && isFirestorePermissionError(err)) {
       notifyRulesUpdateNeeded();
       const legacyChunks = splitQuestionsForFirestore(questions, LIMITS.maxBytes, 100);
       return await saveChunks(legacyChunks);
+    }
+    if (isFirestoreDocumentTooLargeError(err) || isFirestoreInvalidArgumentError(err)) {
+      const smallerChunks = splitQuestionsForFirestore(questions, 300_000, 100);
+      if (smallerChunks.length > chunks.length) {
+        return await saveChunks(smallerChunks);
+      }
     }
     throw err;
   }
@@ -1143,16 +1181,22 @@ export async function updateMyQuiz(
   questions: QuizQuestion[],
   meta?: MyQuizMetaInput
 ): Promise<void> {
-  const cleaned = cleanQuestions(questions);
+  if (!auth.currentUser || auth.currentUser.uid !== uid) {
+    throw new Error('AUTH_SESSION_EXPIRED');
+  }
+  const firestoreQuestions = prepareQuestionsForFirestore(questions);
+  if (firestoreQuestions.length === 0) {
+    throw new Error('EMPTY_QUIZ_QUESTIONS');
+  }
   const path = `users/${uid}/myQuizzes/${id}`;
   const metaPayload = buildQuizMetaPayload(meta);
   if (Object.keys(metaPayload).length > 0 && meta) {
     await saveMyQuizMetaOverride(uid, id, meta);
   }
   const coreUpdate = {
-    title: title.trim().slice(0, LIMITS.title),
-    questions: cleaned,
-    questionCount: cleaned.length,
+    title: title.trim().slice(0, LIMITS.title) || 'اختبار',
+    questions: firestoreQuestions,
+    questionCount: firestoreQuestions.length,
     updatedAt: serverTimestamp(),
   };
   try {
@@ -1161,8 +1205,7 @@ export async function updateMyQuiz(
       ...metaPayload,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/permission-denied|permission_denied/i.test(msg) && Object.keys(metaPayload).length > 0) {
+    if (isFirestorePermissionError(err) && Object.keys(metaPayload).length > 0) {
       notifyRulesUpdateNeeded();
       try {
         await updateDoc(doc(db, 'users', uid, 'myQuizzes', id), coreUpdate);
@@ -1173,6 +1216,36 @@ export async function updateMyQuiz(
     }
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
+}
+
+export function formatQuizSaveError(err: unknown): string {
+  const raw = extractErrorMessage(err);
+  if (raw.includes('AUTH_SESSION_EXPIRED')) {
+    return 'انتهت جلسة تسجيل الدخول أو تغيّر الحساب النشط. أعد تسجيل الدخول ثم احفظ الاختبار من مسودتك المحفوظة.';
+  }
+  if (raw.includes('EMPTY_QUIZ_QUESTIONS')) {
+    return 'لا توجد أسئلة صالحة للحفظ. تأكد من أن كل سؤال يحتوي نصاً وخيارات أو جدولاً مكتملًا.';
+  }
+  if (isFirestorePermissionError(err)) {
+    notifyRulesUpdateNeeded();
+    return 'قاعدة البيانات رفضت الحفظ لأن قواعد الأمان (firestore.rules) لم تُحدَّث بعد بالإصدار الجديد. حدّثها من لوحة المبرمج أو انسخها وانشرها في Firebase ثم أعد الحفظ — مسودتك محفوظة.';
+  }
+  if (isQuotaError(err)) {
+    return 'انتهت حصة قاعدة البيانات مؤقتاً. مسودتك محفوظة على جهازك، حاول لاحقاً أو بدّل إلى قاعدة احتياطية.';
+  }
+  if (isFirestoreDocumentTooLargeError(err)) {
+    return 'حجم الاختبار تجاوز الحد الأقصى لمستند واحد في قاعدة البيانات. أنشئه كاختبار جديد ليُقسّم تلقائياً إلى أجزاء.';
+  }
+  if (isFirestoreNetworkError(err)) {
+    return 'تعذر الاتصال بقاعدة البيانات حالياً. تحقق من الإنترنت وحاول مرة أخرى، مسودتك محفوظة على جهازك.';
+  }
+  if (isFirestoreInvalidArgumentError(err)) {
+    return `توجد قيمة غير صالحة في بيانات أحد الأسئلة (${raw.slice(0, 120)}). راجع الأسئلة وحاول مجدداً، مسودتك محفوظة.`;
+  }
+  const shortDetail = raw.trim().slice(0, 120);
+  return shortDetail
+    ? `تعذر حفظ الاختبار (${shortDetail}). مسودتك محفوظة على جهازك، حاول مرة أخرى.`
+    : 'تعذر حفظ الاختبار. تحقق من الاتصال وحاول مرة أخرى. مسودتك محفوظة على جهازك.';
 }
 
 export async function deleteMyQuiz(uid: string, id: string): Promise<void> {

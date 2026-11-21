@@ -1,10 +1,25 @@
 import type {
   ExplanationComparison,
   ExplanationTable,
+  MyQuiz,
+  QuizAttempt,
   QuizTableQuestion,
+  SharedQuiz,
+  StarredQuestion,
   TableCellConfig,
   TableCellInputType,
 } from './types';
+
+export function unwrapRowArray(row: unknown): unknown[] {
+  if (Array.isArray(row)) return row;
+  if (row && typeof row === 'object') {
+    const o = row as Record<string, unknown>;
+    if (Array.isArray(o.cells)) return o.cells;
+    if (Array.isArray(o.columns)) return o.columns;
+    if (Array.isArray(o.row)) return o.row;
+  }
+  return [];
+}
 
 export const TABLE_LIMITS = {
   maxRows: 12,
@@ -132,7 +147,8 @@ export function gradeTableQuestion(
   let answeredBlanks = 0;
   let correctBlanks = 0;
 
-  table.rows.forEach((row, r) => {
+  table.rows.forEach((rawRow, r) => {
+    const row = unwrapRowArray(rawRow) as TableCellConfig[];
     row.forEach((cell, c) => {
       if (!cell?.isBlank) return;
       totalBlanks++;
@@ -206,14 +222,15 @@ export function sanitizeTableQuestion(raw: unknown): QuizTableQuestion | null {
 
   let colCount = rawHeaders?.length ?? 0;
   for (const r of cleanRowsInput) {
-    if (Array.isArray(r)) {
-      colCount = Math.max(colCount, Math.min(TABLE_LIMITS.maxCols, r.length));
+    const arr = unwrapRowArray(r);
+    if (arr.length > 0) {
+      colCount = Math.max(colCount, Math.min(TABLE_LIMITS.maxCols, arr.length));
     }
   }
   if (colCount === 0) return null;
 
   const rows: TableCellConfig[][] = cleanRowsInput.map((r) => {
-    const arr = Array.isArray(r) ? r : [];
+    const arr = unwrapRowArray(r);
     const out: TableCellConfig[] = [];
     for (let c = 0; c < colCount; c++) {
       out.push(sanitizeTableCell(arr[c]));
@@ -293,13 +310,13 @@ export function sanitizeExplanationTable(raw: unknown): ExplanationTable | null 
     : [];
   const colCount = Math.max(
     rawHeaders.length,
-    ...rawRows.map((r) => (Array.isArray(r) ? Math.min(8, r.length) : 0))
+    ...rawRows.map((r) => Math.min(8, unwrapRowArray(r).length))
   );
   if (colCount === 0 || (rawHeaders.length === 0 && rawRows.length === 0)) return null;
 
   const headers = Array.from({ length: colCount }, (_, c) => rawHeaders[c] ?? '');
   const rows = rawRows.map((r) => {
-    const arr = Array.isArray(r) ? r : [];
+    const arr = unwrapRowArray(r);
     return Array.from({ length: colCount }, (_, c) => String(arr[c] ?? '').trim().slice(0, 240));
   });
   const title = typeof o.title === 'string' ? o.title.trim().slice(0, 120) : '';
@@ -327,5 +344,117 @@ export function sanitizeExplanationComparison(raw: unknown): ExplanationComparis
     secondLabel: secondLabel || 'القيمة الثانية',
     secondValue,
     ...(verdict ? { verdict } : {}),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  تشفير وفك الجداول لقاعدة Firestore (لا تدعم مصفوفات داخل مصفوفات) */
+/* ------------------------------------------------------------------ */
+
+export function encodeTableForFirestore(rawTable: unknown): Record<string, unknown> | null {
+  const clean = sanitizeTableQuestion(rawTable);
+  if (!clean) return null;
+  return {
+    ...(clean.title ? { title: clean.title } : {}),
+    ...(clean.caption ? { caption: clean.caption } : {}),
+    hasHeaderRow: Boolean(clean.hasHeaderRow),
+    ...(clean.headers ? { headers: clean.headers } : {}),
+    rows: clean.rows.map((cells) => ({ cells })),
+  };
+}
+
+export function encodeExplanationTableForFirestore(
+  rawExpTable: unknown
+): Record<string, unknown> | null {
+  const clean = sanitizeExplanationTable(rawExpTable);
+  if (!clean) return null;
+  return {
+    ...(clean.title ? { title: clean.title } : {}),
+    headers: clean.headers,
+    rows: clean.rows.map((cells) => ({ cells })),
+  };
+}
+
+export function encodeQuestionFieldsForFirestore<T extends Record<string, unknown>>(q: T): T {
+  const out: Record<string, unknown> = { ...q };
+  if ('table' in out) {
+    const encodedTable = out.table ? encodeTableForFirestore(out.table) : null;
+    if (encodedTable) out.table = encodedTable;
+    else delete out.table;
+  }
+  if ('explanationTable' in out) {
+    const encodedExp = out.explanationTable
+      ? encodeExplanationTableForFirestore(out.explanationTable)
+      : null;
+    if (encodedExp) out.explanationTable = encodedExp;
+    else delete out.explanationTable;
+  }
+  return out as T;
+}
+
+export function decodeQuizQuestionFromFirestore<T extends Record<string, unknown>>(q: T): T {
+  if (!q || typeof q !== 'object') return q;
+  let changed = false;
+  const out: Record<string, unknown> = { ...q };
+  if (out.table) {
+    const decoded = sanitizeTableQuestion(out.table);
+    if (decoded) {
+      out.table = decoded;
+      changed = true;
+    } else {
+      delete out.table;
+      changed = true;
+    }
+  }
+  if (out.explanationTable) {
+    const decodedExp = sanitizeExplanationTable(out.explanationTable);
+    if (decodedExp) {
+      out.explanationTable = decodedExp;
+      changed = true;
+    } else {
+      delete out.explanationTable;
+      changed = true;
+    }
+  }
+  return (changed ? out : q) as T;
+}
+
+export function decodeMyQuizFromFirestore(quiz: MyQuiz): MyQuiz {
+  if (!quiz || !Array.isArray(quiz.questions)) return quiz;
+  return {
+    ...quiz,
+    questions: quiz.questions.map((q) =>
+      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as MyQuiz['questions'][number]
+    ),
+  };
+}
+
+export function decodeSharedQuizFromFirestore(quiz: SharedQuiz): SharedQuiz {
+  if (!quiz || !Array.isArray(quiz.questions)) return quiz;
+  return {
+    ...quiz,
+    questions: quiz.questions.map((q) =>
+      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as SharedQuiz['questions'][number]
+    ),
+  };
+}
+
+export function decodeExamAttemptFromFirestore(attempt: QuizAttempt): QuizAttempt {
+  if (!attempt || !Array.isArray(attempt.questions)) return attempt;
+  return {
+    ...attempt,
+    questions: attempt.questions.map((q) =>
+      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as QuizAttempt['questions'][number]
+    ),
+  };
+}
+
+export function decodeStarredQuestionFromFirestore(item: StarredQuestion): StarredQuestion {
+  if (!item || !item.question) return item;
+  return {
+    ...item,
+    question: decodeQuizQuestionFromFirestore(
+      item.question as unknown as Record<string, unknown>
+    ) as unknown as StarredQuestion['question'],
   };
 }

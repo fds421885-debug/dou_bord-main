@@ -11,7 +11,7 @@ import {
   writeBatch,
   type DocumentReference,
 } from './firestoreTracked';
-import { db, handleFirestoreError, OperationType } from './firebase';
+import { db, handleFirestoreError, isFirestorePermissionError, OperationType } from './firebase';
 import type { Competition, Room } from './types';
 
 function delay(ms: number): Promise<void> {
@@ -30,11 +30,9 @@ async function commitDeleteRefs(refs: DocumentReference[]): Promise<void> {
 }
 
 export function isPermissionOrMissingError(err: unknown): boolean {
+  if (isFirestorePermissionError(err)) return true;
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return (
-    msg.includes('permission-denied') ||
-    msg.includes('permission_denied') ||
-    msg.includes('insufficient permissions') ||
     msg.includes('not-found') ||
     msg.includes('no document to update')
   );

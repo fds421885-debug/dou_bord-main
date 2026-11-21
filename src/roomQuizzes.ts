@@ -16,7 +16,8 @@ import {
   saveMyQuizzesSnapshot,
   type StoredMyQuizzesSnapshot,
 } from './localDraftStore';
-import { cleanQuestions, LIMITS } from './myQuizzes';
+import { cleanQuestions, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
+import { decodeMyQuizFromFirestore, decodeSharedQuizFromFirestore } from './quizTable';
 import type { MyQuiz, SharedQuiz } from './types';
 
 export function makeSharedQuizDocId(uid: string, quizId: string): string {
@@ -51,7 +52,7 @@ export function useMyQuizzes(uid: string) {
     void loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').then((snap) => {
       if (cancelled || !snap || snap.ownerId !== uid) return;
       if (snap.quizzes.length > 0) {
-        setMyQuizzes(snap.quizzes);
+        setMyQuizzes(snap.quizzes.map(decodeMyQuizFromFirestore));
       }
     });
 
@@ -61,7 +62,7 @@ export function useMyQuizzes(uid: string) {
       q,
       (snap) => {
         const list: MyQuiz[] = [];
-        snap.forEach((d) => list.push(d.data() as MyQuiz));
+        snap.forEach((d) => list.push(decodeMyQuizFromFirestore(d.data() as MyQuiz)));
         list.sort(
           (a, b) =>
             getTimestampMillis(b.updatedAt || b.createdAt) -
@@ -106,7 +107,7 @@ export function useRoomSharedQuizzes(roomId: string) {
       q,
       (snap) => {
         const list: SharedQuiz[] = [];
-        snap.forEach((d) => list.push(d.data() as SharedQuiz));
+        snap.forEach((d) => list.push(decodeSharedQuizFromFirestore(d.data() as SharedQuiz)));
         list.sort((a, b) => getTimestampMillis(b.updatedAt) - getTimestampMillis(a.updatedAt));
         setSharedQuizzes(list);
         setLoading(false);
@@ -131,8 +132,8 @@ export async function publishQuizToRoom(params: {
   quiz: MyQuiz;
 }): Promise<string> {
   const { roomId, authorId, authorName, authorRole, quiz } = params;
-  const cleaned = cleanQuestions(quiz.questions || []);
-  if (cleaned.length === 0) return '';
+  const firestoreQuestions = prepareQuestionsForFirestore(quiz.questions || []);
+  if (firestoreQuestions.length === 0) return '';
   const sharedDocId = makeSharedQuizDocId(authorId, quiz.id);
   const path = `rooms/${roomId}/sharedQuizzes/${sharedDocId}`;
 
@@ -144,8 +145,8 @@ export async function publishQuizToRoom(params: {
       authorName: authorName.trim().slice(0, 120) || 'مشارك',
       authorRole,
       title: quiz.title.trim().slice(0, LIMITS.title) || 'اختبار',
-      questions: cleaned,
-      questionCount: cleaned.length,
+      questions: firestoreQuestions,
+      questionCount: firestoreQuestions.length,
       updatedAt: serverTimestamp(),
     });
   } catch (err) {

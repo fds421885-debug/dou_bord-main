@@ -54,6 +54,7 @@ import {
   type StoredSavedTestsSnapshot,
 } from '../localDraftStore';
 import { MathText } from '../mathText';
+import { decodeQuizQuestionFromFirestore, encodeQuestionFieldsForFirestore } from '../quizTable';
 import { buildRoomQuizPool, useMyQuizzes, useRoomSharedQuizzes } from '../roomQuizzes';
 import type {
   Competition,
@@ -186,7 +187,15 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
       q,
       (snap) => {
         const list: CompetitionQuestion[] = [];
-        snap.forEach((d) => list.push(d.data() as CompetitionQuestion));
+        snap.forEach((d) => {
+          const item = d.data() as CompetitionQuestion;
+          list.push({
+            ...item,
+            question: decodeQuizQuestionFromFirestore(
+              item.question as unknown as Record<string, unknown>
+            ) as unknown as CompetitionQuestion['question'],
+          });
+        });
         list.sort((a, b) => a.orderIndex - b.orderIndex);
         setCompQuestions(list);
       },
@@ -385,7 +394,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             roomId: room.id,
             competitionId: compId,
             orderIndex: idx + 1,
-            question: eq,
+            question: encodeQuestionFieldsForFirestore(
+              eq as unknown as Record<string, unknown>
+            ),
             status: 'solving',
             winnerId: '',
             winnerName: '',

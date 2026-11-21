@@ -17,6 +17,7 @@ import {
   buildDrillPromptForQuestion,
   createMyQuizzesAutoSplit,
   DRILL_STYLE_LABELS,
+  formatQuizSaveError,
   parseQuizBundleJson,
 } from '../myQuizzes';
 import { MathText } from '../mathText';
@@ -203,7 +204,7 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
       onCreated(savedItems);
     } catch (err) {
       playDuoSound('wrong');
-      setError(err instanceof Error ? err.message : 'تعذر حفظ اختبار التقوية.');
+      setError(formatQuizSaveError(err));
     } finally {
       setSaving(false);
     }

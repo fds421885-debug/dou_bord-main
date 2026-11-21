@@ -26,6 +26,7 @@ import {
   googleProvider,
   handleFirestoreError,
   isCustomFirebaseConfig,
+  isFirestorePermissionError,
   isQuadNameValid,
   OperationType,
   resetToDefaultFirebaseConfig,
@@ -123,7 +124,7 @@ function classifyAuthOrFirestoreError(
       message: 'بريد هذا الحساب غير مفعّل (email_verified). يرجى تسجيل الدخول بحساب Google مُفعّل البريد.',
     };
   }
-  if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
+  if (isFirestorePermissionError(err)) {
     return {
       kind: 'other',
       message:

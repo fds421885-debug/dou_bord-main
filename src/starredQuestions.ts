@@ -8,11 +8,17 @@ import {
   setDoc,
   where,
 } from './firestoreTracked';
-import { activeProjectId, db } from './firebase';
+import { activeProjectId, db, isFirestorePermissionError } from './firebase';
 import { loadSessionSnapshot, saveSessionSnapshot, type StoredStarredQuestionsSnapshot } from './localDraftStore';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
-import { sanitizeExplanationComparison, sanitizeExplanationTable, sanitizeTableQuestion } from './quizTable';
+import {
+  decodeStarredQuestionFromFirestore,
+  encodeQuestionFieldsForFirestore,
+  sanitizeExplanationComparison,
+  sanitizeExplanationTable,
+  sanitizeTableQuestion,
+} from './quizTable';
 import type { ExamQuestion, QuizQuestion, StarredQuestion } from './types';
 
 export interface RulesUpdateNotice {
@@ -127,8 +133,7 @@ export async function toggleStarredQuestion(params: {
       await deleteDoc(doc(db, 'users', ownerId, 'starredQuestions', id));
       return { starred: false, id, rulesNeedsUpdate: false };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const rulesNeedsUpdate = /permission-denied|permission_denied/i.test(msg);
+      const rulesNeedsUpdate = isFirestorePermissionError(err);
       if (rulesNeedsUpdate) notifyRulesUpdateNeeded();
       return {
         starred: false,
@@ -160,12 +165,14 @@ export async function toggleStarredQuestion(params: {
   try {
     await setDoc(doc(db, 'users', ownerId, 'starredQuestions', id), {
       ...item,
+      question: encodeQuestionFieldsForFirestore(
+        cleanedQuestion as unknown as Record<string, unknown>
+      ),
       createdAt: serverTimestamp(),
     });
     return { starred: true, id, rulesNeedsUpdate: false };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const rulesNeedsUpdate = /permission-denied|permission_denied/i.test(msg);
+    const rulesNeedsUpdate = isFirestorePermissionError(err);
     if (rulesNeedsUpdate) notifyRulesUpdateNeeded();
     return {
       starred: true,
@@ -188,8 +195,7 @@ export async function removeStarredQuestion(
     await deleteDoc(doc(db, 'users', ownerId, 'starredQuestions', starredId));
     return { rulesNeedsUpdate: false };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const rulesNeedsUpdate = /permission-denied|permission_denied/i.test(msg);
+    const rulesNeedsUpdate = isFirestorePermissionError(err);
     if (rulesNeedsUpdate) notifyRulesUpdateNeeded();
     return { rulesNeedsUpdate };
   }
@@ -205,8 +211,9 @@ export function subscribeStarredQuestions(
 
   void loadLocalStarredQuestions(ownerId).then((items) => {
     if (!alive) return;
-    localCache = items;
-    if (items.length > 0) onItems(items);
+    const decoded = items.map(decodeStarredQuestionFromFirestore);
+    localCache = decoded;
+    if (decoded.length > 0) onItems(decoded);
   });
 
   const q = query(collection(db, 'users', ownerId, 'starredQuestions'), where('ownerId', '==', ownerId));
@@ -215,18 +222,15 @@ export function subscribeStarredQuestions(
     (snap) => {
       if (!alive) return;
       const remote: StarredQuestion[] = [];
-      snap.forEach((d) => remote.push(d.data() as StarredQuestion));
+      snap.forEach((d) => remote.push(decodeStarredQuestionFromFirestore(d.data() as StarredQuestion)));
       remote.sort((a, b) => (b.starredAt || 0) - (a.starredAt || 0));
 
-      // Keep any local items if Firestore returned empty only when offline cache had unsynced entries?
-      // Normally remote is authoritative when rules permit.
       onItems(remote);
       void saveLocalStarredQuestions(ownerId, remote);
     },
     (err) => {
       if (!alive) return;
-      const msg = String(err?.message || '');
-      if (/permission/i.test(msg)) {
+      if (isFirestorePermissionError(err)) {
         notifyRulesUpdateNeeded();
         onRulesDenied?.();
       }

@@ -47,6 +47,7 @@ import {
   handleFirestoreError,
   hasSwitchRequiresLogin,
   isCustomFirebaseConfig,
+  isFirestorePermissionError,
   isMasterProgrammerIdentity,
   isQuadNameValid,
   isSameFirebaseTarget,
@@ -1316,7 +1317,7 @@ export default function App() {
         setProfileLoadError(
           'تم الوصول للحد اليومي للقاعدة الحالية — يمكنك التبديل الآن لأي قاعدة بيانات متاحة لتفعيلها عند الجميع.'
         );
-      } else if (lower.includes('permission-denied') || lower.includes('permission_denied')) {
+      } else if (isFirestorePermissionError(err)) {
         setProfileLoadError(
           'تعذر تحميل بيانات الحساب بسبب صلاحيات قاعدة البيانات. تأكد من تفعيل بريد الحساب أو أعد تسجيل الدخول.'
         );

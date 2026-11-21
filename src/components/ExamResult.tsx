@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRight, RotateCcw, CheckCircle2, RefreshCw } from 'lucide-react';
 import type { ExamQuestion, ExamSettings } from '../types';
 import { buildAttempt, saveAttempt, scoreExam } from '../exam';
+import { isFirestorePermissionError, isQuotaError } from '../firebase';
 import { deleteSessionSnapshot } from '../localDraftStore';
 import { ExamReview } from './ExamReview';
 import { DuoLoading } from './DuoLoading';
@@ -49,11 +50,10 @@ export const ExamResult: React.FC<Props> = ({
       await deleteSessionSnapshot('exam_session');
       setState('saved');
     } catch (e) {
-      const raw = e instanceof Error ? e.message : '';
       setErr(
-        /permission/i.test(raw)
+        isFirestorePermissionError(e)
           ? 'قاعدة البيانات رفضت الحفظ لأن قواعد الأمان (firestore.rules) لم تُحدَّث بعد. انشرها ثم اضغط إعادة الحفظ — نتيجتك محفوظة على جهازك.'
-          : /quota|exhausted/i.test(raw)
+          : isQuotaError(e)
           ? 'حصة قاعدة البيانات منتهية مؤقتاً. نتيجتك محفوظة على جهازك، أعد الحفظ لاحقاً.'
           : 'تعذر الحفظ الآن. نتيجتك محفوظة على جهازك، أعد المحاولة.'
       );

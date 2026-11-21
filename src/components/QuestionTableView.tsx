@@ -8,6 +8,7 @@ import {
   emptyTableCell,
   isTableCellAnswerCorrect,
   TABLE_LIMITS,
+  unwrapRowArray,
 } from '../quizTable';
 
 interface ViewProps {
@@ -25,7 +26,7 @@ export const QuestionTableView: React.FC<ViewProps> = ({
 }) => {
   const colCount = Math.max(
     table.headers?.length ?? 0,
-    ...(table.rows || []).map((r) => r.length),
+    ...(table.rows || []).map((r) => unwrapRowArray(r).length),
     1
   );
 
@@ -54,7 +55,9 @@ export const QuestionTableView: React.FC<ViewProps> = ({
             </thead>
           )}
           <tbody>
-            {table.rows.map((row, r) => (
+            {table.rows.map((rawRow, r) => {
+              const row = unwrapRowArray(rawRow) as TableCellConfig[];
+              return (
               <tr key={r} className="border-b last:border-b-0 border-[#E5E5E5] odd:bg-white even:bg-[#FAFAFA]">
                 {Array.from({ length: colCount }, (_, c) => {
                   const cell: TableCellConfig = row[c] ?? emptyTableCell('');
@@ -169,7 +172,8 @@ export const QuestionTableView: React.FC<ViewProps> = ({
                   );
                 })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

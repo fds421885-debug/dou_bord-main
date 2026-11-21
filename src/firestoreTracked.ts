@@ -29,6 +29,50 @@ import {
 import { isQuotaError } from './firebase';
 import { recordFirestoreOperations, reportFirestoreQuotaExhausted } from './quotaTracker';
 
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  if (typeof val !== 'object' || val === null) return false;
+  const proto = Object.getPrototypeOf(val);
+  return proto === Object.prototype || proto === null;
+}
+
+function sanitizeFirestoreValue(val: unknown): unknown {
+  if (val === undefined || typeof val === 'function' || typeof val === 'symbol') {
+    return undefined;
+  }
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? val : 0;
+  }
+  if (Array.isArray(val)) {
+    const out: unknown[] = [];
+    for (const item of val) {
+      if (item === undefined || typeof item === 'function' || typeof item === 'symbol') continue;
+      if (Array.isArray(item)) {
+        // Firestore rejects Array<Array<...>> directly; wrap cleanly into { cells }
+        out.push({ cells: sanitizeFirestoreValue(item) });
+      } else {
+        const cleanItem = sanitizeFirestoreValue(item);
+        if (cleanItem !== undefined) out.push(cleanItem);
+      }
+    }
+    return out;
+  }
+  if (isPlainObject(val)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') continue;
+      const cleanVal = sanitizeFirestoreValue(v);
+      if (cleanVal !== undefined) out[k] = cleanVal;
+    }
+    return out;
+  }
+  // Preserve FieldValue sentinels (serverTimestamp, increment, deleteField), Timestamp, Date, GeoPoint, Bytes
+  return val;
+}
+
+function sanitizeFirestoreWritePayload<T>(data: T): T {
+  return sanitizeFirestoreValue(data) as T;
+}
+
 export {
   collection,
   doc,
@@ -106,11 +150,12 @@ export async function setDoc<AppModelType = DocumentData, DbModelType extends Do
   options?: SetOptions
 ): Promise<void> {
   const pid = resolveProjectId(reference);
+  const safeData = sanitizeFirestoreWritePayload(data);
   try {
     if (options) {
-      await rawSetDoc(reference, data as Partial<AppModelType>, options);
+      await rawSetDoc(reference, safeData as Partial<AppModelType>, options);
     } else {
-      await rawSetDoc(reference, data as AppModelType);
+      await rawSetDoc(reference, safeData as AppModelType);
     }
     recordFirestoreOperations(pid, { writes: 1 });
   } catch (err) {
@@ -124,8 +169,9 @@ export async function updateDoc<AppModelType = DocumentData, DbModelType extends
   data: Record<string, unknown>
 ): Promise<void> {
   const pid = resolveProjectId(reference);
+  const safeData = sanitizeFirestoreWritePayload(data);
   try {
-    await rawUpdateDoc(reference as DocumentReference<DocumentData, DocumentData>, data);
+    await rawUpdateDoc(reference as DocumentReference<DocumentData, DocumentData>, safeData);
     recordFirestoreOperations(pid, { writes: 1 });
   } catch (err) {
     if (isQuotaError(err)) reportFirestoreQuotaExhausted(pid);
@@ -159,16 +205,18 @@ export function writeBatch(firestore: Firestore): WriteBatch {
       options?: SetOptions
     ) {
       queuedWrites++;
+      const safeData = sanitizeFirestoreWritePayload(data);
       if (options) {
-        (inner.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(docRef, data, options);
+        (inner.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(docRef, safeData, options);
       } else {
-        (inner.set as (r: unknown, d: unknown) => unknown)(docRef, data);
+        (inner.set as (r: unknown, d: unknown) => unknown)(docRef, safeData);
       }
       return tracked;
     },
     update(docRef: DocumentReference<unknown, DocumentData>, ...args: unknown[]) {
       queuedWrites++;
-      (inner.update as (r: unknown, ...rest: unknown[]) => unknown)(docRef, ...args);
+      const safeArgs = args.map((a) => (isPlainObject(a) ? sanitizeFirestoreWritePayload(a) : a));
+      (inner.update as (r: unknown, ...rest: unknown[]) => unknown)(docRef, ...safeArgs);
       return tracked;
     },
     delete(docRef: DocumentReference<unknown, DocumentData>) {
@@ -212,16 +260,18 @@ export async function runTransaction<T>(
         },
         set: (ref: unknown, data: unknown, options?: SetOptions) => {
           writes++;
+          const safeData = sanitizeFirestoreWritePayload(data);
           if (options) {
-            (tx.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(ref, data, options);
+            (tx.set as (r: unknown, d: unknown, o: SetOptions) => unknown)(ref, safeData, options);
           } else {
-            (tx.set as (r: unknown, d: unknown) => unknown)(ref, data);
+            (tx.set as (r: unknown, d: unknown) => unknown)(ref, safeData);
           }
           return proxiedTx;
         },
         update: (ref: unknown, ...args: unknown[]) => {
           writes++;
-          (tx.update as (r: unknown, ...rest: unknown[]) => unknown)(ref, ...args);
+          const safeArgs = args.map((a) => (isPlainObject(a) ? sanitizeFirestoreWritePayload(a) : a));
+          (tx.update as (r: unknown, ...rest: unknown[]) => unknown)(ref, ...safeArgs);
           return proxiedTx;
         },
         delete: (ref: DocumentReference<unknown, DocumentData>) => {

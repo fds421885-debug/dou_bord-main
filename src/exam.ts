@@ -1,9 +1,10 @@
 import { deleteDoc, doc, serverTimestamp, setDoc } from './firestoreTracked';
-import { db, handleFirestoreError, OperationType } from './firebase';
+import { db, handleFirestoreError, isFirestorePermissionError, OperationType } from './firebase';
 import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion } from './types';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
+  encodeQuestionFieldsForFirestore,
   gradeTableQuestion,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
@@ -254,20 +255,25 @@ function compactAttemptIfOversized(
 export async function saveAttempt(attempt: Omit<QuizAttempt, 'createdAt'>): Promise<void> {
   const path = `users/${attempt.ownerId}/quizAttempts/${attempt.id}`;
   const safeAttempt = compactAttemptIfOversized(attempt);
+  const firestoreAttempt = {
+    ...safeAttempt,
+    questions: safeAttempt.questions.map((q) =>
+      encodeQuestionFieldsForFirestore(q as unknown as Record<string, unknown>)
+    ),
+  };
   try {
     await setDoc(doc(db, 'users', safeAttempt.ownerId, 'quizAttempts', safeAttempt.id), {
-      ...safeAttempt,
+      ...firestoreAttempt,
       createdAt: serverTimestamp(),
     });
   } catch (err) {
-    const raw = err instanceof Error ? err.message : String(err);
     // Fallback if older firestore.rules are still active on the database and reject top-level tableAnswers
-    if (/permission/i.test(raw)) {
+    if (isFirestorePermissionError(err)) {
       if (safeAttempt.questions.length > 100) {
         notifyRulesUpdateNeeded();
       }
-      if (safeAttempt.tableAnswers) {
-        const stripped = { ...safeAttempt };
+      if (firestoreAttempt.tableAnswers) {
+        const stripped = { ...firestoreAttempt };
         delete stripped.tableAnswers;
         try {
           await setDoc(doc(db, 'users', stripped.ownerId, 'quizAttempts', stripped.id), {

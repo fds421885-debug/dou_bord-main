@@ -50,10 +50,12 @@ import {
   createMyQuizzesAutoSplit,
   deleteMyQuiz,
   EXAMPLE_JSON,
+  formatQuizSaveError,
   parseQuizBundleJson,
   quizToExportJson,
   type ParsedQuizBundle,
 } from '../myQuizzes';
+import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../quizTable';
 import { removeStarredQuestion, subscribeStarredQuestions } from '../starredQuestions';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
@@ -150,7 +152,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     // 1) نعرض النسخة المحلية فوراً (تعمل حتى لو الحصة منتهية)
     void loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').then((snap) => {
       if (alive && snap && snap.ownerId === profile.uid) {
-        setQuizzes(snap.quizzes);
+        setQuizzes(snap.quizzes.map(decodeMyQuizFromFirestore));
         setLoading(false);
       }
     });
@@ -161,7 +163,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       query(collection(db, 'users', profile.uid, 'myQuizzes'), where('ownerId', '==', profile.uid)),
       (snap) => {
         const list: MyQuiz[] = [];
-        snap.forEach((d) => list.push(d.data() as MyQuiz));
+        snap.forEach((d) => list.push(decodeMyQuizFromFirestore(d.data() as MyQuiz)));
         list.sort((a, b) => getTimestampMillis(b.updatedAt) - getTimestampMillis(a.updatedAt));
         setQuizzes(list);
         setLoading(false);
@@ -172,7 +174,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         console.error('myQuizzes listener error', err);
         const m = String(err?.message || '');
         setLoadError(
-          /permission/i.test(m)
+          /permission|insufficient/i.test(m)
             ? 'تعذر قراءة اختباراتي: قواعد الأمان في قاعدة البيانات لم تُحدَّث بعد (انسخ firestore.rules وانشرها في Firebase).'
             : /quota|exhausted/i.test(m)
             ? 'حصة قاعدة البيانات منتهية مؤقتاً، تُعرض النسخة المحفوظة على جهازك.'
@@ -182,13 +184,15 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       }
     );
     void loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts').then((snap) => {
-      if (alive && snap && snap.ownerId === profile.uid) setAttempts(snap.attempts);
+      if (alive && snap && snap.ownerId === profile.uid) {
+        setAttempts(snap.attempts.map(decodeExamAttemptFromFirestore));
+      }
     });
     const unsubAttempts = onSnapshot(
       query(collection(db, 'users', profile.uid, 'quizAttempts'), where('ownerId', '==', profile.uid)),
       (snap) => {
         const list: QuizAttempt[] = [];
-        snap.forEach((d) => list.push(d.data() as QuizAttempt));
+        snap.forEach((d) => list.push(decodeExamAttemptFromFirestore(d.data() as QuizAttempt)));
         list.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
         setAttempts(list);
         void saveSessionSnapshot({
@@ -1450,7 +1454,7 @@ const ImportPanel: React.FC<{
         `تم حفظ الاختبار الأساسي «${mainTitle}» (${bundlePreview.questions.length} سؤالاً) ومعه ${totalSubSaved} اختبارات تدريب وتقوية منفصلة للقواعد تحته!`
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'تعذر حفظ الحزمة.');
+      setError(formatQuizSaveError(e));
     } finally {
       setSavingBundle(false);
     }

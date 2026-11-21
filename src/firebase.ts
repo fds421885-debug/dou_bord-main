@@ -439,14 +439,92 @@ export interface FirestoreErrorInfo {
   };
 }
 
+export function extractErrorMessage(err: unknown): string {
+  if (!err) return '';
+  const pieces: string[] = [];
+  if (typeof err === 'string') {
+    pieces.push(err);
+  } else if (err instanceof Error) {
+    pieces.push(err.message || '');
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && code) pieces.push(code);
+  } else if (typeof err === 'object') {
+    const o = err as Record<string, unknown>;
+    if (typeof o.code === 'string') pieces.push(o.code);
+    if (typeof o.message === 'string') pieces.push(o.message);
+    if (typeof o.error === 'string') pieces.push(o.error);
+  } else {
+    pieces.push(String(err));
+  }
+  const combined = pieces.join(' ');
+  // Unwrap handleFirestoreError JSON wrapper if present
+  try {
+    const trimmed = (err instanceof Error ? err.message : '').trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      const parsed = JSON.parse(trimmed) as { error?: unknown };
+      if (typeof parsed?.error === 'string' && parsed.error) {
+        return `${parsed.error} ${combined}`;
+      }
+    }
+  } catch {
+    // Not JSON
+  }
+  return combined;
+}
+
 export function isQuotaError(err: unknown): boolean {
-  const msg = (
-    err instanceof Error ? err.message : typeof err === 'string' ? err : String(err)
-  ).toLowerCase();
+  const msg = extractErrorMessage(err).toLowerCase();
   return (
     msg.includes('quota exceeded') ||
     msg.includes('resource-exhausted') ||
     msg.includes('resource_exhausted')
+  );
+}
+
+export function isFirestorePermissionError(err: unknown): boolean {
+  const msg = extractErrorMessage(err).toLowerCase();
+  return (
+    msg.includes('permission-denied') ||
+    msg.includes('permission_denied') ||
+    msg.includes('missing or insufficient permissions') ||
+    msg.includes('insufficient permissions')
+  );
+}
+
+export function isFirestoreDocumentTooLargeError(err: unknown): boolean {
+  const msg = extractErrorMessage(err).toLowerCase();
+  return (
+    msg.includes('exceeds the maximum allowed size') ||
+    msg.includes('document size') ||
+    msg.includes('1,048,576') ||
+    msg.includes('1048576') ||
+    msg.includes('too large') ||
+    msg.includes('payload size')
+  );
+}
+
+export function isFirestoreInvalidArgumentError(err: unknown): boolean {
+  const msg = extractErrorMessage(err).toLowerCase();
+  return (
+    msg.includes('invalid-argument') ||
+    msg.includes('nested arrays') ||
+    msg.includes('unsupported field value') ||
+    msg.includes('invalid data') ||
+    msg.includes('function setdoc() called with invalid') ||
+    msg.includes('function updatedoc() called with invalid')
+  );
+}
+
+export function isFirestoreNetworkError(err: unknown): boolean {
+  const msg = extractErrorMessage(err).toLowerCase();
+  return (
+    msg.includes('unavailable') ||
+    msg.includes('client is offline') ||
+    msg.includes('failed to get document because the client is offline') ||
+    msg.includes('network') ||
+    msg.includes('deadline-exceeded') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('err_internet_disconnected')
   );
 }
 

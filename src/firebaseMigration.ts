@@ -32,6 +32,7 @@ import {
   encodeExplanationTableForFirestore,
   encodeTableForFirestore,
   sanitizeExplanationComparison,
+  sanitizeQuestionLaws,
 } from './quizTable';
 import {
   activateCustomFirebaseConfig,
@@ -1533,7 +1534,9 @@ function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<s
   const expComp = q.explanationComparison
     ? sanitizeExplanationComparison(q.explanationComparison)
     : null;
+  const laws = sanitizeQuestionLaws(q.laws);
   return {
+    ...(laws ? { laws } : {}),
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
     ...(table ? { questionType: 'table', table } : {}),
@@ -1583,6 +1586,7 @@ function cleanSavedQuestionForFirestore(
   const expComp = sq.explanationComparison
     ? sanitizeExplanationComparison(sq.explanationComparison)
     : null;
+  const laws = 'laws' in sq ? sanitizeQuestionLaws((sq as { laws?: unknown }).laws) : null;
 
   return {
     id: sq.id,
@@ -1597,6 +1601,7 @@ function cleanSavedQuestionForFirestore(
       ? { correctIndex: Math.max(-1, Math.min(7, sq.correctIndex)) }
       : {}),
     ...(sq.explanation ? { explanation: String(sq.explanation).slice(0, 4000) } : {}),
+    ...(laws ? { laws } : {}),
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
     ...(table ? { questionType: 'table', table } : {}),

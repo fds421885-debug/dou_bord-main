@@ -21,6 +21,7 @@ import {
   parseTableQuestion,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
+  sanitizeQuestionLaws,
   sanitizeTableQuestion,
   tableQuestionProblem,
 } from './quizTable';
@@ -103,7 +104,7 @@ export function buildMainImportPrompt(options: MainImportPromptOptions = {}): st
      }
    ]
 - عدد الأسئلة داخل كل عنصر في "subQuizzes": نحو ${clampedPerRule} أسئلة متدرجة بأسلوب (${DRILL_STYLE_LABELS[drillStyle]}).
-- تأكد أن كل سؤال داخل "subQuizzes" يلتزم بنفس قواعد الـ JSON والـ LaTeX والجداول التفاعلية والأشكال والرسوم والشرح المفصل المذكورة أدناه، وأن يكون مختلفاً وجديداً للتدريب الفعلي وليس مجرد تكرار حرفي لنفس أرقام الاختبار الأساسي.
+- تأكد أن كل سؤال داخل "subQuizzes" يلتزم بنفس قواعد الـ JSON والـ LaTeX والجداول التفاعلية وقوانين المسألة ("laws") والأشكال والرسوم والشرح المفصل المذكورة أدناه، وأن يكون مختلفاً وجديداً للتدريب الفعلي وليس مجرد تكرار حرفي لنفس أرقام الاختبار الأساسي.
 `
     : '';
 
@@ -122,6 +123,10 @@ const PROMPT_HEAD = String.raw`أنت معلم خبير ومؤلف اختبار�
     {
       "questionType": "mcq",
       "text": "نص السؤال (يدعم LaTeX بين $...$ مثل $\\frac{3}{4}$ و $\\sqrt{16}$)",
+      "laws": [
+        "اكتب هنا القانون الأول بصيغته العامة فقط (مثل: مساحة الدائرة $= \\pi \\times \\text{نق}^{2}$)",
+        "اكتب هنا القانون الثاني بصيغته العامة فقط إن احتاج السؤال أكثر من قانون (مثل: مساحة المربع $= \\text{طول الضلع}^{2}$)"
+      ],
       "figure": { ... },
       "chart": { ... },
       "choices": ["الخيار 1", "الخيار 2", "الخيار 3", "الخيار 4"],
@@ -135,6 +140,10 @@ const PROMPT_HEAD = String.raw`أنت معلم خبير ومؤلف اختبار�
     {
       "questionType": "table",
       "text": "أكمل الجدول التالي بإيجاد القيم المفقودة (س، ص، التصنيف):",
+      "laws": [
+        "التناسب الطردي: $\\frac{أ_{1}}{ب_{1}} = \\frac{أ_{2}}{ب_{2}}$",
+        "قيمة الوحدة $= \\frac{\\text{القيمة الكلية}}{\\text{العدد}}$"
+      ],
       "table": {
         "title": "العلاقة بين عدد الساعات والمسافة",
         "caption": "لاحظ أن السرعة ثابتة في كل الحالات",
@@ -168,7 +177,7 @@ const PROMPT_HEAD = String.raw`أنت معلم خبير ومؤلف اختبار�
 }`;
 
 const PROMPT_TAIL = String.raw`================================================================
-ثانياً: قواعد صارمة للصياغة والدقة الحسابية
+ثانياً: قواعد صارمة للصياغة والدقة الحسابية + قوانين المسألة ("laws")
 ================================================================
 1) JSON صالح 100%: علامات اقتباس مزدوجة (") فقط، بدون تعليقات (//)، بدون فواصل زائدة، بدون أي نص خارج كتلة الكود.
 2) أضف كل الأسئلة المطلوبة مهما كان عددها بدون حذف أو اختصار. تحقق حسابياً بنفسك من كل مسألة قبل كتابتها ولا تفترض الإجابة أبداً.
@@ -176,6 +185,11 @@ const PROMPT_TAIL = String.raw`=================================================
    - "choices": مصفوفة من 2 إلى 8 خيارات (يفضّل 4 خيارات متزنة وواقعية).
    - "correctIndex": رقم الخيار الصحيح يبدأ من 0 (0، 1، 2، 3...). نوّع موضع الإجابة الصحيحة في كل سؤال ولا تكرر نفس الرقم.
    - تأكد 100% أن choices[correctIndex] يطابق ناتج الحساب الصحيح.
+4) **قوانين المسألة ("laws") — مهم جداً (يظهرها الطالب فوق السؤال عند اختيار وضع المساعدة بالقوانين)**:
+   - أضف في كل سؤال مصفوفة "laws": [ "..." , "..." ] تحتوي القوانين أو القواعد الرياضية/العلمية/اللغوية العامة اللازمة لحل السؤال.
+   - يمكنك كتابة قانون واحد أو اثنين أو ثلاثة أو أربعة أو خمسة أو أي عدد غير محدود من القوانين بحسب ما يحتاجه السؤال (مثلاً لسؤال دائرة داخل مربع: ضع قانون مساحة المربع، وقانون مساحة الدائرة، وعلاقة القطر بضلع المربع، وقانون المنطقة المظللة).
+   - **قاعدة ذهبية صارمة**: اكتب في "laws" **القانون العام المجرد فقط** (مثل: «مساحة الدائرة $= \pi \times \text{نق}^{2}$» أو «مجموع زوايا المثلث الداخلة $= 180^{\circ}$»). **يُمنع تماماً** تعويض أرقام السؤال داخل "laws"، ويُمنع كتابة خطوات الحل أو التلميح بالإجابة النهائية فيها! اترك التعويض وخطوات الحل كلها داخل "explanation".
+   - يدعم كل عنصر في "laws" معادلات LaTeX بين $...$. وإذا كان السؤال نظرياً/لفظياً محضاً لا قاعدة له، اكتب القاعدة العامة (مثل نوع العلاقة) أو اترك "laws": [].
 
 ================================================================
 ثالثاً: مواصفات أسئلة الجداول التفاعلية ("questionType": "table")
@@ -334,6 +348,7 @@ export function buildDrillPromptForQuestion(params: DrillPromptParams): string {
   const sourcePayload = {
     questionType: question.questionType === 'table' || question.table ? 'table' : 'mcq',
     text: question.text,
+    ...(question.laws?.length ? { laws: question.laws } : {}),
     ...(question.table ? { table: question.table } : {}),
     ...(question.choices?.length ? { choices: question.choices, correctIndex: question.correctIndex } : {}),
     ...(question.figure ? { figure: question.figure } : {}),
@@ -359,6 +374,7 @@ ${JSON.stringify(sourcePayload, null, 2)}
 - عنوان الملف في JSON: ضع "title": "${titleHint}"
 - أضف في الجذر: "drillStyle": "${drillStyle}" و "ruleTitle": "اسم القانون أو المهارة المستخلصة من المسألة"
 - عدد الأسئلة المطلوب بدقة: ${count} سؤالاً داخل مصفوفة "questions" (تحقق من العدد والحساب في كل سؤال).
+- أضف في كل سؤال حقل "laws": [...] يحتوي القوانين العامة المجردة اللازمة لحله فقط (قانوناً أو أكثر بحسب المسألة) دون تعويض أرقام السؤال ودون كشف الحل.
 ${styleInstructions}${
     customNote?.trim()
       ? `\n- ملاحظة إضافية من الطالب: ${customNote.trim()}`
@@ -381,6 +397,10 @@ export const EXAMPLE_JSON = JSON.stringify(
       {
         questionType: 'table',
         text: 'أكمل الجدول التالي الذي يمثل علاقة تناسب طردي بين عدد الكتب والسعر الإجمالي (أوجد قيمتي $س$ و $ص$ ونوع التناسب):',
+        laws: [
+          'قيمة الوحدة $= \\frac{\\text{القيمة الكلية}}{\\text{عدد الوحدات}}$',
+          'التناسب الطردي: $\\frac{أ_{1}}{ب_{1}} = \\frac{أ_{2}}{ب_{2}}$',
+        ],
         table: {
           title: 'سعر الكتب المتماثلة',
           caption: 'اختر نوع كل إجابة بدقة (رقم أو كلمة)',
@@ -423,6 +443,10 @@ export const EXAMPLE_JSON = JSON.stringify(
       {
         questionType: 'mcq',
         text: 'قارن بين القيمة الأولى: $3^{44}$ ، والقيمة الثانية: $4^{33}$',
+        laws: [
+          'عند المقارنة بين قوى كبيرة: يمكن قسمة الأسّين على القاسم المشترك الأكبر مع الحفاظ على الترتيب إذا كان الأساس $> 1$',
+          'قانون قوى القوى: $(أ^{م})^{ن} = أ^{م \\times ن}$',
+        ],
         choices: [
           'القيمة الأولى أكبر',
           'القيمة الثانية أكبر',
@@ -444,6 +468,9 @@ export const EXAMPLE_JSON = JSON.stringify(
       {
         questionType: 'mcq',
         text: 'في الشكل المقابل، مستقيمان متقاطعان عند النقطة م. ما قيمة $س$؟',
+        laws: [
+          'الزاويتان المتقابلتان بالرأس متساويتان في القياس',
+        ],
         figure: {
           title: 'زوايا متقابلة بالرأس',
           points: [
@@ -468,6 +495,12 @@ export const EXAMPLE_JSON = JSON.stringify(
       {
         questionType: 'mcq',
         text: 'في الشكل المجاور دائرة مرسومة داخل مربع طول ضلعه $10$ سم وتمس أضلاعه الأربعة. ما مساحة المنطقة المظللة؟ (اعتبر $\\pi \\approx 3.14$)',
+        laws: [
+          'مساحة المربع $= \\text{طول الضلع}^{2}$',
+          'مساحة الدائرة $= \\pi \\times \\text{نق}^{2}$',
+          'قطر الدائرة المرسومة داخل مربع وتمس أضلاعه $=$ طول ضلع المربع ($2\\text{نق} = \\text{ل}$)',
+          'مساحة المنطقة المظللة $=$ مساحة الشكل الخارجي $-$ مساحة الشكل الداخلي',
+        ],
         figure: {
           title: 'دائرة تمس أضلاع مربع من الداخل',
           caption: 'المنطقة الزرقاء هي المطلوب حساب مساحتها',
@@ -508,6 +541,9 @@ export const EXAMPLE_JSON = JSON.stringify(
       {
         questionType: 'mcq',
         text: 'حسب الرسم، ما نسبة من اختار "كرة القدم" إلى المجموع الكلي؟',
+        laws: [
+          'النسبة المئوية $= \\frac{\\text{الجزء}}{\\text{الكل}} \\times 100\\%$',
+        ],
         chart: {
           type: 'pie',
           title: 'الرياضة المفضلة',
@@ -761,10 +797,14 @@ function parseQuestionsList(
     const explanationComparison = o.explanationComparison
       ? sanitizeExplanationComparison(o.explanationComparison)
       : null;
+    const laws = sanitizeQuestionLaws(
+      o.laws ?? o.rules ?? o.formulas ?? o.law ?? o['القوانين'] ?? o['قوانين'] ?? o['القانون']
+    );
 
     questions.push({
       id: newQuestionId(),
       questionType: isTable ? 'table' : 'mcq',
+      ...(laws ? { laws } : {}),
       ...(table ? { table } : {}),
       ...(chart ? { chart } : {}),
       ...(figure ? { figure } : {}),
@@ -873,6 +913,7 @@ function serializeQuestionForExport(q: QuizQuestion) {
   return {
     questionType: q.questionType === 'table' || q.table ? 'table' : 'mcq',
     text: q.text,
+    ...(q.laws && q.laws.length > 0 ? { laws: q.laws } : {}),
     ...(q.table ? { table: q.table } : {}),
     choices: q.choices,
     correctIndex: q.correctIndex,
@@ -936,10 +977,12 @@ export function cleanQuestions(questions: QuizQuestion[]): QuizQuestion[] {
     const explanationComparison = q.explanationComparison
       ? sanitizeExplanationComparison(q.explanationComparison)
       : null;
+    const laws = sanitizeQuestionLaws(q.laws);
 
     out.push({
       id: q.id,
       ...(isTable ? { questionType: 'table' as const } : {}),
+      ...(laws ? { laws } : {}),
       ...(table && isTable ? { table } : {}),
       ...(chart ? { chart } : {}),
       ...(figure ? { figure } : {}),

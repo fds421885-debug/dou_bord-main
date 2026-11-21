@@ -349,6 +349,7 @@ export interface QuizQuestion {
   correctIndex: number;
   answer: string;
   explanation: string;
+  laws?: string[];
   table?: QuizTableQuestion;
   chart?: QuizChart;
   figure?: QuizFigure;
@@ -388,6 +389,7 @@ export interface ExamSettings {
   questionCount: number;
   shuffleQuestions: boolean;
   shuffleChoices: boolean;
+  showLaws?: boolean;
   timing: ExamTiming;
   /** ثوانٍ لكل سؤال، أو ثوانٍ للاختبار كاملاً حسب timing */
   seconds: number;
@@ -402,6 +404,7 @@ export interface ExamQuestion {
   choices: string[];
   correctIndex: number;
   explanation: string;
+  laws?: string[];
   table?: QuizTableQuestion;
   chart?: QuizChart;
   figure?: QuizFigure;

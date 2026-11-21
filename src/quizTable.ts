@@ -392,10 +392,45 @@ export function encodeQuestionFieldsForFirestore<T extends Record<string, unknow
   return out as T;
 }
 
+export function sanitizeQuestionLaws(raw: unknown): string[] | null {
+  let items: unknown[] = [];
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    items = raw.split(/\r?\n/);
+  } else {
+    return null;
+  }
+  const out: string[] = [];
+  for (const item of items) {
+    let text = '';
+    if (typeof item === 'string' || typeof item === 'number') {
+      text = String(item);
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      const v = o.law ?? o.rule ?? o.formula ?? o.text ?? o.title ?? o.name ?? '';
+      if (typeof v === 'string' || typeof v === 'number') text = String(v);
+    }
+    const clean = text.trim().slice(0, 400);
+    if (clean) out.push(clean);
+  }
+  return out.length > 0 ? out : null;
+}
+
 export function decodeQuizQuestionFromFirestore<T extends Record<string, unknown>>(q: T): T {
   if (!q || typeof q !== 'object') return q;
   let changed = false;
   const out: Record<string, unknown> = { ...q };
+  if ('laws' in out) {
+    const cleanLaws = sanitizeQuestionLaws(out.laws);
+    if (cleanLaws) {
+      out.laws = cleanLaws;
+      changed = true;
+    } else {
+      delete out.laws;
+      changed = true;
+    }
+  }
   if (out.table) {
     const decoded = sanitizeTableQuestion(out.table);
     if (decoded) {

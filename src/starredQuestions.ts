@@ -17,6 +17,7 @@ import {
   encodeQuestionFieldsForFirestore,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
+  sanitizeQuestionLaws,
   sanitizeTableQuestion,
 } from './quizTable';
 import type { ExamQuestion, QuizQuestion, StarredQuestion } from './types';
@@ -76,10 +77,12 @@ export function cleanQuizQuestionForStar(raw: QuizQuestion | ExamQuestion): Quiz
   const explanationComparison = raw.explanationComparison
     ? sanitizeExplanationComparison(raw.explanationComparison)
     : null;
+  const laws = sanitizeQuestionLaws(raw.laws);
 
   return {
     id: String(raw.id || computeStarredQuestionId(raw)).slice(0, 120),
     ...(questionType === 'table' ? { questionType: 'table' as const } : {}),
+    ...(laws ? { laws } : {}),
     text: String(raw.text || '').slice(0, 2000),
     choices: Array.isArray(raw.choices) ? raw.choices.map((c) => String(c).slice(0, 500)).slice(0, 8) : [],
     correctIndex: Number.isInteger(raw.correctIndex) ? raw.correctIndex : -1,

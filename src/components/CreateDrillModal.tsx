@@ -250,6 +250,18 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
             text={question.text}
             className="text-xs sm:text-sm font-black text-[#3C3C3C] line-clamp-3"
           />
+          {question.laws && question.laws.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {question.laws.map((law, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-[#BCE8FF] text-[10px] font-bold text-[#1479AD]"
+                >
+                  <MathText text={law} />
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Success banner after creation */}

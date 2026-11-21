@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowRight, Play, Shuffle } from 'lucide-react';
+import { ArrowRight, BookOpen, Play, Shuffle } from 'lucide-react';
 import type { ExamSettings, ExamQuestion, MyQuiz } from '../types';
 import { availableCount, buildExam, describeTiming, EXAM_MAX_QUESTIONS, validPool } from '../exam';
 import { DuoLoading } from './DuoLoading';
@@ -48,6 +48,7 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
   const [countText, setCountText] = useState('');
   const [shuffleQuestions, setShuffleQuestions] = useState(true);
   const [shuffleChoices, setShuffleChoices] = useState(false);
+  const [showLaws, setShowLaws] = useState(false);
   const [timing, setTiming] = useState<'none' | 'perQuestion' | 'total'>('none');
   const [perQ, setPerQ] = useState('60');
   const [totalMin, setTotalMin] = useState('10');
@@ -56,6 +57,17 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
 
   const quizIds = sourceMode === 'single' ? (singleId ? [singleId] : []) : mixIds;
   const avail = availableCount(quizzes, { sourceMode, mixMode, quizIds });
+  const lawsAvailCount = useMemo(
+    () =>
+      quizzes
+        .filter((qz) => quizIds.includes(qz.id))
+        .reduce(
+          (sum, qz) =>
+            sum + validPool(qz).filter((qq) => Array.isArray(qq.laws) && qq.laws.length > 0).length,
+          0
+        ),
+    [quizzes, quizIds]
+  );
   const countFixed = sourceMode === 'mix' && mixMode === 'onePerQuiz';
   const parsed = parseInt(countText, 10);
   const count = countFixed
@@ -83,6 +95,7 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
       questionCount: count,
       shuffleQuestions,
       shuffleChoices,
+      showLaws,
       timing,
       seconds,
     };
@@ -239,6 +252,36 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
             <span className="text-xs font-bold text-[#777777]">دقيقة للاختبار كاملاً، وينتهي تلقائياً عند انتهائها.</span>
           </div>
         )}
+      </div>
+
+      {/* 4. القوانين فوق السؤال */}
+      <div className={card}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-black text-[#3C3C3C] flex items-center gap-1.5">
+            <BookOpen className="w-4 h-4 text-[#1899D6]" />
+            <span>4) إظهار قوانين كل سؤال أثناء الاختبار</span>
+          </h3>
+          {lawsAvailCount > 0 && (
+            <span className="px-2.5 py-0.5 rounded-xl bg-[#F0FAFF] border border-[#BCE8FF] text-[11px] font-black text-[#1479AD]">
+              {lawsAvailCount} سؤال يحتوي قوانين
+            </span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setShowLaws(false)} className={seg(!showLaws)}>
+            بدون قوانين (اختبار قياسي)
+          </button>
+          <button type="button" onClick={() => setShowLaws(true)} className={seg(showLaws)}>
+            إظهار القوانين فوق السؤال
+          </button>
+        </div>
+        <p className="text-[11px] font-bold text-[#777777]">
+          {showLaws
+            ? lawsAvailCount > 0
+              ? 'ستظهر قوانين المسألة فقط أعلى كل سؤال (دون خطوات الحل) لمساعدتك في التذكر أثناء التدريب.'
+              : 'تم تفعيل الإظهار، لكن النماذج المختارة لا تحتوي قوانين مكتوبة بعد — يمكنك إضافتها من التعديل أو الاستيراد.'
+            : 'تُخفى القوانين أثناء الحل وتبقى متاحة للمراجعة بعد انتهاء الاختبار.'}
+        </p>
       </div>
 
       {error && <div className="p-3 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs font-extrabold text-[#EA2B2B]">{error}</div>}

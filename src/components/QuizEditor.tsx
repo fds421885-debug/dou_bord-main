@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  BookOpen,
   Check,
   Copy,
   Eye,
@@ -443,6 +444,67 @@ export const QuizEditor: React.FC<Props> = ({
             <div className="flex flex-wrap items-start gap-2">
               <QuizChartEditor chart={q.chart} onChange={(c) => patch(q.id, { chart: c })} />
               <QuizFigureEditor figure={q.figure} onChange={(f) => patch(q.id, { figure: f })} />
+            </div>
+
+            {/* قوانين المسألة (عدد غير محدود) */}
+            <div className="rounded-2xl border-2 border-[#CBE9FA] bg-[#F7FBFF] p-3 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-black text-[#1479AD]">
+                  <BookOpen className="w-4 h-4 shrink-0" />
+                  <span>قوانين المسألة (اختياري — تُظهر القانون العام فقط دون خطوات الحل)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => patch(q.id, { laws: [...(q.laws ?? []), ''] })}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-[#84D8FF] text-[11px] font-black text-[#1899D6] hover:bg-[#EAF7FF] cursor-pointer"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" /> إضافة قانون
+                </button>
+              </div>
+              {(q.laws ?? []).length === 0 ? (
+                <p className="text-[11px] font-bold text-[#777777]">
+                  لم يُضف أي قانون بعد. يمكنك إضافة قانون أو اثنين أو ثلاثة أو أي عدد من القوانين ليظهر فوق السؤال عند اختيار وضع المساعدة بالقوانين.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(q.laws ?? []).map((law, li) => (
+                    <div key={li} className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2">
+                        <span className="w-6 h-6 shrink-0 rounded-full bg-[#1CB0F6] text-white text-[11px] font-black font-latin flex items-center justify-center">
+                          {li + 1}
+                        </span>
+                        <MathField
+                          value={law}
+                          onChange={(v) => {
+                            const nextLaws = (q.laws ?? []).slice();
+                            nextLaws[li] = v;
+                            patch(q.id, { laws: nextLaws });
+                          }}
+                          maxLength={400}
+                          placeholder={`القانون ${li + 1} (مثال: مساحة الدائرة = $\\pi \\times \\text{نق}^{2}$)`}
+                          onFocusField={onFocusField}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextLaws = (q.laws ?? []).filter((_, k) => k !== li);
+                            patch(q.id, { laws: nextLaws.length > 0 ? nextLaws : undefined });
+                          }}
+                          className="p-1.5 rounded-lg text-[#EA2B2B] hover:bg-[#FFDFE0] cursor-pointer"
+                          title="حذف القانون"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      {showPreview && law.trim() && /[$\\^_]/.test(law) && (
+                        <div className="mr-8 rounded-xl bg-white border border-[#DDF3FF] px-3 py-1.5 text-xs font-bold text-[#2C3E50]">
+                          <MathText text={law} />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {isTable ? (

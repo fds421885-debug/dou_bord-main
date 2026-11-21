@@ -4,6 +4,7 @@ import type { ExamQuestion } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
+import { QuestionLawsBox } from './QuestionLawsBox';
 import { QuestionTableView } from './QuestionTableView';
 import { RichExplanationView } from './RichExplanationView';
 import { formatDuration, isQuestionAnswered, isQuestionCorrect } from '../exam';
@@ -172,6 +173,9 @@ export const ExamReview: React.FC<Props> = ({
 
             {q.sourceTitle && (
               <div className="text-[10px] font-extrabold text-[#777777]">من: {q.sourceTitle}</div>
+            )}
+            {q.laws && q.laws.length > 0 && (
+              <QuestionLawsBox laws={q.laws} variant="review" compact />
             )}
             <MathText text={q.text} className="text-sm font-black text-[#3C3C3C]" />
             {q.chart && <ChartView chart={q.chart} />}

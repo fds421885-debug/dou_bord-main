@@ -8,6 +8,7 @@ import {
   gradeTableQuestion,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
+  sanitizeQuestionLaws,
   sanitizeTableQuestion,
   tableQuestionProblem,
 } from './quizTable';
@@ -74,11 +75,13 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
   const explanationComparison = q.explanationComparison
     ? sanitizeExplanationComparison(q.explanationComparison)
     : null;
+  const laws = sanitizeQuestionLaws(q.laws);
   return {
     id: `${quiz.id}:${q.id}`.slice(0, 120),
     sourceQuizId: quiz.id,
     sourceTitle: quiz.title,
     ...(isTable ? { questionType: 'table' as const } : {}),
+    ...(laws ? { laws } : {}),
     ...(table ? { table } : {}),
     text: q.text,
     choices,

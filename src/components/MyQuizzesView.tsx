@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, onSnapshot, query, where } from '../firestoreTracked';
 import {
   ArrowRight,
+  BookOpen,
   CheckCircle2,
   ClipboardCopy,
   Download,
@@ -59,6 +60,7 @@ import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../qu
 import { removeStarredQuestion, subscribeStarredQuestions } from '../starredQuestions';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
+import { QuestionLawsBox } from './QuestionLawsBox';
 import { QuestionTableView } from './QuestionTableView';
 import { RichExplanationView } from './RichExplanationView';
 import { CreateDrillModal } from './CreateDrillModal';
@@ -132,6 +134,11 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     sourceQuizId?: string;
     sourceStarredId?: string;
   } | null>(null);
+  const [pendingLawsChoice, setPendingLawsChoice] = useState<
+    | { kind: 'quiz'; quiz: MyQuiz; lawsCount: number }
+    | { kind: 'starred'; lawsCount: number }
+    | null
+  >(null);
 
   const reloadMetaOverrides = async () => {
     const map = await loadMyQuizMetaOverrides(profile.uid);
@@ -272,10 +279,15 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     URL.revokeObjectURL(url);
   };
 
-  const startSingleQuizNow = (quiz: MyQuiz) => {
-    const readyCount = quiz.questions.filter(isExamReady).length;
-    if (readyCount === 0) {
+  const startSingleQuizNow = (quiz: MyQuiz, showLawsOverride?: boolean) => {
+    const readyPool = quiz.questions.filter(isExamReady);
+    if (readyPool.length === 0) {
       setNotice('هذا الاختبار لا يحتوي أسئلة جاهزة للحل بعد.');
+      return;
+    }
+    const lawsCount = readyPool.filter((qq) => Array.isArray(qq.laws) && qq.laws.length > 0).length;
+    if (showLawsOverride === undefined && lawsCount > 0) {
+      setPendingLawsChoice({ kind: 'quiz', quiz, lawsCount });
       return;
     }
     const settings: ExamSettings = {
@@ -283,9 +295,10 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       mixMode: 'total',
       quizIds: [quiz.id],
       quizTitles: [quiz.title],
-      questionCount: readyCount,
+      questionCount: readyPool.length,
       shuffleQuestions: false,
       shuffleChoices: false,
+      showLaws: Boolean(showLawsOverride),
       timing: 'none',
       seconds: 0,
     };
@@ -293,6 +306,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     if (qs.length === 0) return;
     void deleteSessionSnapshot('exam_session');
     setDrillModalTarget(null);
+    setPendingLawsChoice(null);
     setMode({ kind: 'examRun', settings, questions: qs });
   };
 
@@ -515,6 +529,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         {q.questions.map((qq, i) => (
           <div key={qq.id} className={`${card} p-4 flex flex-col gap-2`}>
             <span className="self-start px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">السؤال {i + 1}</span>
+            {qq.laws && qq.laws.length > 0 && (
+              <QuestionLawsBox laws={qq.laws} variant="review" compact />
+            )}
             <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C]" />
             {qq.chart && <ChartView chart={qq.chart} />}
             {qq.figure && <FigureView figure={qq.figure} />}
@@ -560,7 +577,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     );
   }
 
-  const startStarredExam = () => {
+  const startStarredExam = (showLawsOverride?: boolean) => {
     const readyQuestions: ExamQuestion[] = starredItems
       .filter((st) => isExamReady(st.question))
       .map((st) => ({
@@ -570,6 +587,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         ...(st.question.questionType === 'table' || st.question.table
           ? { questionType: 'table' as const, table: st.question.table }
           : {}),
+        ...(st.question.laws && st.question.laws.length > 0 ? { laws: st.question.laws } : {}),
         text: st.question.text,
         choices: st.question.choices,
         correctIndex: st.question.correctIndex,
@@ -584,7 +602,13 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           : {}),
       }));
     if (readyQuestions.length === 0) return;
+    const lawsCount = readyQuestions.filter((qq) => Array.isArray(qq.laws) && qq.laws.length > 0).length;
+    if (showLawsOverride === undefined && lawsCount > 0) {
+      setPendingLawsChoice({ kind: 'starred', lawsCount });
+      return;
+    }
     void deleteSessionSnapshot('exam_session');
+    setPendingLawsChoice(null);
     setMode({
       kind: 'examRun',
       settings: {
@@ -597,6 +621,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         seconds: 0,
         shuffleQuestions: false,
         shuffleChoices: false,
+        showLaws: Boolean(showLawsOverride),
       },
       questions: readyQuestions,
     });
@@ -658,7 +683,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             {starredItems.length > 0 && (
               <button
                 type="button"
-                onClick={startStarredExam}
+                onClick={() => startStarredExam()}
                 className="duo-btn flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-[#FFC800] hover:bg-[#FFD426] border-2 border-b-4 border-[#E5A400] text-[#3C3C3C] text-xs font-black cursor-pointer shrink-0"
               >
                 <Play className="w-4 h-4" />
@@ -727,6 +752,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                     </div>
                   </div>
 
+                  {qq.laws && qq.laws.length > 0 && (
+                    <QuestionLawsBox laws={qq.laws} variant="review" compact />
+                  )}
                   <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C] leading-relaxed" />
                   {qq.chart && <ChartView chart={qq.chart} />}
                   {qq.figure && <FigureView figure={qq.figure} />}
@@ -1373,6 +1401,65 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           onStartQuizNow={startSingleQuizNow}
         />
       )}
+
+      {pendingLawsChoice && (
+        <div
+          className="fixed inset-0 z-50 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          dir="rtl"
+        >
+          <div className="duo-card max-w-md w-full bg-white border-2 border-[#84D8FF] p-5 flex flex-col gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-10 h-10 rounded-2xl bg-[#1CB0F6] border-b-4 border-[#1899D6] text-white flex items-center justify-center shrink-0">
+                <BookOpen className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-[#3C3C3C]">
+                  هل تريد إظهار القوانين أثناء الاختبار؟
+                </h3>
+                <p className="text-[11px] font-bold text-[#777777]">
+                  يحتوي هذا الاختبار على قوانين في <span className="font-latin">{pendingLawsChoice.lawsCount}</span> سؤالاً (تظهر القوانين فقط فوق السؤال دون الحل).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const choice = pendingLawsChoice;
+                  setPendingLawsChoice(null);
+                  if (choice.kind === 'quiz') startSingleQuizNow(choice.quiz, true);
+                  else startStarredExam(true);
+                }}
+                className="duo-btn flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-sm font-black cursor-pointer"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>نعم، ابدأ مع إظهار القوانين فوق السؤال</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const choice = pendingLawsChoice;
+                  setPendingLawsChoice(null);
+                  if (choice.kind === 'quiz') startSingleQuizNow(choice.quiz, false);
+                  else startStarredExam(false);
+                }}
+                className="duo-btn flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-sm font-black cursor-pointer"
+              >
+                <Play className="w-4 h-4" />
+                <span>لا، ابدأ بدون قوانين (اختبار قياسي)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingLawsChoice(null)}
+                className="px-4 py-2 rounded-xl text-xs font-black text-[#777777] hover:bg-[#F7F7F7] cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1573,6 +1660,7 @@ const ImportPanel: React.FC<{
         <ul className="text-xs font-bold text-[#555] leading-relaxed list-disc pr-5 flex flex-col gap-1">
           <li>أسئلة الاختيارات: تحتوي <span className="font-latin">choices</span> و<span className="font-latin">correctIndex</span> (يبدأ من 0).</li>
           <li>أسئلة الجداول التفاعلية: تُضاف بصيغة <span className="font-latin">{'"questionType": "table"'}</span> وحقل <span className="font-latin">table</span> لتحديد الخلايا الثابتة والفراغات التفاعلية (<span className="font-latin">number</span> أو <span className="font-latin">text</span> مع تلميح مثل <span className="font-latin">س / أ</span>).</li>
+          <li>قوانين المسألة (<span className="font-latin">laws</span>): مصفوفة نصوص تحتوي قانوناً أو أكثر بصيغة عامة دون كشف الحل، ويمكن إظهارها فوق السؤال عند بدء الاختبار.</li>
           <li>الأشكال الهندسية والرسوم البيانية: يُضاف <span className="font-latin">figure</span> للهندسة أو <span className="font-latin">chart</span> (<span className="font-latin">bar / hbar / line / pie</span>) للرسوم البيانية.</li>
           <li>الحزمة المتكاملة (<span className="font-latin">subQuizzes</span>): إذا أضافها السكريبت أو نزّلتها من اختبار سابق، تُحفظ جميع تدريبات القواعد تلقائياً تحت الاختبار الأساسي.</li>
         </ul>

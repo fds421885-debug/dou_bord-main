@@ -4,6 +4,7 @@ import type { ExamQuestion, ExamSettings } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
+import { QuestionLawsBox } from './QuestionLawsBox';
 import { QuestionTableView } from './QuestionTableView';
 import { formatDuration, isQuestionAnswered } from '../exam';
 import { saveSessionSnapshot } from '../localDraftStore';
@@ -318,6 +319,10 @@ export const ExamRunner: React.FC<Props> = ({
           <div className="px-3 py-1.5 rounded-xl bg-[#FFF4CC] border border-[#FFC800] text-[11px] font-black text-[#9A6B00]">
             {starNotice}
           </div>
+        )}
+
+        {settings.showLaws && q.laws && q.laws.length > 0 && (
+          <QuestionLawsBox laws={q.laws} variant="exam" />
         )}
 
         <MathText text={q.text} className="text-base font-black text-[#3C3C3C] leading-relaxed" />

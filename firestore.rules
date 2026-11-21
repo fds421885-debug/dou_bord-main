@@ -225,11 +225,11 @@ service cloud.firestore {
         && data.ownerId == request.auth.uid
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
         && data.settings is map
-        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 10000
         && data.answers is list && data.answers.size() == data.questions.size()
         && (!('tableAnswers' in data) || data.tableAnswers is map)
         && data.score is int && data.score >= 0
-        && data.total is int && data.total >= 1 && data.total <= 100
+        && data.total is int && data.total >= 1 && data.total <= 10000
         && data.score <= data.total
         && data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 172800
         && data.finishedAt is int && data.finishedAt > 0
@@ -266,8 +266,8 @@ service cloud.firestore {
         && isValidId(data.ownerId)
         && data.ownerId == request.auth.uid
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
-        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
-        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 100
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 10000
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 10000
         && (!('parentQuizId' in data) || (data.parentQuizId is string && data.parentQuizId.size() <= 128))
         && (!('quizKind' in data) || data.quizKind in ['main', 'drill'])
         && (!('drillStyle' in data) || data.drillStyle in ['same_values', 'same_law_ideas', 'mixed'])
@@ -352,9 +352,9 @@ service cloud.firestore {
         && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
         && data.authorRole in ['supervisor', 'student']
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
-        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 100
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 10000
         && (data.questions[0] is map)
-        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 100
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 10000
         && data.updatedAt is timestamp;
     }
 
@@ -384,8 +384,8 @@ service cloud.firestore {
         && data.competitors[0] is map
         && data.status in ['active', 'finished']
         && data.phase in ['countdown', 'question']
-        && data.currentIndex is int && data.currentIndex >= 0 && data.currentIndex <= 200
-        && data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 100
+        && data.currentIndex is int && data.currentIndex >= 0 && data.currentIndex <= 10000
+        && data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 10000
         && data.countdownSec is int && data.countdownSec >= 1 && data.countdownSec <= 10
         && data.phaseStartedAt is timestamp
         && data.totalElapsedMs is int && data.totalElapsedMs >= 0 && data.totalElapsedMs <= 172800000
@@ -407,7 +407,7 @@ service cloud.firestore {
         && isValidId(data.id)
         && isValidId(data.roomId)
         && isValidId(data.competitionId)
-        && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 100
+        && data.orderIndex is int && data.orderIndex >= 1 && data.orderIndex <= 10000
         && data.question is map
         && data.status in ['solving', 'correct', 'unanswered']
         && data.winnerId is string && data.winnerId.size() <= 128

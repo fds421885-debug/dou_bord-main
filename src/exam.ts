@@ -11,7 +11,9 @@ import {
   tableQuestionProblem,
 } from './quizTable';
 
-export const EXAM_MAX_QUESTIONS = 100;
+import { notifyRulesUpdateNeeded } from './starredQuestions';
+
+export const EXAM_MAX_QUESTIONS = 10000;
 
 export function newAttemptId(): string {
   return `attempt_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -223,24 +225,60 @@ export function buildAttempt(
   };
 }
 
+function compactAttemptIfOversized(
+  attempt: Omit<QuizAttempt, 'createdAt'>,
+  maxBytes = 880_000
+): Omit<QuizAttempt, 'createdAt'> {
+  const enc = new TextEncoder();
+  if (enc.encode(JSON.stringify(attempt)).length <= maxBytes) return attempt;
+  // Strip verbose explanation payloads from attempt snapshot if total size exceeds 1MB Firestore cap
+  const trimmedQuestions = attempt.questions.map((q) => ({
+    ...q,
+    explanation: q.explanation ? q.explanation.slice(0, 300) : '',
+    explanationChart: undefined,
+    explanationFigure: undefined,
+    explanationTable: undefined,
+    explanationComparison: undefined,
+  }));
+  const cleanedQuestions = trimmedQuestions.map((q) => {
+    const out = { ...q };
+    if (out.explanationChart === undefined) delete out.explanationChart;
+    if (out.explanationFigure === undefined) delete out.explanationFigure;
+    if (out.explanationTable === undefined) delete out.explanationTable;
+    if (out.explanationComparison === undefined) delete out.explanationComparison;
+    return out;
+  });
+  return { ...attempt, questions: cleanedQuestions };
+}
+
 export async function saveAttempt(attempt: Omit<QuizAttempt, 'createdAt'>): Promise<void> {
   const path = `users/${attempt.ownerId}/quizAttempts/${attempt.id}`;
+  const safeAttempt = compactAttemptIfOversized(attempt);
   try {
-    await setDoc(doc(db, 'users', attempt.ownerId, 'quizAttempts', attempt.id), {
-      ...attempt,
+    await setDoc(doc(db, 'users', safeAttempt.ownerId, 'quizAttempts', safeAttempt.id), {
+      ...safeAttempt,
       createdAt: serverTimestamp(),
     });
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
     // Fallback if older firestore.rules are still active on the database and reject top-level tableAnswers
-    if (/permission/i.test(raw) && attempt.tableAnswers) {
-      const stripped = { ...attempt };
-      delete stripped.tableAnswers;
-      await setDoc(doc(db, 'users', attempt.ownerId, 'quizAttempts', attempt.id), {
-        ...stripped,
-        createdAt: serverTimestamp(),
-      });
-      return;
+    if (/permission/i.test(raw)) {
+      if (safeAttempt.questions.length > 100) {
+        notifyRulesUpdateNeeded();
+      }
+      if (safeAttempt.tableAnswers) {
+        const stripped = { ...safeAttempt };
+        delete stripped.tableAnswers;
+        try {
+          await setDoc(doc(db, 'users', stripped.ownerId, 'quizAttempts', stripped.id), {
+            ...stripped,
+            createdAt: serverTimestamp(),
+          });
+          return;
+        } catch {
+          // Fall through to handleFirestoreError
+        }
+      }
     }
     handleFirestoreError(err, OperationType.CREATE, path);
   }

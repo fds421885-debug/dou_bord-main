@@ -14,14 +14,14 @@ import {
 } from './quizTable';
 
 export const LIMITS = {
-  maxQuestions: 100,
+  maxQuestions: 10000,
   title: 120,
   text: 2000,
   choice: 500,
   maxChoices: 8,
   answer: 1000,
   explanation: 4000,
-  maxBytes: 900_000, // حد المستند في Firestore ≈ 1MB
+  maxBytes: 880_000, // حد المستند في Firestore ≈ 1MB
 } as const;
 
 function rand(): string {
@@ -159,7 +159,7 @@ const PROMPT_TAIL = String.raw`=================================================
 ثانياً: قواعد صارمة للصياغة والدقة الحسابية
 ================================================================
 1) JSON صالح 100%: علامات اقتباس مزدوجة (") فقط، بدون تعليقات (//)، بدون فواصل زائدة، بدون أي نص خارج كتلة الكود.
-2) العدد الأقصى 100 سؤال في الملف. تحقق حسابياً بنفسك من كل مسألة قبل كتابتها ولا تفترض الإجابة أبداً.
+2) أضف كل الأسئلة المطلوبة مهما كان عددها بدون حذف أو اختصار. تحقق حسابياً بنفسك من كل مسألة قبل كتابتها ولا تفترض الإجابة أبداً.
 3) في أسئلة الاختيار من متعدد ("questionType": "mcq" أو بدون تحديد questionType):
    - "choices": مصفوفة من 2 إلى 8 خيارات (يفضّل 4 خيارات متزنة وواقعية).
    - "correctIndex": رقم الخيار الصحيح يبدأ من 0 (0، 1، 2، 3...). نوّع موضع الإجابة الصحيحة في كل سؤال ولا تكرر نفس الرقم.
@@ -300,7 +300,7 @@ export function buildDrillPromptForQuestion(params: DrillPromptParams): string {
     suggestedTitle,
     customNote,
   } = params;
-  const count = Math.max(1, Math.min(50, Math.round(questionCount || 5)));
+  const count = Math.max(1, Math.min(1000, Math.round(questionCount || 5)));
 
   const styleInstructions =
     drillStyle === 'same_values'
@@ -634,12 +634,8 @@ function parseQuestionsList(
   warnings: string[],
   prefixLabel = ''
 ): QuizQuestion[] {
-  let list = rawList;
+  const list = rawList;
   const pfx = prefixLabel ? `${prefixLabel} — ` : '';
-  if (list.length > LIMITS.maxQuestions) {
-    warnings.push(`${pfx}الملف فيه ${list.length} سؤالاً، وتمت قراءة أول ${LIMITS.maxQuestions} فقط.`);
-    list = list.slice(0, LIMITS.maxQuestions);
-  }
 
   const questions: QuizQuestion[] = [];
   list.forEach((item, idx) => {
@@ -949,7 +945,11 @@ export function cleanQuestions(questions: QuizQuestion[]): QuizQuestion[] {
   return out;
 }
 
-export function validateForSave(title: string, questions: QuizQuestion[]): string | null {
+export function validateForSave(
+  title: string,
+  questions: QuizQuestion[],
+  options: { allowAutoSplit?: boolean } = {}
+): string | null {
   if (!title.trim()) return 'اكتب عنواناً مناسباً للاختبار.';
   if (title.trim().length > LIMITS.title) return `العنوان أطول من ${LIMITS.title} حرفاً.`;
   const cleaned = cleanQuestions(questions);
@@ -984,10 +984,46 @@ export function validateForSave(title: string, questions: QuizQuestion[]): strin
       if (prob) return `السؤال ${num} (شكل الشرح): ${prob}`;
     }
   }
-  if (cleaned.length > LIMITS.maxQuestions) return `الحد الأقصى ${LIMITS.maxQuestions} سؤال.`;
-  const bytes = new TextEncoder().encode(JSON.stringify(cleaned)).length;
-  if (bytes > LIMITS.maxBytes) return 'حجم الاختبار كبير جداً، قسّمه إلى اختبارين.';
+  if (!options.allowAutoSplit) {
+    const bytes = new TextEncoder().encode(JSON.stringify(cleaned)).length;
+    if (bytes > LIMITS.maxBytes) return 'حجم الاختبار كبير جداً للتعديل في مستند واحد، أنشئه كاختبار جديد ليُحفظ تلقائياً بأجزائه.';
+  }
   return null;
+}
+
+export function splitQuestionsForFirestore(
+  questions: QuizQuestion[],
+  maxBytes: number = LIMITS.maxBytes,
+  maxItemsPerChunk: number = LIMITS.maxQuestions
+): QuizQuestion[][] {
+  const cleaned = cleanQuestions(questions);
+  if (cleaned.length === 0) return [];
+  const encoder = new TextEncoder();
+  const fullBytes = encoder.encode(JSON.stringify(cleaned)).length;
+  if (fullBytes <= maxBytes && cleaned.length <= maxItemsPerChunk) {
+    return [cleaned];
+  }
+
+  const chunks: QuizQuestion[][] = [];
+  let current: QuizQuestion[] = [];
+  let currentBytes = 2; // []
+
+  for (const q of cleaned) {
+    const qBytes = encoder.encode(JSON.stringify(q)).length + 1; // + comma
+    if (
+      current.length > 0 &&
+      (currentBytes + qBytes > maxBytes || current.length >= maxItemsPerChunk)
+    ) {
+      chunks.push(current);
+      current = [q];
+      currentBytes = 2 + qBytes;
+    } else {
+      current.push(q);
+      currentBytes += qBytes;
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 export interface MyQuizMetaInput {
@@ -1054,6 +1090,50 @@ export async function createMyQuiz(
     handleFirestoreError(err, OperationType.CREATE, path);
   }
   return id;
+}
+
+export interface CreatedQuizChunk {
+  id: string;
+  title: string;
+  questions: QuizQuestion[];
+}
+
+export async function createMyQuizzesAutoSplit(
+  uid: string,
+  baseTitle: string,
+  questions: QuizQuestion[],
+  meta?: MyQuizMetaInput
+): Promise<CreatedQuizChunk[]> {
+  const cleanTitle = baseTitle.trim().slice(0, LIMITS.title) || 'اختبار';
+  const chunks = splitQuestionsForFirestore(questions, LIMITS.maxBytes, LIMITS.maxQuestions);
+  if (chunks.length === 0) return [];
+
+  const saveChunks = async (list: QuizQuestion[][]): Promise<CreatedQuizChunk[]> => {
+    const created: CreatedQuizChunk[] = [];
+    const total = list.length;
+    for (let idx = 0; idx < total; idx++) {
+      const partQuestions = list[idx];
+      const suffix = total > 1 ? ` (${idx + 1}/${total})` : '';
+      const maxBaseLen = Math.max(10, LIMITS.title - suffix.length);
+      const partTitle = `${cleanTitle.slice(0, maxBaseLen)}${suffix}`;
+      const id = await createMyQuiz(uid, partTitle, partQuestions, meta);
+      created.push({ id, title: partTitle, questions: partQuestions });
+    }
+    return created;
+  };
+
+  try {
+    return await saveChunks(chunks);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const hasOver100Chunk = chunks.some((c) => c.length > 100);
+    if (hasOver100Chunk && /permission|insufficient/i.test(msg)) {
+      notifyRulesUpdateNeeded();
+      const legacyChunks = splitQuestionsForFirestore(questions, LIMITS.maxBytes, 100);
+      return await saveChunks(legacyChunks);
+    }
+    throw err;
+  }
 }
 
 export async function updateMyQuiz(

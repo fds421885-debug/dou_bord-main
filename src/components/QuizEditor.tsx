@@ -26,7 +26,7 @@ import { createDefaultTableQuestion } from '../quizTable';
 import { DuoLoading } from './DuoLoading';
 import {
   cleanQuestions,
-  createMyQuiz,
+  createMyQuizzesAutoSplit,
   emptyQuestion,
   LIMITS,
   newQuestionId,
@@ -123,11 +123,22 @@ export const QuizEditor: React.FC<Props> = ({
       : [emptyQuestion()]
   );
   const [showPreview, setShowPreview] = useState(true);
+  const [page, setPage] = useState(0);
+  const [showAllQuestions, setShowAllQuestions] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const activeRef = useRef<ActiveField | null>(null);
   const [hasActive, setHasActive] = useState(false);
+
+  const PAGE_SIZE = 50;
+  const totalPages = Math.max(1, Math.ceil(questions.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const isPaginated = questions.length > PAGE_SIZE && !showAllQuestions;
+  const startIdx = isPaginated ? safePage * PAGE_SIZE : 0;
+  const visibleQuestions = isPaginated
+    ? questions.slice(startIdx, startIdx + PAGE_SIZE)
+    : questions;
 
   // حفظ تلقائي محلي للمسودة (يُستكمل بعد إغلاق الصفحة أو انقطاع الإنترنت)
   const firstRun = useRef(true);
@@ -210,13 +221,21 @@ export const QuizEditor: React.FC<Props> = ({
   const remove = (id: string) =>
     setQuestions((qs) => (qs.length <= 1 ? [emptyQuestion()] : qs.filter((q) => q.id !== id)));
 
-  const addQuestion = (kind: 'mcq' | 'table' = 'mcq') =>
-    setQuestions((qs) => (qs.length >= LIMITS.maxQuestions ? qs : [...qs, emptyQuestion(kind)]));
+  const addQuestion = (kind: 'mcq' | 'table' = 'mcq') => {
+    setQuestions((qs) => {
+      if (qs.length >= LIMITS.maxQuestions) return qs;
+      const next = [...qs, emptyQuestion(kind)];
+      if (next.length > PAGE_SIZE) {
+        setPage(Math.ceil(next.length / PAGE_SIZE) - 1);
+      }
+      return next;
+    });
+  };
 
   const filled = useMemo(() => cleanQuestions(questions).length, [questions]);
 
   const handleSave = async () => {
-    const problem = validateForSave(title, questions);
+    const problem = validateForSave(title, questions, { allowAutoSplit: !editingId });
     if (problem) {
       setError(problem);
       return;
@@ -226,11 +245,18 @@ export const QuizEditor: React.FC<Props> = ({
     try {
       if (editingId) {
         await updateMyQuiz(ownerId, editingId, title, questions);
+        await deleteSessionSnapshot('my_quiz_draft');
+        onDone('تم حفظ التعديلات.');
       } else {
-        await createMyQuiz(ownerId, title, questions);
+        const chunks = await createMyQuizzesAutoSplit(ownerId, title, questions);
+        await deleteSessionSnapshot('my_quiz_draft');
+        if (chunks.length > 1) {
+          const totalQ = chunks.reduce((acc, c) => acc + c.questions.length, 0);
+          onDone(`تمت إضافة الاختبار كاملاً (${totalQ} سؤالاً) مقسماً تلقائياً على ${chunks.length} أجزاء لتجاوز حد حجم المستند.`);
+        } else {
+          onDone(`تمت إضافة الاختبار (${filled} سؤالاً) إلى اختباراتي.`);
+        }
       }
-      await deleteSessionSnapshot('my_quiz_draft');
-      onDone(editingId ? 'تم حفظ التعديلات.' : 'تمت إضافة الاختبار إلى اختباراتي.');
     } catch (e) {
       let msg = 'تعذر الحفظ. تحقق من الاتصال وحاول مرة أخرى. مسودتك محفوظة على جهازك.';
       const raw = e instanceof Error ? e.message : '';
@@ -304,7 +330,43 @@ export const QuizEditor: React.FC<Props> = ({
         )}
       </div>
 
-      {questions.map((q, idx) => {
+      {questions.length > PAGE_SIZE && (
+        <div className="rounded-2xl border-2 border-[#1CB0F6]/40 bg-[#F0FAFF] p-3 flex flex-wrap items-center justify-between gap-2 text-xs font-black text-[#3C3C3C]">
+          <span>
+            إجمالي الأسئلة: <span className="font-latin text-[#1899D6]">{questions.length}</span> سؤالاً
+            {isPaginated
+              ? ` (معروض الآن ${startIdx + 1} – ${Math.min(startIdx + PAGE_SIZE, questions.length)})`
+              : ' (معروض الكل)'}
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {!showAllQuestions &&
+              Array.from({ length: totalPages }, (_, pIdx) => (
+                <button
+                  key={pIdx}
+                  type="button"
+                  onClick={() => setPage(pIdx)}
+                  className={`px-2.5 py-1 rounded-xl border text-[11px] font-latin font-black cursor-pointer ${
+                    safePage === pIdx
+                      ? 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                      : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'
+                  }`}
+                >
+                  {pIdx * PAGE_SIZE + 1}–{Math.min((pIdx + 1) * PAGE_SIZE, questions.length)}
+                </button>
+              ))}
+            <button
+              type="button"
+              onClick={() => setShowAllQuestions((v) => !v)}
+              className="px-2.5 py-1 rounded-xl bg-white border border-[#1CB0F6] text-[#1899D6] text-[11px] font-black cursor-pointer"
+            >
+              {showAllQuestions ? 'تقسيم لصفحات (50 لكل صفحة)' : `عرض الكل (${questions.length})`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {visibleQuestions.map((q, localIdx) => {
+        const idx = startIdx + localIdx;
         const isTable = q.questionType === 'table' || (Boolean(q.table) && q.choices.length === 0);
         const hasChoices = !isTable && q.choices.length > 0;
         return (

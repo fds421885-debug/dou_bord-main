@@ -47,7 +47,7 @@ import {
 } from '../localDraftStore';
 import {
   buildMainImportPrompt,
-  createMyQuiz,
+  createMyQuizzesAutoSplit,
   deleteMyQuiz,
   EXAMPLE_JSON,
   parseQuizBundleJson,
@@ -559,7 +559,6 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const startStarredExam = () => {
     const readyQuestions: ExamQuestion[] = starredItems
       .filter((st) => isExamReady(st.question))
-      .slice(0, 100)
       .map((st) => ({
         id: st.id,
         sourceQuizId: st.sourceQuizId || 'starred',
@@ -1433,19 +1432,22 @@ const ImportPanel: React.FC<{
     setError(null);
     try {
       const mainTitle = bundlePreview.title || 'اختبار أساسي مستورد';
-      const mainId = await createMyQuiz(ownerId, mainTitle, bundlePreview.questions, {
+      const mainChunks = await createMyQuizzesAutoSplit(ownerId, mainTitle, bundlePreview.questions, {
         quizKind: 'main',
       });
+      const mainId = mainChunks[0]?.id;
+      let totalSubSaved = 0;
       for (const sub of bundlePreview.subQuizzes) {
-        await createMyQuiz(ownerId, sub.title, sub.questions, {
-          parentQuizId: mainId,
+        const subChunks = await createMyQuizzesAutoSplit(ownerId, sub.title, sub.questions, {
+          ...(mainId ? { parentQuizId: mainId } : {}),
           quizKind: 'drill',
           drillStyle: sub.drillStyle || 'mixed',
           ...(sub.ruleTitle ? { ruleTitle: sub.ruleTitle } : {}),
         });
+        totalSubSaved += subChunks.length;
       }
       onBundleSaved(
-        `تم حفظ الاختبار الأساسي «${mainTitle}» ومعه ${bundlePreview.subQuizzes.length} اختبارات تدريب وتقوية منفصلة للقواعد تحته!`
+        `تم حفظ الاختبار الأساسي «${mainTitle}» (${bundlePreview.questions.length} سؤالاً) ومعه ${totalSubSaved} اختبارات تدريب وتقوية منفصلة للقواعد تحته!`
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر حفظ الحزمة.');
@@ -1456,8 +1458,8 @@ const ImportPanel: React.FC<{
 
   const onFile = async (f: File | undefined) => {
     if (!f) return;
-    if (f.size > 3_000_000) {
-      setError('الملف كبير جداً (الحد 3MB).');
+    if (f.size > 15_000_000) {
+      setError('الملف كبير جداً (الحد 15MB).');
       return;
     }
     setRaw(await f.text());

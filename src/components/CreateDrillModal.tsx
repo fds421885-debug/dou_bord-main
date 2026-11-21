@@ -15,7 +15,7 @@ import {
 import type { DrillStyle, MyQuiz, QuizQuestion } from '../types';
 import {
   buildDrillPromptForQuestion,
-  createMyQuiz,
+  createMyQuizzesAutoSplit,
   DRILL_STYLE_LABELS,
   parseQuizBundleJson,
 } from '../myQuizzes';
@@ -122,8 +122,8 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
 
   const handleUploadJson = async (file: File | undefined) => {
     if (!file) return;
-    if (file.size > 3_000_000) {
-      setError('حجم الملف كبير جداً (الحد الأقصى 3MB).');
+    if (file.size > 15_000_000) {
+      setError('حجم الملف كبير جداً (الحد الأقصى 15MB).');
       return;
     }
     setRawJson(await file.text());
@@ -177,17 +177,24 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
           ...(sourceStarredId ? { sourceStarredId } : {}),
           ...(item.ruleTitle ? { ruleTitle: item.ruleTitle } : {}),
         };
-        const newId = await createMyQuiz(ownerId, item.title, item.questions, meta);
-        savedItems.push({
-          id: newId,
+        const createdChunks = await createMyQuizzesAutoSplit(
           ownerId,
-          title: item.title,
-          questions: item.questions,
-          questionCount: item.questions.length,
-          ...meta,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
+          item.title,
+          item.questions,
+          meta
+        );
+        for (const chunk of createdChunks) {
+          savedItems.push({
+            id: chunk.id,
+            ownerId,
+            title: chunk.title,
+            questions: chunk.questions,
+            questionCount: chunk.questions.length,
+            ...meta,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
       }
 
       playDuoSound('correct');
@@ -345,17 +352,17 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
             <input
               type="number"
               min={1}
-              max={50}
+              max={1000}
               dir="ltr"
               value={questionCount}
               onChange={(e) => {
-                const v = Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1));
+                const v = Math.max(1, Math.min(1000, parseInt(e.target.value, 10) || 1));
                 setQuestionCount(v);
                 setGeneratedPrompt(null);
               }}
               className="w-20 px-2.5 py-1.5 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#A560E8] outline-none text-xs font-black font-latin text-center"
             />
-            <span className="text-[11px] font-bold text-[#777777]">سؤال (حتى 50)</span>
+            <span className="text-[11px] font-bold text-[#777777]">سؤال (يمكنك كتابة أي عدد)</span>
           </div>
         </div>
 

@@ -102,9 +102,10 @@ import type {
   UserProfile,
 } from './types';
 
-export const REQUIRED_RULES_VERSION = 'v6_drills_tables_starred_2026_11_20';
+export const REQUIRED_RULES_VERSION = 'v7_unlimited_questions_2026_11_21';
 
 export const RULES_UPDATE_CHANGES_AR: string[] = [
+  'رفع حد الأسئلة داخل الاختبار الواحد ونتائج المحاولات والنماذج المشتركة (myQuizzes, quizAttempts, sharedQuizzes) من 100 إلى 10,000 سؤال بدلاً من تقييدها بمئة سؤال فقط.',
   'دعم حفظ واسترجاع صيغة «الأسئلة التفاعلية بالجداول» (table) وحقول الشرح المتقدم (explanationTable, explanationComparison).',
   'إضافة صلاحية حفظ إجابات الطالب في الجداول (tableAnswers) داخل سجل محاولات الاختبار (quizAttempts).',
   'إضافة مسار «الأسئلة المميزة ⭐» الخاص بكل طالب (/users/{uid}/starredQuestions/{starredId}) للقراءة والكتابة والحذف بأمان.',
@@ -118,7 +119,7 @@ export const RULES_UPDATE_STEPS_AR: string[] = [
   '4. انتظر ثانيتين بعد النشر ثم عد هنا واضغط «إعادة فحص القواعد الآن» للتأكد من تفعيلها 100%.',
 ];
 
-const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v6_ok_';
+const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v7_ok_';
 
 export async function checkActiveDatabaseRulesCompliance(
   user: User,
@@ -1901,7 +1902,7 @@ async function writePersonalCollectionsToDb(params: {
     if (!quiz?.id || !Array.isArray(quiz.questions) || quiz.questions.length === 0) continue;
     const quizRef = doc(targetDb, 'users', targetUid, 'myQuizzes', quiz.id);
     const existingQuiz = await getDoc(quizRef);
-    const questions = quiz.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+    const questions = quiz.questions.slice(0, 10000).map(cleanQuizQuestionForFirestore);
     const metaFields: Record<string, unknown> = {
       ...(quiz.parentQuizId ? { parentQuizId: String(quiz.parentQuizId).slice(0, 128) } : {}),
       ...(quiz.quizKind === 'main' || quiz.quizKind === 'drill'
@@ -1970,7 +1971,7 @@ async function writePersonalCollectionsToDb(params: {
       onItemDone?.('attempt', at.title);
       continue;
     }
-    const qs: Record<string, unknown>[] = at.questions.slice(0, 100).map((q) => {
+    const qs: Record<string, unknown>[] = at.questions.slice(0, 10000).map((q) => {
       const base = cleanQuizQuestionForFirestore({
         ...q,
         answer: '',
@@ -2981,7 +2982,7 @@ export async function runFirebaseMigration(params: {
             }
             const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
             const sqSnap = await getDoc(sqRef);
-            const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+            const cleanedQs = sq.questions.slice(0, 10000).map(cleanQuizQuestionForFirestore);
             if (!sqSnap.exists()) {
               await setDoc(sqRef, {
                 id: sq.id,
@@ -3238,7 +3239,7 @@ export async function runFirebaseMigration(params: {
                 const sqRef = doc(targetDb, 'rooms', srcRoom.id, 'sharedQuizzes', sq.id);
                 const sqSnap = await getDoc(sqRef);
                 if (Array.isArray(sq.questions) && sq.questions.length > 0) {
-                  const cleanedQs = sq.questions.slice(0, 100).map(cleanQuizQuestionForFirestore);
+                  const cleanedQs = sq.questions.slice(0, 10000).map(cleanQuizQuestionForFirestore);
                   if (!sqSnap.exists()) {
                     await setDoc(sqRef, {
                       id: sq.id,

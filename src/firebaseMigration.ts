@@ -121,15 +121,47 @@ export const RULES_UPDATE_STEPS_AR: string[] = [
 
 const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v7_ok_';
 
+export interface RulesProbeCheckItem {
+  id: 'anti_test_mode' | 'starred' | 'my_quizzes_v7' | 'attempts_v7';
+  label: string;
+  passed: boolean;
+  detail?: string;
+}
+
+export interface DatabaseRulesCheckResult {
+  dbId: string;
+  label: string;
+  role: 'active' | 'player' | 'backup';
+  projectId: string;
+  firestoreDatabaseId: string;
+  config: FirebaseAppConfig;
+  status: 'ok' | 'outdated' | 'needs_auth' | 'offline_or_quota';
+  compliant: boolean;
+  reason?: string;
+  checks: RulesProbeCheckItem[];
+  consoleUrl: string;
+}
+
+function makeAllPassedChecks(): RulesProbeCheckItem[] {
+  return [
+    { id: 'anti_test_mode', label: 'حماية القاعدة ضد الكتابة المفتوحة (غير Test Mode)', passed: true },
+    { id: 'starred', label: 'صلاحية «الأسئلة المميزة ⭐» (starredQuestions)', passed: true },
+    { id: 'my_quizzes_v7', label: 'اختبارات التقوية وحد الـ 10,000 سؤال (myQuizzes)', passed: true },
+    { id: 'attempts_v7', label: 'سجل المحاولات وإجابات الجداول (quizAttempts)', passed: true },
+  ];
+}
+
 export async function checkActiveDatabaseRulesCompliance(
   user: User,
   config: FirebaseAppConfig = activeFirebaseConfig,
   bypassCache = false
 ): Promise<{
   compliant: boolean;
+  status: 'ok' | 'outdated' | 'offline_or_quota';
   checkedProjectId: string;
   checkedDbId: string;
   reason?: string;
+  checks: RulesProbeCheckItem[];
 }> {
   const cleanCfg = sanitizeFirebaseConfig(config) || activeFirebaseConfig;
   const projectId = cleanCfg.projectId;
@@ -139,54 +171,409 @@ export async function checkActiveDatabaseRulesCompliance(
   if (!bypassCache && typeof sessionStorage !== 'undefined') {
     try {
       if (sessionStorage.getItem(cacheKey) === REQUIRED_RULES_VERSION) {
-        return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
+        return {
+          compliant: true,
+          status: 'ok',
+          checkedProjectId: projectId,
+          checkedDbId: dbSegment,
+          checks: makeAllPassedChecks(),
+        };
       }
     } catch {
       // Ignore storage errors
     }
   }
 
-  try {
-    const idToken = await withTimeout(user.getIdToken(false), 3500);
-    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
-      projectId
-    )}/databases/${encodeURIComponent(dbSegment)}/documents/users/${encodeURIComponent(
-      user.uid
-    )}/starredQuestions/rules_v5_check?key=${encodeURIComponent(cleanCfg.apiKey)}`;
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3000);
-    const resp = await fetch(url, {
-      method: 'GET',
-      cache: 'no-store',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-      },
-    });
-    window.clearTimeout(timer);
+  const encodedProject = encodeURIComponent(projectId);
+  const encodedDb = encodeURIComponent(dbSegment);
+  const encodedApiKey = encodeURIComponent(cleanCfg.apiKey);
+  const encodedUid = encodeURIComponent(user.uid);
+  const docsBase = `https://firestore.googleapis.com/v1/projects/${encodedProject}/databases/${encodedDb}/documents`;
+  const docPrefix = `projects/${projectId}/databases/${dbSegment}/documents`;
 
-    if (resp.status === 403) {
+  const runLiveProbes = async (
+    idToken: string
+  ): Promise<{
+    compliant: boolean;
+    status: 'ok' | 'outdated' | 'offline_or_quota';
+    reason?: string;
+    checks: RulesProbeCheckItem[];
+    retryable?: boolean;
+  }> => {
+    const fetchProbe = async (pathOrSuffix: string, init: RequestInit = {}) => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 5000);
+      try {
+        const sep = pathOrSuffix.includes('?') ? '&' : '?';
+        return await fetch(`${docsBase}${pathOrSuffix}${sep}key=${encodedApiKey}`, {
+          ...init,
+          cache: 'no-store',
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+            ...(init.headers || {}),
+          },
+        });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    };
+
+    const probeSuffix = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const quizProbeId = `rules_v7_qz_${probeSuffix}`;
+    const attemptProbeId = `rules_v7_at_${probeSuffix}`;
+    const dummyQuestionValues = Array.from({ length: 101 }, () => ({
+      mapValue: { fields: { id: { stringValue: 'p' } } },
+    }));
+    const dummyAnswerValues = Array.from({ length: 101 }, () => ({
+      integerValue: '-1',
+    }));
+
+    const [rogueResp, starredResp, quizCommitResp, attemptCommitResp] = await Promise.all([
+      fetchProbe('/platform/rules_probe_check', {
+        method: 'PATCH',
+        body: JSON.stringify({ fields: { id: { stringValue: 'rules_probe_check' } } }),
+      }),
+      fetchProbe(`/users/${encodedUid}/starredQuestions/rules_v7_probe`, {
+        method: 'GET',
+      }),
+      fetchProbe(':commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          writes: [
+            {
+              currentDocument: { exists: false },
+              update: {
+                name: `${docPrefix}/users/${user.uid}/myQuizzes/${quizProbeId}`,
+                fields: {
+                  id: { stringValue: quizProbeId },
+                  ownerId: { stringValue: user.uid },
+                  title: { stringValue: 'rules_v7_probe' },
+                  questionCount: { integerValue: '101' },
+                  parentQuizId: { stringValue: 'parent_probe' },
+                  quizKind: { stringValue: 'drill' },
+                  drillStyle: { stringValue: 'mixed' },
+                  ruleTitle: { stringValue: 'probe' },
+                  questions: { arrayValue: { values: dummyQuestionValues } },
+                },
+              },
+              updateTransforms: [
+                { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+                { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+              ],
+            },
+          ],
+        }),
+      }),
+      fetchProbe(':commit', {
+        method: 'POST',
+        body: JSON.stringify({
+          writes: [
+            {
+              currentDocument: { exists: false },
+              update: {
+                name: `${docPrefix}/users/${user.uid}/quizAttempts/${attemptProbeId}`,
+                fields: {
+                  id: { stringValue: attemptProbeId },
+                  ownerId: { stringValue: user.uid },
+                  title: { stringValue: 'rules_v7_probe' },
+                  settings: { mapValue: { fields: {} } },
+                  tableAnswers: { mapValue: { fields: {} } },
+                  questions: { arrayValue: { values: dummyQuestionValues } },
+                  answers: { arrayValue: { values: dummyAnswerValues } },
+                  score: { integerValue: '0' },
+                  total: { integerValue: '101' },
+                  durationSec: { integerValue: '1' },
+                  finishedAt: { integerValue: '1' },
+                },
+              },
+              updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+            },
+          ],
+        }),
+      }),
+    ]);
+
+    // Immediate cleanup of any created probe documents (even if another probe failed)
+    const cleanupPromises: Promise<unknown>[] = [];
+    if (rogueResp.ok) {
+      cleanupPromises.push(
+        fetchProbe('/platform/rules_probe_check', { method: 'DELETE' }).catch(() => undefined)
+      );
+    }
+    if (quizCommitResp.ok) {
+      cleanupPromises.push(
+        fetchProbe(`/users/${encodedUid}/myQuizzes/${quizProbeId}`, { method: 'DELETE' }).catch(
+          () => undefined
+        )
+      );
+    }
+    if (attemptCommitResp.ok) {
+      cleanupPromises.push(
+        fetchProbe(`/users/${encodedUid}/quizAttempts/${attemptProbeId}`, {
+          method: 'DELETE',
+        }).catch(() => undefined)
+      );
+    }
+    await Promise.all(cleanupPromises);
+
+    // Check quota exhaustion (429) — not a rules failure
+    if (
+      rogueResp.status === 429 ||
+      starredResp.status === 429 ||
+      quizCommitResp.status === 429 ||
+      attemptCommitResp.status === 429
+    ) {
       return {
-        compliant: false,
-        checkedProjectId: projectId,
-        checkedDbId: dbSegment,
-        reason: 'تم رفض الوصول لمسار starredQuestions (403) — قواعد الأمان بحاجة إلى تحديث ونشر في Firebase Console.',
+        compliant: true,
+        status: 'offline_or_quota',
+        reason: 'تم استهلاك حصة القراءة/الكتابة اليومية مؤقتاً أثناء الفحص.',
+        checks: makeAllPassedChecks(),
       };
     }
 
-    if (resp.ok || resp.status === 404) {
+    const antiTestModeOk = rogueResp.status === 403;
+    const starredOk = starredResp.ok || starredResp.status === 404;
+    const myQuizzesOk = quizCommitResp.ok;
+    const attemptsOk = attemptCommitResp.ok;
+
+    const checks: RulesProbeCheckItem[] = [
+      {
+        id: 'anti_test_mode',
+        label: 'حماية القاعدة ضد الكتابة المفتوحة (غير Test Mode)',
+        passed: antiTestModeOk,
+        detail: antiTestModeOk
+          ? 'محمية ضد الكتابة العشوائية'
+          : 'القاعدة مفتوحة بالكامل (Test Mode) بلا حماية!',
+      },
+      {
+        id: 'starred',
+        label: 'صلاحية «الأسئلة المميزة ⭐» (starredQuestions)',
+        passed: starredOk,
+        detail: starredOk
+          ? 'مسموحة ومؤمّنة للمستخدم'
+          : 'مرفوضة (403) — قواعد الأمان قديمة ولا تتضمن starredQuestions',
+      },
+      {
+        id: 'my_quizzes_v7',
+        label: 'اختبارات التقوية وحد الـ 10,000 سؤال (myQuizzes)',
+        passed: myQuizzesOk,
+        detail: myQuizzesOk
+          ? 'تقبل حقول التقوية وأكثر من 100 سؤال'
+          : `فشل الاختبار الفعلي (${quizCommitResp.status}) — القواعد ترفض +100 سؤال أو حقول اختبارات التقوية`,
+      },
+      {
+        id: 'attempts_v7',
+        label: 'سجل المحاولات وإجابات الجداول (quizAttempts)',
+        passed: attemptsOk,
+        detail: attemptsOk
+          ? 'تقبل إجابات الجداول وأكثر من 100 سؤال'
+          : `فشل الاختبار الفعلي (${attemptCommitResp.status}) — القواعد ترفض tableAnswers أو +100 سؤال`,
+      },
+    ];
+
+    recordFirestoreOperations(projectId, {
+      reads: 1,
+      writes:
+        (rogueResp.ok ? 1 : 0) + (quizCommitResp.ok ? 1 : 0) + (attemptCommitResp.ok ? 1 : 0),
+      deletes: cleanupPromises.length,
+    });
+
+    if (antiTestModeOk && starredOk && myQuizzesOk && attemptsOk) {
+      return { compliant: true, status: 'ok', checks };
+    }
+
+    const failedLabels: string[] = [];
+    if (!antiTestModeOk) failedLabels.push('القاعدة مفتوحة (Test Mode)');
+    if (!starredOk) failedLabels.push('الأسئلة المميزة ⭐');
+    if (!myQuizzesOk) failedLabels.push('حفظ +100 سؤال واختبارات التقوية');
+    if (!attemptsOk) failedLabels.push('محاولات الاختبار وإجابات الجداول');
+
+    return {
+      compliant: false,
+      status: 'outdated',
+      retryable: true,
+      reason: `فشل الفحص الفعلي في: ${failedLabels.join(' · ')}. انسخ قواعد firestore.rules المحدّثة وانشرها في Firebase Console.`,
+      checks,
+    };
+  };
+
+  try {
+    let idToken = await withTimeout(user.getIdToken(false), 3500);
+    let result = await runLiveProbes(idToken);
+
+    // Retry once if user just clicked Publish (Firebase Console edge propagation 1-3s)
+    if (!result.compliant && result.retryable && bypassCache) {
+      await new Promise((r) => window.setTimeout(r, 1500));
+      idToken = await withTimeout(user.getIdToken(true), 4000).catch(() => idToken);
+      result = await runLiveProbes(idToken);
+    }
+
+    if (typeof sessionStorage !== 'undefined') {
       try {
-        sessionStorage.setItem(cacheKey, REQUIRED_RULES_VERSION);
+        if (result.compliant && result.status === 'ok') {
+          sessionStorage.setItem(cacheKey, REQUIRED_RULES_VERSION);
+        } else if (!result.compliant) {
+          sessionStorage.removeItem(cacheKey);
+        }
       } catch {
         // Ignore storage errors
       }
-      return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
     }
+
+    return {
+      compliant: result.compliant,
+      status: result.status,
+      checkedProjectId: projectId,
+      checkedDbId: dbSegment,
+      reason: result.reason,
+      checks: result.checks,
+    };
   } catch {
     // Offline or transient network issue -> avoid false alarm
+    return {
+      compliant: true,
+      status: 'offline_or_quota',
+      checkedProjectId: projectId,
+      checkedDbId: dbSegment,
+      reason: 'تعذر الوصول إلى خادم Firestore أثناء الفحص.',
+      checks: makeAllPassedChecks(),
+    };
+  }
+}
+
+export async function checkAllRegisteredDatabasesRules(params: {
+  activeUser: User;
+  activeConfig?: FirebaseAppConfig;
+  poolState?: PlatformProgrammerState | null;
+  bypassCache?: boolean;
+  signInTargetKey?: string;
+}): Promise<DatabaseRulesCheckResult[]> {
+  const {
+    activeUser,
+    activeConfig = activeFirebaseConfig,
+    poolState,
+    bypassCache = false,
+    signInTargetKey,
+  } = params;
+
+  const entries: Array<{
+    dbId: string;
+    label: string;
+    role: 'active' | 'player' | 'backup';
+    config: FirebaseAppConfig;
+  }> = [];
+  const seenKeys = new Set<string>();
+
+  const cleanActive = sanitizeFirebaseConfig(activeConfig) || activeFirebaseConfig;
+  const activeKey = firebaseTargetKey(cleanActive);
+  const matchingActiveEntry = poolState?.playerDatabases?.find((d) =>
+    isSameFirebaseTarget(d.config, cleanActive)
+  );
+  seenKeys.add(activeKey);
+  entries.push({
+    dbId: matchingActiveEntry?.id || 'active',
+    label: matchingActiveEntry?.label || `القاعدة النشطة (${cleanActive.projectId})`,
+    role: 'active',
+    config: cleanActive,
+  });
+
+  for (const dbEntry of poolState?.playerDatabases || []) {
+    const clean = sanitizeFirebaseConfig(dbEntry.config);
+    if (!clean) continue;
+    const key = firebaseTargetKey(clean);
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    entries.push({
+      dbId: dbEntry.id,
+      label: dbEntry.label || clean.projectId,
+      role: 'player',
+      config: clean,
+    });
   }
 
-  return { compliant: true, checkedProjectId: projectId, checkedDbId: dbSegment };
+  for (const dbEntry of poolState?.backupDatabases || []) {
+    const clean = sanitizeFirebaseConfig(dbEntry.config);
+    if (!clean) continue;
+    const key = firebaseTargetKey(clean);
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    entries.push({
+      dbId: dbEntry.id,
+      label: dbEntry.label || clean.projectId,
+      role: 'backup',
+      config: clean,
+    });
+  }
+
+  const results = await Promise.all(
+    entries.map(async (entry): Promise<DatabaseRulesCheckResult> => {
+      const dbSeg = entry.config.firestoreDatabaseId?.trim() || '(default)';
+      const key = firebaseTargetKey(entry.config);
+      const consoleUrl = `https://console.firebase.google.com/project/${encodeURIComponent(
+        entry.config.projectId
+      )}/firestore/rules`;
+
+      let dbUser: User | null = null;
+      if (entry.config.projectId === cleanActive.projectId) {
+        dbUser = activeUser;
+      } else {
+        try {
+          const app = getOrInitFirebaseApp(entry.config);
+          const targetAuth = getAuth(app);
+          if (typeof targetAuth.authStateReady === 'function') {
+            await withTimeout(targetAuth.authStateReady(), 1200).catch(() => undefined);
+          }
+          dbUser = targetAuth.currentUser;
+          if (!dbUser && signInTargetKey === key) {
+            const provider = new GoogleAuthProvider();
+            provider.setCustomParameters({ prompt: 'select_account' });
+            const cred = await withTimeout(signInWithPopup(targetAuth, provider), 90000);
+            dbUser = cred.user;
+          }
+        } catch {
+          dbUser = null;
+        }
+      }
+
+      if (!dbUser) {
+        return {
+          dbId: entry.dbId,
+          label: entry.label,
+          role: entry.role,
+          projectId: entry.config.projectId,
+          firestoreDatabaseId: dbSeg,
+          config: entry.config,
+          status: 'needs_auth',
+          compliant: true,
+          reason: 'تحتاج تسجيل دخول سريع بحساب Google لإجراء الفحص الفعلي لقواعد الأمان.',
+          checks: [],
+          consoleUrl,
+        };
+      }
+
+      const res = await checkActiveDatabaseRulesCompliance(dbUser, entry.config, bypassCache);
+      return {
+        dbId: entry.dbId,
+        label: entry.label,
+        role: entry.role,
+        projectId: entry.config.projectId,
+        firestoreDatabaseId: dbSeg,
+        config: entry.config,
+        status: res.status,
+        compliant: res.compliant,
+        reason: res.reason,
+        checks: res.checks,
+        consoleUrl,
+      };
+    })
+  );
+
+  // Sort outdated databases first, then needs_auth, then active/player/backup
+  const rank = (r: DatabaseRulesCheckResult) =>
+    r.status === 'outdated' ? 0 : r.status === 'needs_auth' ? 1 : r.role === 'active' ? 2 : 3;
+  return results.sort((a, b) => rank(a) - rank(b));
 }
 
 export interface MigrationProgress {

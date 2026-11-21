@@ -48,6 +48,7 @@ import {
   RULES_UPDATE_STEPS_AR,
   runFirebaseMigration,
   verifyDatabaseBeforeAdd,
+  type DatabaseRulesCheckResult,
   type MigrationProgress,
   type MigrationResult,
   type VerifyStepItem,
@@ -82,6 +83,10 @@ interface ProgrammerDashboardProps {
   poolState: PlatformProgrammerState;
   onPoolStateUpdated: (next: PlatformProgrammerState) => void;
   onRefreshState: () => Promise<void>;
+  rulesAuditResults?: DatabaseRulesCheckResult[];
+  rulesAuditChecking?: boolean;
+  onOpenRulesModal?: () => void;
+  onRecheckAllRules?: () => void;
 }
 
 export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
@@ -94,6 +99,10 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   poolState,
   onPoolStateUpdated,
   onRefreshState,
+  rulesAuditResults = [],
+  rulesAuditChecking = false,
+  onOpenRulesModal,
+  onRecheckAllRules,
 }) => {
   const fullNameQuad = profile?.fullNameQuad || firebaseUser.displayName || '';
 
@@ -144,6 +153,9 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   const [calibratingQuota, setCalibratingQuota] = useState(false);
 
   const recheckActiveRules = async (bypassCache = true) => {
+    if (onRecheckAllRules && bypassCache) {
+      onRecheckAllRules();
+    }
     setRulesCompliance((prev) => ({ ...prev, checking: true }));
     try {
       const res = await checkActiveDatabaseRulesCompliance(
@@ -938,8 +950,12 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
 
       {/* Rules Compliance & Step-by-Step Update Guide Card */}
       {(() => {
-        const isOutdated = rulesCompliance.compliant === false;
-        const isUpToDate = rulesCompliance.compliant === true;
+        const auditOutdated = rulesAuditResults.filter((r) => r.status === 'outdated');
+        const auditCheckedOk = rulesAuditResults.filter((r) => r.status === 'ok');
+        const isCheckingNow = rulesCompliance.checking || rulesAuditChecking;
+        const isOutdated = auditOutdated.length > 0 || rulesCompliance.compliant === false;
+        const isUpToDate =
+          !isOutdated && (rulesCompliance.compliant === true || auditCheckedOk.length > 0);
         const expanded = isOutdated || showRulesGuideDetails;
         const registeredProjects = Array.from(
           new Set([
@@ -970,7 +986,7 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                       : 'bg-[#1CB0F6] text-white'
                   }`}
                 >
-                  {rulesCompliance.checking ? (
+                  {isCheckingNow ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : isOutdated ? (
                     <ShieldAlert className="w-5 h-5" />
@@ -981,11 +997,11 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="text-sm sm:text-base font-black text-[#3C3C3C]">
-                      تحديث قواعد الأمان (firestore.rules) للنسخة الجديدة
+                      الفحص الذكي لقواعد الأمان (firestore.rules)
                     </h2>
                     <span
                       className={`px-2.5 py-0.5 rounded-lg text-[11px] font-black border ${
-                        rulesCompliance.checking
+                        isCheckingNow
                           ? 'bg-[#E6F7FF] border-[#1CB0F6] text-[#1899D6]'
                           : isOutdated
                           ? 'bg-[#FFDFE0] border-[#FF4B4B] text-[#EA2B2B]'
@@ -994,34 +1010,57 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
                           : 'bg-white border-[#E5E5E5] text-[#777777]'
                       }`}
                     >
-                      {rulesCompliance.checking
-                        ? 'جاري فحص القواعد...'
+                      {isCheckingNow
+                        ? 'جاري الفحص الفعلي...'
                         : isOutdated
-                        ? '⚠️ القواعد تحتاج تحديثاً فوراً'
+                        ? `⚠️ ${auditOutdated.length || 1} قاعدة تحتاج تحديثاً`
                         : isUpToDate
-                        ? 'القواعد محدثة ✓'
+                        ? 'جميع القواعد المفحوصة سليمة 100% ✓'
                         : 'لم يكتمل الفحص'}
                     </span>
                   </div>
                   <p className="text-xs font-bold text-[#666666] mt-0.5">
                     {isOutdated
-                      ? rulesCompliance.reason ||
-                        `القاعدة النشطة (${rulesCompliance.checkedProjectId}) تعمل على نسخة قديمة من firestore.rules؛ حدّثها لتفعيل الأسئلة المميزة ⭐ والجداول التفاعلية.`
+                      ? auditOutdated.length > 0
+                        ? `القواعد المحتاجة إصلاح: ${auditOutdated.map((d) => `${d.label} (${d.projectId})`).join(' · ')}`
+                        : rulesCompliance.reason ||
+                          `القاعدة النشطة (${rulesCompliance.checkedProjectId}) تعمل على نسخة قديمة من firestore.rules؛ حدّثها الآن.`
                       : isUpToDate
-                      ? `القاعدة النشطة (${rulesCompliance.checkedProjectId}) تدعم الجداول التفاعلية والأسئلة المميزة ⭐ بالكامل.`
-                      : 'تحقق من توافق قواعد الأمان على مشاريع Firebase المسجلة.'}
+                      ? `تم التحقق فعلياً من ${rulesCompliance.checkedProjectId}${
+                          auditCheckedOk.length > 1
+                            ? ` و${auditCheckedOk.length - 1} قاعدة أخرى`
+                            : ''
+                        }: محمية وتدعم الأسئلة المميزة ⭐ والجداول و+100 سؤال.`
+                      : 'تحقق فعلياً من توافق قواعد الأمان على مشاريع Firebase المسجلة.'}
                   </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {onOpenRulesModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenRulesModal();
+                      if (onRecheckAllRules) onRecheckAllRules();
+                    }}
+                    className={`duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl border-2 border-b-4 text-xs font-black cursor-pointer ${
+                      isOutdated
+                        ? 'bg-[#FF4B4B] border-[#EA2B2B] text-white'
+                        : 'bg-[#A560E8] border-[#8938D6] text-white'
+                    }`}
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>{isOutdated ? 'فتح نافذة الإصلاح والتحقق' : 'فحص شامل لكل القواعد'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
-                  disabled={rulesCompliance.checking}
+                  disabled={isCheckingNow}
                   onClick={() => void recheckActiveRules(true)}
                   className="duo-btn flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] hover:border-[#1CB0F6] text-xs font-black text-[#3C3C3C] cursor-pointer disabled:opacity-60"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 text-[#1899D6] ${rulesCompliance.checking ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 text-[#1899D6] ${isCheckingNow ? 'animate-spin' : ''}`} />
                   <span>إعادة فحص القواعد الآن</span>
                 </button>
                 {!isOutdated && (

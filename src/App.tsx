@@ -64,12 +64,13 @@ import {
   type ServerPlatformPointer,
 } from './firebase';
 import {
-  checkActiveDatabaseRulesCompliance,
+  checkAllRegisteredDatabasesRules,
   fetchProgrammerSession,
   getFallbackProgrammerState,
   noteCloudRegistrySnapshot,
   restoreActiveSupervisorRoomFromSnapshot,
   syncPersonalAccountFromPreviousDbs,
+  type DatabaseRulesCheckResult,
   type MigrationProgress,
   type PlatformMigrationPointer,
 } from './firebaseMigration';
@@ -109,6 +110,7 @@ import { MyQuizzesView } from './components/MyQuizzesView';
 import { ProgrammerDashboard } from './components/ProgrammerDashboard';
 import { QuickMigrateModal } from './components/QuickMigrateModal';
 import { QuotaFullDbSelectorModal } from './components/QuotaFullDbSelectorModal';
+import { RulesCheckModal } from './components/RulesCheckModal';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
 
@@ -272,6 +274,11 @@ export default function App() {
     reason: string;
   } | null>(null);
   const [rulesAlertDismissed, setRulesAlertDismissed] = useState<boolean>(false);
+  const [rulesCheckResults, setRulesCheckResults] = useState<DatabaseRulesCheckResult[]>([]);
+  const [rulesModalOpen, setRulesModalOpen] = useState<boolean>(false);
+  const [rulesModalChecking, setRulesModalChecking] = useState<boolean>(false);
+  const [rulesModalSigningKey, setRulesModalSigningKey] = useState<string | null>(null);
+  const hasAutoCheckedRulesUidRef = useRef<string | null>(null);
   const quotaSelectorTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -502,8 +509,11 @@ export default function App() {
     const unsubRules = subscribeRulesUpdateNeeded((info) => {
       setRulesOutdatedReason({
         projectId: info.projectId,
-        reason: 'قواعد الأمان الحالية لا تسمح بالوصول إلى الأسئلة المميزة وجداول الاختبارات المحدّثة.',
+        reason: 'قواعد الأمان الحالية تحتاج تحديثاً لدعم الأسئلة المميزة وجداول الاختبارات وأكثر من 100 سؤال.',
       });
+      if (firebaseUserRef.current && hasAutoCheckedRulesUidRef.current) {
+        setRulesModalOpen(true);
+      }
     });
     void fetchServerQuotaStatus(activeProjectId);
     const quotaPoll = window.setInterval(() => {
@@ -683,22 +693,50 @@ export default function App() {
     void refreshProgrammerState(firebaseUser, profile?.fullNameQuad);
   }, [firebaseUser?.uid, firebaseUser?.email, profile?.fullNameQuad, refreshProgrammerState]);
 
-  const checkProgrammerRulesCompliance = useCallback(
-    async (user: User, bypassCache = false) => {
-      const res = await checkActiveDatabaseRulesCompliance(
-        user,
-        activeFirebaseConfig,
-        bypassCache
-      );
-      if (!res.compliant) {
-        setRulesOutdatedReason({
-          projectId: res.checkedProjectId,
-          reason:
-            res.reason ||
-            'قواعد الأمان (firestore.rules) في القاعدة الحالية تحتاج إلى تحديث لدعم الجداول والأسئلة المميزة.',
+  const runProgrammerRulesAudit = useCallback(
+    async (
+      user: User,
+      options: {
+        bypassCache?: boolean;
+        openOnFail?: boolean;
+        signInTargetKey?: string;
+      } = {}
+    ) => {
+      const { bypassCache = true, openOnFail = true, signInTargetKey } = options;
+      setRulesModalChecking(true);
+      if (signInTargetKey) setRulesModalSigningKey(signInTargetKey);
+      try {
+        const results = await checkAllRegisteredDatabasesRules({
+          activeUser: user,
+          activeConfig: activeFirebaseConfig,
+          poolState: programmerStateRef.current || getFallbackProgrammerState(),
+          bypassCache,
+          signInTargetKey,
         });
-      } else {
-        setRulesOutdatedReason(null);
+        setRulesCheckResults(results);
+        const outdatedList = results.filter((r) => r.status === 'outdated');
+        if (outdatedList.length > 0) {
+          const first = outdatedList[0];
+          setRulesOutdatedReason({
+            projectId: first.projectId,
+            reason:
+              first.reason ||
+              'قواعد الأمان (firestore.rules) في إحدى القواعد تحتاج إلى تحديث ونشر.',
+          });
+          setRulesAlertDismissed(false);
+          if (openOnFail) {
+            setRulesModalOpen(true);
+            playDuoSound('wrong');
+          }
+        } else {
+          setRulesOutdatedReason(null);
+          if (bypassCache) {
+            playDuoSound('correct');
+          }
+        }
+      } finally {
+        setRulesModalChecking(false);
+        setRulesModalSigningKey(null);
       }
     },
     []
@@ -711,9 +749,20 @@ export default function App() {
         email: firebaseUser?.email,
         fullNameQuad: profile?.fullNameQuad || firebaseUser?.displayName,
       });
-    if (!firebaseUser || !isProgCandidate) return;
-    void checkProgrammerRulesCompliance(firebaseUser);
-  }, [firebaseUser?.uid, isProgrammer, profile?.fullNameQuad, checkProgrammerRulesCompliance]);
+    if (!firebaseUser || !isProgCandidate || programmerLoading) return;
+    if (hasAutoCheckedRulesUidRef.current === firebaseUser.uid) return;
+    hasAutoCheckedRulesUidRef.current = firebaseUser.uid;
+    void runProgrammerRulesAudit(firebaseUser, {
+      bypassCache: true,
+      openOnFail: true,
+    });
+  }, [
+    firebaseUser?.uid,
+    isProgrammer,
+    programmerLoading,
+    profile?.fullNameQuad,
+    runProgrammerRulesAudit,
+  ]);
 
   // Clear self-migration marker once reloaded onto the migrated DB
   useEffect(() => {
@@ -1540,6 +1589,15 @@ export default function App() {
                 onRefreshState={() =>
                   refreshProgrammerState(firebaseUser, firebaseUser.displayName)
                 }
+                rulesAuditResults={rulesCheckResults}
+                rulesAuditChecking={rulesModalChecking}
+                onOpenRulesModal={() => setRulesModalOpen(true)}
+                onRecheckAllRules={() =>
+                  void runProgrammerRulesAudit(firebaseUser, {
+                    bypassCache: true,
+                    openOnFail: false,
+                  })
+                }
               />
             ) : programmerLoading || !programmerError ? (
               <div className="max-w-3xl mx-auto px-4 py-12">
@@ -1579,6 +1637,26 @@ export default function App() {
             )}
           </main>
         </div>
+        <RulesCheckModal
+          open={rulesModalOpen}
+          checking={rulesModalChecking}
+          signingInKey={rulesModalSigningKey}
+          results={rulesCheckResults}
+          onClose={() => setRulesModalOpen(false)}
+          onRecheckAll={() =>
+            void runProgrammerRulesAudit(firebaseUser, {
+              bypassCache: true,
+              openOnFail: false,
+            })
+          }
+          onVerifyWithSignIn={(targetKey) =>
+            void runProgrammerRulesAudit(firebaseUser, {
+              bypassCache: true,
+              openOnFail: false,
+              signInTargetKey: targetKey,
+            })
+          }
+        />
       </AppErrorBoundary>
     );
   }
@@ -2036,14 +2114,18 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setProgrammerState((prev) => prev || getFallbackProgrammerState());
-                    setActiveRoomId(null);
-                    setTab('programmer');
+                    setRulesModalOpen(true);
+                    if (firebaseUser) {
+                      void runProgrammerRulesAudit(firebaseUser, {
+                        bypassCache: true,
+                        openOnFail: false,
+                      });
+                    }
                   }}
                   className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-xs sm:text-sm font-black cursor-pointer"
                 >
                   <Code2 className="w-4 h-4" />
-                  <span>عرض خطوات التحديث ونسخ القواعد</span>
+                  <span>فحص القواعد وإصلاحها الآن</span>
                 </button>
                 <button
                   type="button"
@@ -2298,6 +2380,15 @@ export default function App() {
                 onRefreshState={() =>
                   refreshProgrammerState(firebaseUser, profile.fullNameQuad)
                 }
+                rulesAuditResults={rulesCheckResults}
+                rulesAuditChecking={rulesModalChecking}
+                onOpenRulesModal={() => setRulesModalOpen(true)}
+                onRecheckAllRules={() =>
+                  void runProgrammerRulesAudit(firebaseUser, {
+                    bypassCache: true,
+                    openOnFail: false,
+                  })
+                }
               />
             ) : (
               <div className="max-w-xl mx-auto px-4 py-12 text-center">
@@ -2469,6 +2560,28 @@ export default function App() {
         firebaseUser={firebaseUser}
         quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
       />
+      {effectiveIsProgrammer && firebaseUser && (
+        <RulesCheckModal
+          open={rulesModalOpen}
+          checking={rulesModalChecking}
+          signingInKey={rulesModalSigningKey}
+          results={rulesCheckResults}
+          onClose={() => setRulesModalOpen(false)}
+          onRecheckAll={() =>
+            void runProgrammerRulesAudit(firebaseUser, {
+              bypassCache: true,
+              openOnFail: false,
+            })
+          }
+          onVerifyWithSignIn={(targetKey) =>
+            void runProgrammerRulesAudit(firebaseUser, {
+              bypassCache: true,
+              openOnFail: false,
+              signInTargetKey: targetKey,
+            })
+          }
+        />
+      )}
       {personalSyncProgress && (
         <DuoLoading
           variant="overlay"

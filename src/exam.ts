@@ -96,42 +96,166 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
   };
 }
 
-/** يبني قائمة أسئلة الاختبار حسب الإعدادات (مزج وتنويع وعدد). */
-export function buildExam(quizzes: MyQuiz[], settings: ExamSettings): ExamQuestion[] {
+export interface ExamRotationBuildResult {
+  questions: ExamQuestion[];
+  /** خريطة المعرفات المحدَّثة لكل نموذج بعد هذا الاختبار */
+  nextSeenByQuizId: Record<string, string[]>;
+  /** معرفات النماذج التي اكتملت دورتها في المحاولة السابقة وبدأت دورة جديدة الآن */
+  restartedQuizIds: string[];
+  /** معرفات النماذج التي اكتملت دورتها بنسبة 100% بعد إضافة أسئلة هذه المحاولة */
+  completedAfterRunQuizIds: string[];
+}
+
+export interface ExamRotationStats {
+  totalQuestions: number;
+  seenQuestions: number;
+  remainingUnseen: number;
+}
+
+/** يحسب إحصائيات التغطية الحالية في الدورة للنماذج المختارة. */
+export function getExamRotationStats(
+  quizzes: MyQuiz[],
+  quizIds: string[],
+  seenByQuizId: Record<string, string[]>
+): ExamRotationStats {
+  const idSet = new Set(quizIds);
+  let totalQuestions = 0;
+  let seenQuestions = 0;
+
+  for (const qz of quizzes) {
+    if (!idSet.has(qz.id)) continue;
+    const pool = validPool(qz);
+    if (pool.length === 0) continue;
+    totalQuestions += pool.length;
+    const seenSet = new Set(seenByQuizId[qz.id] ?? []);
+    let qzSeen = 0;
+    for (const q of pool) {
+      if (seenSet.has(q.id)) qzSeen++;
+    }
+    seenQuestions += qzSeen;
+  }
+
+  return {
+    totalQuestions,
+    seenQuestions,
+    remainingUnseen: Math.max(0, totalQuestions - seenQuestions),
+  };
+}
+
+/**
+ * يبني قائمة أسئلة الاختبار مع تجنب تكرار الأسئلة التي ظهرت في المحاولات السابقة
+ * حتى تنتهي جميع أسئلة كل نموذج، ثم يعيد دورة النموذج من البداية تلقائياً.
+ */
+export function buildExamWithRotation(
+  quizzes: MyQuiz[],
+  settings: ExamSettings,
+  seenByQuizId: Record<string, string[]>
+): ExamRotationBuildResult {
   const chosen = settings.quizIds
     .map((id) => quizzes.find((q) => q.id === id))
     .filter((q): q is MyQuiz => !!q && validPool(q).length > 0);
-  if (chosen.length === 0) return [];
+  if (chosen.length === 0) {
+    return {
+      questions: [],
+      nextSeenByQuizId: { ...seenByQuizId },
+      restartedQuizIds: [],
+      completedAfterRunQuizIds: [],
+    };
+  }
 
-  type Item = { q: QuizQuestion; quiz: MyQuiz; order: number };
+  type Item = { q: QuizQuestion; quiz: MyQuiz; order: number; fromRefill: boolean };
+
+  const prepareQuizBuckets = (qz: MyQuiz) => {
+    const pool = validPool(qz).map((q, order) => ({ q, quiz: qz, order }));
+    const seenSet = new Set(seenByQuizId[qz.id] ?? []);
+    const unseenBase = pool.filter((it) => !seenSet.has(it.q.id));
+    const seenBase = pool.filter((it) => seenSet.has(it.q.id));
+    const unseen = (settings.shuffleQuestions ? shuffle(unseenBase) : unseenBase).map((it) => ({
+      ...it,
+      fromRefill: false,
+    }));
+    const refill = (settings.shuffleQuestions ? shuffle(seenBase) : seenBase).map((it) => ({
+      ...it,
+      fromRefill: true,
+    }));
+    return { qz, pool, seenSet, unseen, refill };
+  };
+
   let picked: Item[] = [];
+  const restartedSet = new Set<string>();
 
   if (settings.sourceMode === 'single' || chosen.length === 1) {
-    const quiz = chosen[0];
-    const pool = validPool(quiz).map((q, order) => ({ q, quiz, order }));
-    const n = Math.max(1, Math.min(settings.questionCount, pool.length, EXAM_MAX_QUESTIONS));
-    picked = n < pool.length ? shuffle(pool).slice(0, n).sort((a, b) => a.order - b.order) : pool;
+    const bucket = prepareQuizBuckets(chosen[0]);
+    const n = Math.max(1, Math.min(settings.questionCount, bucket.pool.length, EXAM_MAX_QUESTIONS));
+
+    if (bucket.unseen.length === 0) {
+      // الدورة السابقة اكتملت بالكامل -> نبدأ دورة جديدة على كل الأسئلة
+      restartedSet.add(bucket.qz.id);
+      const fresh = settings.shuffleQuestions
+        ? shuffle(bucket.pool)
+        : bucket.pool.slice();
+      picked = fresh.slice(0, n).map((it) => ({ ...it, fromRefill: true }));
+    } else if (bucket.unseen.length >= n) {
+      picked = bucket.unseen.slice(0, n);
+    } else {
+      // لم يبقَ في الدورة الحالية سوى جزء أقل من المطلوب -> نأخذ المتبقي غير المجاب ثم نكمل من دورة جديدة دون تكرار في نفس الاختبار
+      restartedSet.add(bucket.qz.id);
+      const needMore = n - bucket.unseen.length;
+      picked = [...bucket.unseen, ...bucket.refill.slice(0, needMore)];
+    }
+
+    if (!settings.shuffleQuestions && !restartedSet.has(bucket.qz.id)) {
+      picked = picked.slice().sort((a, b) => a.order - b.order);
+    }
   } else if (settings.mixMode === 'onePerQuiz') {
-    picked = chosen.map((quiz) => {
-      const pool = validPool(quiz);
-      const idx = Math.floor(Math.random() * pool.length);
-      return { q: pool[idx], quiz, order: 0 };
+    picked = chosen.map((qz) => {
+      const bucket = prepareQuizBuckets(qz);
+      if (bucket.unseen.length > 0) {
+        const idx = Math.floor(Math.random() * bucket.unseen.length);
+        return bucket.unseen[idx];
+      }
+      restartedSet.add(qz.id);
+      const idx = Math.floor(Math.random() * bucket.pool.length);
+      return { ...bucket.pool[idx], fromRefill: true };
     });
   } else {
-    // عدد محدد موزّع بالتساوي على النماذج (دوران): تنوع قدر الإمكان
-    const pools = chosen.map((quiz) => ({
-      quiz,
-      items: shuffle(validPool(quiz).map((q, order) => ({ q, quiz, order }))),
-    }));
+    // عدد محدد موزّع بالتساوي على النماذج (دوران): أولوية الأسئلة غير المختبرة من كل نموذج أولاً
+    const buckets = chosen.map((qz) => {
+      const b = prepareQuizBuckets(qz);
+      return {
+        ...b,
+        // للعرض بالترتيب نستخدم shift من المقدمة، أو pop من المخلط
+        unseenQueue: b.unseen.slice(),
+        refillQueue: b.refill.slice(),
+      };
+    });
     const n = Math.max(1, Math.min(settings.questionCount, EXAM_MAX_QUESTIONS));
     let guard = 0;
+
+    // المرحلة 1: السحب بالتناوب من الأسئلة غير المختبرة فقط عبر جميع النماذج المختارة
     while (picked.length < n && guard < 10000) {
       guard++;
       let took = false;
-      for (const p of pools) {
+      for (const b of buckets) {
         if (picked.length >= n) break;
-        const next = p.items.pop();
+        const next = b.unseenQueue.shift();
         if (next) {
+          picked.push(next);
+          took = true;
+        }
+      }
+      if (!took) break;
+    }
+
+    // المرحلة 2: إذا احتاج المستخدم عدداً أكبر من المتبقي غير المختبر، نُكمل من دورة جديدة لكل نموذج نفد رصيده
+    while (picked.length < n && guard < 20000) {
+      guard++;
+      let took = false;
+      for (const b of buckets) {
+        if (picked.length >= n) break;
+        const next = b.refillQueue.shift();
+        if (next) {
+          restartedSet.add(b.qz.id);
           picked.push(next);
           took = true;
         }
@@ -140,8 +264,63 @@ export function buildExam(quizzes: MyQuiz[], settings: ExamSettings): ExamQuesti
     }
   }
 
+  // تحديث سجل الأسئلة المختبرة لكل نموذج بناءً على الأسئلة المختارة فعلياً
+  const nextSeenByQuizId: Record<string, string[]> = { ...seenByQuizId };
+  const completedAfterRunQuizIds: string[] = [];
+
+  for (const qz of chosen) {
+    const pool = validPool(qz);
+    const poolIds = new Set(pool.map((q) => q.id));
+    const prevSeenValid = (seenByQuizId[qz.id] ?? []).filter((id) => poolIds.has(id));
+    const pickedForQuiz = picked.filter((it) => it.quiz.id === qz.id);
+
+    if (pickedForQuiz.length === 0) {
+      if (prevSeenValid.length > 0) {
+        nextSeenByQuizId[qz.id] = prevSeenValid;
+      } else {
+        delete nextSeenByQuizId[qz.id];
+      }
+      continue;
+    }
+
+    const refillPicked = pickedForQuiz.filter((it) => it.fromRefill);
+    let updated: string[];
+    if (refillPicked.length === 0) {
+      const merged = new Set([...prevSeenValid, ...pickedForQuiz.map((it) => it.q.id)]);
+      updated = Array.from(merged);
+    } else if (pickedForQuiz.length >= pool.length) {
+      // إذا غطى الاختبار جميع أسئلة النموذج دفعة واحدة، نعلّم الدورة 100% مكتملة
+      updated = pool.map((q) => q.id);
+    } else {
+      // تم استهلاك باقي الدورة السابقة وبدأت دورة جديدة بأسئلة refillPicked
+      updated = Array.from(new Set(refillPicked.map((it) => it.q.id)));
+    }
+
+    if (updated.length > 0) {
+      nextSeenByQuizId[qz.id] = updated;
+    } else {
+      delete nextSeenByQuizId[qz.id];
+    }
+
+    if (updated.length >= pool.length) {
+      completedAfterRunQuizIds.push(qz.id);
+    }
+  }
+
   const ordered = settings.shuffleQuestions ? shuffle(picked) : picked;
-  return ordered.slice(0, EXAM_MAX_QUESTIONS).map((it) => toExamQuestion(it.q, it.quiz, settings.shuffleChoices));
+  return {
+    questions: ordered
+      .slice(0, EXAM_MAX_QUESTIONS)
+      .map((it) => toExamQuestion(it.q, it.quiz, settings.shuffleChoices)),
+    nextSeenByQuizId,
+    restartedQuizIds: Array.from(restartedSet),
+    completedAfterRunQuizIds,
+  };
+}
+
+/** يبني قائمة أسئلة الاختبار حسب الإعدادات (مزج وتنويع وعدد). */
+export function buildExam(quizzes: MyQuiz[], settings: ExamSettings): ExamQuestion[] {
+  return buildExamWithRotation(quizzes, settings, {}).questions;
 }
 
 export function isQuestionAnswered(

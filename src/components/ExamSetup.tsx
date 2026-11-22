@@ -1,10 +1,25 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowRight, BookOpen, Play, Shuffle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowRight, BookOpen, Play, RotateCcw, Shuffle } from 'lucide-react';
 import type { ExamSettings, ExamQuestion, MyQuiz } from '../types';
-import { availableCount, buildExam, describeTiming, EXAM_MAX_QUESTIONS, validPool } from '../exam';
+import {
+  availableCount,
+  buildExam,
+  buildExamWithRotation,
+  describeTiming,
+  EXAM_MAX_QUESTIONS,
+  getExamRotationStats,
+  validPool,
+} from '../exam';
+import {
+  loadExamRotationMap,
+  loadExamRotationMapSync,
+  resetExamRotationQuizzes,
+  saveExamRotationMap,
+} from '../localDraftStore';
 import { DuoLoading } from './DuoLoading';
 
 interface Props {
+  ownerId: string;
   quizzes: MyQuiz[];
   onBack: () => void;
   onStart: (settings: ExamSettings, questions: ExamQuestion[]) => void;
@@ -18,7 +33,7 @@ const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex
 const numInp =
   'w-24 rounded-2xl border-2 border-[#E5E5E5] focus:border-[#A560E8] outline-none px-3 py-2 text-sm font-black font-latin text-center';
 
-export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
+export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }) => {
   const orderedQuizzes = useMemo(() => {
     const idSet = new Set(quizzes.map((q) => q.id));
     const mains = quizzes.filter((q) => !q.parentQuizId || !idSet.has(q.parentQuizId));
@@ -48,6 +63,10 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
   const [countText, setCountText] = useState('');
   const [shuffleQuestions, setShuffleQuestions] = useState(true);
   const [shuffleChoices, setShuffleChoices] = useState(false);
+  const [avoidRepeats, setAvoidRepeats] = useState(true);
+  const [seenByQuizId, setSeenByQuizId] = useState<Record<string, string[]>>(() =>
+    loadExamRotationMapSync(ownerId)
+  );
   const [showLaws, setShowLaws] = useState(false);
   const [timing, setTiming] = useState<'none' | 'perQuestion' | 'total'>('none');
   const [perQ, setPerQ] = useState('60');
@@ -55,8 +74,22 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    let active = true;
+    void loadExamRotationMap(ownerId).then((loaded) => {
+      if (active) setSeenByQuizId(loaded);
+    });
+    return () => {
+      active = false;
+    };
+  }, [ownerId]);
+
   const quizIds = sourceMode === 'single' ? (singleId ? [singleId] : []) : mixIds;
   const avail = availableCount(quizzes, { sourceMode, mixMode, quizIds });
+  const rotationStats = useMemo(
+    () => getExamRotationStats(quizzes, quizIds, seenByQuizId),
+    [quizzes, quizIds, seenByQuizId]
+  );
   const lawsAvailCount = useMemo(
     () =>
       quizzes
@@ -81,7 +114,13 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
   const toggleMix = (id: string) =>
     setMixIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
 
-  const start = () => {
+  const handleResetRotation = async () => {
+    if (quizIds.length === 0) return;
+    const next = await resetExamRotationQuizzes(ownerId, quizIds);
+    setSeenByQuizId(next);
+  };
+
+  const start = async () => {
     setError(null);
     if (quizIds.length === 0 || avail === 0) {
       setError('اختر نموذجاً واحداً على الأقل يحتوي أسئلة جاهزة.');
@@ -96,10 +135,23 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
       shuffleQuestions,
       shuffleChoices,
       showLaws,
+      avoidRepeats,
       timing,
       seconds,
     };
-    const questions = buildExam(quizzes, settings);
+
+    let questions: ExamQuestion[];
+    if (avoidRepeats) {
+      const built = buildExamWithRotation(quizzes, settings, seenByQuizId);
+      questions = built.questions;
+      if (questions.length > 0) {
+        setSeenByQuizId(built.nextSeenByQuizId);
+        await saveExamRotationMap(ownerId, built.nextSeenByQuizId);
+      }
+    } else {
+      questions = buildExam(quizzes, settings);
+    }
+
     if (questions.length === 0) {
       setError('تعذر بناء الاختبار، تأكد أن النماذج المختارة فيها أسئلة جاهزة.');
       return;
@@ -224,6 +276,42 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
         {shuffleChoices && (
           <p className="text-[11px] font-bold text-[#8A6500]">انتبه: لا تفعّله إذا كانت خياراتك مثل «كل ما سبق» أو «لا يمكن التحديد».</p>
         )}
+        <label className="flex items-center gap-2 text-sm font-bold cursor-pointer pt-1 border-t border-[#F0F0F0]">
+          <input type="checkbox" checked={avoidRepeats} onChange={(e) => setAvoidRepeats(e.target.checked)} />
+          <span>عدم تكرار الأسئلة المختبرة سابقاً حتى ينتهي الاختبار ثم يعيد تلقائياً</span>
+        </label>
+        {avoidRepeats && rotationStats.totalQuestions > 0 && (
+          <div className="rounded-2xl bg-[#FAF7FF] border-2 border-[#E9D8FD] p-3 flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-extrabold text-[#5B21B6]">
+              <span>
+                {rotationStats.seenQuestions === 0
+                  ? `بداية دورة جديدة: ${rotationStats.totalQuestions} سؤالاً جاهزاً لم يظهر لك بعد.`
+                  : rotationStats.remainingUnseen > 0
+                  ? `تقدم الدورة: اختبرت ${rotationStats.seenQuestions} من ${rotationStats.totalQuestions} · متبقي ${rotationStats.remainingUnseen} سؤالاً جديداً`
+                  : `أنهيت كل أسئلة الدورة (${rotationStats.totalQuestions} من ${rotationStats.totalQuestions}) — البدء الآن يفتح دورة جديدة`}
+              </span>
+              {rotationStats.seenQuestions > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void handleResetRotation()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-[#D8B4FE] text-[11px] font-black text-[#7C3AED] hover:bg-[#F3E8FF] cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" /> البدء من الأول
+                </button>
+              )}
+            </div>
+            <progress
+              value={rotationStats.seenQuestions}
+              max={rotationStats.totalQuestions}
+              className="w-full h-2 rounded-full overflow-hidden accent-[#A560E8] [&::-webkit-progress-bar]:bg-[#E9D8FD] [&::-webkit-progress-bar]:rounded-full [&::-webkit-progress-value]:bg-[#A560E8] [&::-webkit-progress-value]:rounded-full [&::-moz-progress-bar]:bg-[#A560E8]"
+            />
+            {rotationStats.remainingUnseen > 0 && count > rotationStats.remainingUnseen && (
+              <p className="text-[11px] font-bold text-[#6B21A8]">
+                سيُعرض لك المتبقي من الدورة الحالية أولاً ({rotationStats.remainingUnseen} سؤالاً) ثم تُفتح دورة جديدة لبقية العدد ({count - rotationStats.remainingUnseen}).
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 3. الوقت */}
@@ -289,7 +377,7 @@ export const ExamSetup: React.FC<Props> = ({ quizzes, onBack, onStart }) => {
       <div className="sticky bottom-2 z-20 flex flex-col gap-1">
         <button
           type="button"
-          onClick={start}
+          onClick={() => void start()}
           disabled={avail === 0 || launching}
           className="duo-btn flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-[#A560E8] hover:bg-[#B57BEE] border-2 border-[#8938D6] border-b-4 text-white text-base font-black cursor-pointer disabled:opacity-50"
         >

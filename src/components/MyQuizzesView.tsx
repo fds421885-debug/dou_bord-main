@@ -335,6 +335,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   if (mode.kind === 'examSetup') {
     return (
       <ExamSetup
+        ownerId={profile.uid}
         quizzes={mergedQuizzes}
         onBack={() => setMode({ kind: 'list' })}
         onStart={(settings, questions) => {

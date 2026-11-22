@@ -390,6 +390,8 @@ export interface ExamSettings {
   shuffleQuestions: boolean;
   shuffleChoices: boolean;
   showLaws?: boolean;
+  /** تجنب تكرار الأسئلة التي ظهرت في المحاولات السابقة حتى إكمال الدورة ثم يعيد تلقائياً */
+  avoidRepeats?: boolean;
   timing: ExamTiming;
   /** ثوانٍ لكل سؤال، أو ثوانٍ للاختبار كاملاً حسب timing */
   seconds: number;

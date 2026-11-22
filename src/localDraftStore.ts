@@ -155,6 +155,13 @@ export interface StoredMyQuizMetaOverridesSnapshot {
   updatedAt: number;
 }
 
+export interface StoredExamRotationSnapshot {
+  key: 'exam_rotation';
+  ownerId: string;
+  seenByQuizId: Record<string, string[]>;
+  updatedAt: number;
+}
+
 export type SessionSnapshotRecord =
   | StoredUserProfileSnapshot
   | StoredSavedTestsSnapshot
@@ -164,7 +171,8 @@ export type SessionSnapshotRecord =
   | StoredMyQuizDraft
   | StoredQuizAttemptsSnapshot
   | StoredStarredQuestionsSnapshot
-  | StoredExamSession;
+  | StoredExamSession
+  | StoredExamRotationSnapshot;
 
 const DB_NAME = 'duoboard_local_store';
 const DB_VERSION = 2;
@@ -395,4 +403,86 @@ export async function saveMyQuizMetaOverride(
     },
     updatedAt: Date.now(),
   });
+}
+
+const ROTATION_LS_PREFIX = 'duoboard_exam_rotation_v1:';
+
+function normalizeRotationMap(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, string[]> = {};
+  for (const [quizId, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!quizId || !Array.isArray(list)) continue;
+    const seen = new Set<string>();
+    const clean: string[] = [];
+    for (const item of list) {
+      if (typeof item === 'string' && item.length > 0 && !seen.has(item)) {
+        seen.add(item);
+        clean.push(item);
+      }
+    }
+    if (clean.length > 0) out[quizId] = clean;
+  }
+  return out;
+}
+
+export function loadExamRotationMapSync(ownerId: string): Record<string, string[]> {
+  if (!ownerId || typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(`${ROTATION_LS_PREFIX}${ownerId}`);
+    if (!raw) return {};
+    return normalizeRotationMap(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
+export async function loadExamRotationMap(ownerId: string): Promise<Record<string, string[]>> {
+  if (!ownerId) return {};
+  const lsMap = loadExamRotationMapSync(ownerId);
+  try {
+    const snap = await loadSessionSnapshot<StoredExamRotationSnapshot>('exam_rotation');
+    if (snap && snap.ownerId === ownerId && snap.seenByQuizId) {
+      const idbMap = normalizeRotationMap(snap.seenByQuizId);
+      if (Object.keys(idbMap).length > 0 || Object.keys(lsMap).length === 0) {
+        return idbMap;
+      }
+    }
+  } catch {
+    // Fallback to localStorage mirror
+  }
+  return lsMap;
+}
+
+export async function saveExamRotationMap(
+  ownerId: string,
+  seenByQuizId: Record<string, string[]>
+): Promise<void> {
+  if (!ownerId) return;
+  const clean = normalizeRotationMap(seenByQuizId);
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(`${ROTATION_LS_PREFIX}${ownerId}`, JSON.stringify(clean));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+  await saveSessionSnapshot({
+    key: 'exam_rotation',
+    ownerId,
+    seenByQuizId: clean,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function resetExamRotationQuizzes(
+  ownerId: string,
+  quizIds: string[]
+): Promise<Record<string, string[]>> {
+  const prev = await loadExamRotationMap(ownerId);
+  const next = { ...prev };
+  for (const id of quizIds) {
+    delete next[id];
+  }
+  await saveExamRotationMap(ownerId, next);
+  return next;
 }

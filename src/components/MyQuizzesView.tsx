@@ -57,7 +57,11 @@ import {
   type ParsedQuizBundle,
 } from '../myQuizzes';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../quizTable';
-import { removeStarredQuestion, subscribeStarredQuestions } from '../starredQuestions';
+import {
+  computeStarredQuestionId,
+  removeStarredQuestion,
+  subscribeStarredQuestions,
+} from '../starredQuestions';
 import { ChartView } from './ChartView';
 import { FigureView } from './FigureView';
 import { QuestionLawsBox } from './QuestionLawsBox';
@@ -118,6 +122,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [quizzes, setQuizzes] = useState<MyQuiz[]>([]);
   const [starredItems, setStarredItems] = useState<StarredQuestion[]>([]);
   const [revealedStarExplanations, setRevealedStarExplanations] = useState<Record<string, boolean>>({});
+  const [expandedStarDrills, setExpandedStarDrills] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -259,6 +264,17 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     return { mainQuizzes: mains, childrenByParentId: byParent, standaloneDrills: orphans };
   }, [mergedQuizzes]);
 
+  const drillsByStarredId = useMemo<Record<string, MyQuiz[]>>(() => {
+    const map: Record<string, MyQuiz[]> = {};
+    for (const q of mergedQuizzes) {
+      const sid = q.sourceStarredId?.trim();
+      if (!sid) continue;
+      if (!map[sid]) map[sid] = [];
+      map[sid].push(q);
+    }
+    return map;
+  }, [mergedQuizzes]);
+
   const finish = (msg: string) => {
     setNotice(msg);
     setMode({ kind: 'list' });
@@ -397,6 +413,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               question: { ...exQ, answer: exQ.choices?.[exQ.correctIndex] || '' },
               sourceTitle: exQ.sourceTitle,
               sourceQuizId: exQ.sourceQuizId,
+              sourceStarredId: computeStarredQuestionId(exQ),
             })
           }
         />
@@ -447,6 +464,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               question: { ...exQ, answer: exQ.choices?.[exQ.correctIndex] || '' },
               sourceTitle: exQ.sourceTitle,
               sourceQuizId: exQ.sourceQuizId,
+              sourceStarredId: computeStarredQuestionId(exQ),
             })
           }
         />
@@ -706,6 +724,16 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               const qq = item.question;
               const isTable = qq.questionType === 'table' && Boolean(qq.table);
               const expShown = Boolean(revealedStarExplanations[item.id]);
+              const drillsForItem = drillsByStarredId[item.id] ?? [];
+              const drillsExpanded = Boolean(expandedStarDrills[item.id]);
+              const drillsBadgeLabel =
+                drillsForItem.length === 1
+                  ? 'صُنع له نموذج (1)'
+                  : drillsForItem.length === 2
+                  ? 'صُنع له نموذجان (2)'
+                  : drillsForItem.length <= 10
+                  ? `صُنع له ${drillsForItem.length} نماذج`
+                  : `صُنع له ${drillsForItem.length} نموذجاً`;
               const hasExp = Boolean(
                 qq.explanation ||
                   qq.explanationTable ||
@@ -716,10 +744,26 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               return (
                 <div key={item.id} className={`${card} p-4 flex flex-col gap-2.5`}>
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="px-2.5 py-1 rounded-full bg-[#FFF4CC] border border-[#FFC800] text-[#9A6B00] text-xs font-black">
                         سؤال مميز #{idx + 1}
                       </span>
+                      {drillsForItem.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedStarDrills((prev) => ({
+                              ...prev,
+                              [item.id]: !prev[item.id],
+                            }))
+                          }
+                          title="اضغط لعرض النماذج المصنوعة لهذه المسألة"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#F3E8FF] hover:bg-[#E9D5FF] border border-[#A560E8] text-[#7C3AED] text-xs font-black cursor-pointer"
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          <span>{drillsBadgeLabel}</span>
+                        </button>
+                      )}
                       {item.sourceTitle && (
                         <span className="text-[11px] font-bold text-[#777777]">
                           من: {item.sourceTitle}
@@ -752,6 +796,43 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       </button>
                     </div>
                   </div>
+
+                  {drillsForItem.length > 0 && drillsExpanded && (
+                    <div className="rounded-2xl bg-[#FAF7FF] border-2 border-[#E2D4F8] p-2.5 flex flex-col gap-1.5">
+                      <span className="text-[11px] font-black text-[#6B21A8]">
+                        النماذج المصنوعة لهذه المسألة ({drillsForItem.length}):
+                      </span>
+                      {drillsForItem.map((drill) => (
+                        <div
+                          key={drill.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-[#E9D8FD] px-2.5 py-1.5"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-black text-[#3C3C3C] truncate">{drill.title}</p>
+                            <p className="text-[10px] font-bold text-[#777777]">
+                              {drill.questionCount} سؤال
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => startSingleQuizNow(drill)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#A560E8] text-white text-[11px] font-black cursor-pointer"
+                            >
+                              <Play className="w-3 h-3" /> ابدأ
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMode({ kind: 'view', quiz: drill })}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#DDF4FF] text-[#1899D6] text-[11px] font-black cursor-pointer"
+                            >
+                              <FolderOpen className="w-3 h-3" /> فتح
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {qq.laws && qq.laws.length > 0 && (
                     <QuestionLawsBox laws={qq.laws} variant="review" compact />

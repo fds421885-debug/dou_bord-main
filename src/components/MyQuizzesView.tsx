@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, onSnapshot, query, where } from '../firestoreTracked';
 import {
   ArrowRight,
+  BarChart3,
   BookOpen,
   CheckCircle2,
   ClipboardCopy,
@@ -84,6 +85,7 @@ import {
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 import { DuoLoading } from './DuoLoading';
+import { MyQuizStatsView } from './MyQuizStatsView';
 
 type Mode =
   | { kind: 'list' }
@@ -118,7 +120,7 @@ const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white';
 
 export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [mode, setMode] = useState<Mode>({ kind: 'list' });
-  const [subTab, setSubTab] = useState<'quizzes' | 'starred'>('quizzes');
+  const [subTab, setSubTab] = useState<'quizzes' | 'starred' | 'stats'>('quizzes');
   const [quizzes, setQuizzes] = useState<MyQuiz[]>([]);
   const [starredItems, setStarredItems] = useState<StarredQuestion[]>([]);
   const [revealedStarExplanations, setRevealedStarExplanations] = useState<Record<string, boolean>>({});
@@ -648,17 +650,20 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   /* ---------------- القائمة ---------------- */
   return (
-    <div className="max-w-3xl mx-auto w-full flex flex-col gap-4" dir="rtl">
+    <div
+      className={`${subTab === 'stats' ? 'max-w-5xl' : 'max-w-3xl'} mx-auto w-full flex flex-col gap-4`}
+      dir="rtl"
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-black text-[#3C3C3C]">اختباراتي</h2>
-          <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها من JSON، وتابع أسئلتك المميزة للمراجعة.</p>
+          <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها من JSON، وتابع أسئلتك المميزة وإحصائياتك.</p>
         </div>
-        <div className="inline-flex rounded-2xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black">
+        <div className="inline-flex flex-wrap items-center rounded-2xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black gap-0.5">
           <button
             type="button"
             onClick={() => setSubTab('quizzes')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors ${
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
               subTab === 'quizzes'
                 ? 'bg-white text-[#8938D6] shadow-xs'
                 : 'text-[#777777] hover:text-[#3C3C3C]'
@@ -670,7 +675,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           <button
             type="button"
             onClick={() => setSubTab('starred')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors ${
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
               subTab === 'starred'
                 ? 'bg-[#FFF4CC] text-[#9A6B00] shadow-xs'
                 : 'text-[#777777] hover:text-[#3C3C3C]'
@@ -684,10 +689,29 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               </span>
             )}
           </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('stats')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              subTab === 'stats'
+                ? 'bg-[#EDE9FE] text-[#6D28D9] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>إحصائياتي</span>
+          </button>
         </div>
       </div>
 
-      {subTab === 'starred' ? (
+      {subTab === 'stats' ? (
+        <MyQuizStatsView
+          attempts={attempts}
+          quizzes={mergedQuizzes}
+          onStartExamSetup={() => setMode({ kind: 'examSetup' })}
+          onOpenAttempt={(a) => setMode({ kind: 'attempt', attempt: a })}
+        />
+      ) : subTab === 'starred' ? (
         <div className="flex flex-col gap-3">
           <div className="rounded-3xl border-2 border-[#FFC800] bg-[#FFF4CC]/60 p-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">

@@ -295,7 +295,12 @@ export type FigureElement =
 export interface QuizFigure {
   title?: string;
   caption?: string;
+  /** إظهار شبكة الإحداثيات المربعة (كل خط = 1 وحدة افتراضياً) */
   grid?: boolean;
+  /** إظهار محوري س و ص المرقّمين بالأسهم والأرقام (يفعّل تلقائياً مع grid ما لم يُضبط false) */
+  axes?: boolean;
+  /** قيمة كل مربع/خط في الشبكة (الافتراضي 1) */
+  gridStep?: number;
   points: FigurePoint[];
   elements: FigureElement[];
 }

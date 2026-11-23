@@ -783,15 +783,63 @@ export const QuizFigureEditor: React.FC<Props> = ({
                   onChange={(e) => update({ caption: e.target.value || undefined })}
                 />
               </div>
-              <label className="flex items-center gap-2 text-xs font-extrabold text-[#777777] cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={!!figure.grid}
-                  onChange={(e) => update({ grid: e.target.checked || undefined })}
-                  className="accent-[#A560E8]"
-                />
-                إظهار شبكة الإحداثيات الخلفية
-              </label>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-0.5">
+                <label className="flex items-center gap-2 text-xs font-extrabold text-[#555] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!figure.grid}
+                    onChange={(e) => {
+                      const nextGrid = e.target.checked;
+                      update({
+                        grid: nextGrid || undefined,
+                        ...(nextGrid && figure.axes === undefined ? { axes: true } : {}),
+                        ...(!nextGrid && !figure.axes ? { gridStep: undefined } : {}),
+                      });
+                    }}
+                    className="accent-[#A560E8]"
+                  />
+                  شبكة الإحداثيات المربعة (1×1)
+                </label>
+
+                <label className="flex items-center gap-2 text-xs font-extrabold text-[#555] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={figure.axes ?? !!figure.grid}
+                    onChange={(e) => {
+                      const nextAxes = e.target.checked;
+                      update({
+                        axes: nextAxes ? true : figure.grid ? false : undefined,
+                      });
+                    }}
+                    className="accent-[#1CB0F6]"
+                  />
+                  محاور س و ص المرقّمة
+                </label>
+
+                {(figure.grid || figure.axes) && (
+                  <div className="flex items-center gap-1.5 text-[11px] font-black text-[#555]">
+                    <span>كل خط =</span>
+                    {[1, 2, 5].map((st) => {
+                      const current = figure.gridStep ?? 1;
+                      const active = Math.abs(current - st) < 1e-6;
+                      return (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => update({ gridStep: st })}
+                          className={`px-2 py-0.5 rounded-md border font-latin cursor-pointer ${
+                            active
+                              ? 'bg-[#1CB0F6] border-[#1899D6] text-white'
+                              : 'bg-[#FAFAFA] border-[#E5E5E5] text-[#3C3C3C]'
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Elements quick editor */}
@@ -1490,7 +1538,9 @@ export const QuizFigureEditor: React.FC<Props> = ({
                   onChange={(e) => setSnapGrid(e.target.checked)}
                   className="accent-[#A560E8]"
                 />
-                التقاط للشبكة (0.25)
+                {figure.grid || figure.axes
+                  ? `التقاط للشبكة (${figure.gridStep ?? 1})`
+                  : 'التقاط للشبكة (0.25)'}
               </label>
             </div>
 
@@ -1500,7 +1550,7 @@ export const QuizFigureEditor: React.FC<Props> = ({
               allowZoom
               interactive
               editMode={editMode}
-              snapStep={snapGrid ? 0.25 : 0}
+              snapStep={snapGrid ? (figure.grid || figure.axes ? figure.gridStep ?? 1 : 0.25) : 0}
               selectedElementIdx={selectedElementIdx}
               selectedPointId={selectedPointId}
               onSelectElement={(idx) => {

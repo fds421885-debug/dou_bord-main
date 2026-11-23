@@ -2049,7 +2049,7 @@ const ImportPanel: React.FC<{
           <li>أسئلة الاختيارات: تحتوي <span className="font-latin">choices</span> و<span className="font-latin">correctIndex</span> (يبدأ من 0).</li>
           <li>أسئلة الجداول التفاعلية: تُضاف بصيغة <span className="font-latin">{'"questionType": "table"'}</span> وحقل <span className="font-latin">table</span> لتحديد الخلايا الثابتة والفراغات التفاعلية (<span className="font-latin">number</span> أو <span className="font-latin">text</span> مع تلميح مثل <span className="font-latin">س / أ</span>).</li>
           <li>قوانين المسألة (<span className="font-latin">laws</span>): مصفوفة نصوص تحتوي قانوناً أو أكثر بصيغة عامة دون كشف الحل، ويمكن إظهارها فوق السؤال عند بدء الاختبار.</li>
-          <li>الأشكال الهندسية والرسوم البيانية: يُضاف <span className="font-latin">figure</span> للهندسة أو <span className="font-latin">chart</span> (<span className="font-latin">bar / hbar / line / pie</span>) للرسوم البيانية.</li>
+          <li>الأشكال الهندسية والمستوى الإحداثي (<span className="font-latin">س، ص</span>): يُضاف <span className="font-latin">figure</span> للهندسة، ومع <span className="font-latin">grid: true, axes: true, gridStep: 1</span> يُرسم مستوى إحداثي واقعي بمربعات <span className="font-latin">1×1</span> ومحوري س وص المرقّمين، أو <span className="font-latin">chart</span> للرسوم البيانية.</li>
           <li>الحزمة المتكاملة (<span className="font-latin">subQuizzes</span>): إذا أضافها السكريبت أو نزّلتها من اختبار سابق، تُحفظ جميع تدريبات القواعد تلقائياً تحت الاختبار الأساسي.</li>
         </ul>
         <button

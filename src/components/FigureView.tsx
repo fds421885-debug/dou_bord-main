@@ -179,6 +179,9 @@ export const FigureView: React.FC<FigureViewProps> = ({
     offsetY: number;
   } | null>(null);
 
+  const showGrid = !!figure.grid;
+  const showAxes = figure.axes ?? !!figure.grid;
+
   const liveLayout = useMemo<ComputedLayout>(() => {
     const ptsMap = new Map<string, FigurePoint>();
     figure.points.forEach((p) => ptsMap.set(p.id, p));
@@ -237,12 +240,23 @@ export const FigureView: React.FC<FigureViewProps> = ({
       maxY = 3;
     }
 
+    // For realistic Cartesian planes, include origin (0,0) when points are within a standard range
+    if (showAxes) {
+      const boxDistFromOrigin = Math.max(
+        minX > 0 ? minX : maxX < 0 ? -maxX : 0,
+        minY > 0 ? minY : maxY < 0 ? -maxY : 0
+      );
+      if (boxDistFromOrigin <= 35) {
+        expand(0, 0);
+      }
+    }
+
     let spanX = Math.max(1e-3, maxX - minX);
     let spanY = Math.max(1e-3, maxY - minY);
     const baseScale = Math.max(spanX, spanY, 2);
 
     // 2) Extend rays/lines slightly beyond base bounding box cleanly
-    const extLen = baseScale * 0.22;
+    const extLen = showGrid || showAxes ? Math.min(2, Math.max(0.8, baseScale * 0.14)) : baseScale * 0.22;
     const extendedEndpoints = new Map<number, { p1: Pt2; p2: Pt2 }>();
     figure.elements.forEach((el, idx) => {
       if (el.type !== 'segment' || (!el.extendFrom && !el.extendTo)) return;
@@ -260,16 +274,53 @@ export const FigureView: React.FC<FigureViewProps> = ({
     spanX = Math.max(1e-3, maxX - minX);
     spanY = Math.max(1e-3, maxY - minY);
 
+    // 3) Determine 1-unit realistic step for Cartesian planes (every grid line = 1 by default)
+    let stepUnit: number;
+    if (figure.gridStep && figure.gridStep > 0) {
+      stepUnit = figure.gridStep;
+      const maxRough = Math.max(spanX, spanY);
+      while (maxRough / stepUnit > 42) {
+        stepUnit *= 2;
+      }
+    } else if (showGrid || showAxes) {
+      const maxSpan = Math.max(spanX, spanY);
+      if (maxSpan <= 24) {
+        stepUnit = 1;
+      } else {
+        const roughStep = maxSpan / 16;
+        const pow10 = Math.pow(10, Math.floor(Math.log10(roughStep)));
+        const norm = roughStep / pow10;
+        stepUnit = (norm <= 1.2 ? 1 : norm <= 2.5 ? 2 : norm <= 5 ? 5 : 10) * pow10;
+      }
+    } else {
+      const roughStep = Math.max(spanX, spanY) / 8;
+      const pow10 = Math.pow(10, Math.floor(Math.log10(roughStep)));
+      const norm = roughStep / pow10;
+      stepUnit = (norm <= 1.2 ? 1 : norm <= 2.5 ? 2 : norm <= 5 ? 5 : 10) * pow10;
+    }
+
+    // 4) When showing Cartesian grid/axes, snap viewport boundaries cleanly onto exact grid multiples
+    if (showGrid || showAxes) {
+      const padUnits = stepUnit * 0.85;
+      minX = +(Math.floor((minX - padUnits) / stepUnit) * stepUnit).toFixed(4);
+      maxX = +(Math.ceil((maxX + padUnits) / stepUnit) * stepUnit).toFixed(4);
+      minY = +(Math.floor((minY - padUnits) / stepUnit) * stepUnit).toFixed(4);
+      maxY = +(Math.ceil((maxY + padUnits) / stepUnit) * stepUnit).toFixed(4);
+      spanX = Math.max(stepUnit, maxX - minX);
+      spanY = Math.max(stepUnit, maxY - minY);
+    }
+
     const W = 540;
-    const padX = 52;
-    const padY = 46;
+    const padX = showAxes ? 56 : 52;
+    const padY = showAxes ? 48 : 46;
     const ratio = spanY / spanX;
     const targetInnerW = W - padX * 2;
     const rawH = Math.round(targetInnerW * ratio + padY * 2);
-    const H = Math.max(250, Math.min(410, rawH));
+    const H = Math.max(showGrid || showAxes ? 270 : 250, Math.min(showGrid || showAxes ? 480 : 410, rawH));
 
     const innerW = W - padX * 2;
     const innerH = H - padY * 2;
+    // Uniform scale ensures 1 horizontal unit === 1 vertical unit (true 1:1 square grid)
     const scale = Math.min(innerW / spanX, innerH / spanY);
 
     const drawW = spanX * scale;
@@ -288,11 +339,6 @@ export const FigureView: React.FC<FigureViewProps> = ({
           }
         : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 
-    const roughStep = Math.max(spanX, spanY) / 8;
-    const pow10 = Math.pow(10, Math.floor(Math.log10(roughStep)));
-    const norm = roughStep / pow10;
-    const stepUnit = (norm <= 1.2 ? 1 : norm <= 2.5 ? 2 : norm <= 5 ? 5 : 10) * pow10;
-
     return {
       ptsMap,
       W,
@@ -310,7 +356,7 @@ export const FigureView: React.FC<FigureViewProps> = ({
       extendedEndpoints,
       stepUnit,
     };
-  }, [figure]);
+  }, [figure, showGrid, showAxes]);
 
   // While actively dragging on canvas, freeze the projection so shapes move 1:1 under the cursor
   const activeBounds = isDragging && frozenBoundsRef.current ? frozenBoundsRef.current : liveLayout;
@@ -1038,43 +1084,214 @@ export const FigureView: React.FC<FigureViewProps> = ({
   };
 
   const renderGridLines = () => {
-    if (!figure.grid) return null;
-    const xStart = Math.floor(minX / stepUnit) * stepUnit;
-    const xEnd = Math.ceil(maxX / stepUnit) * stepUnit;
-    const yStart = Math.floor(minY / stepUnit) * stepUnit;
-    const yEnd = Math.ceil(maxY / stepUnit) * stepUnit;
-    const lines: React.ReactNode[] = [];
-    for (let x = xStart; x <= xEnd + 1e-6; x += stepUnit) {
-      const rx = sx(x);
-      const isAxis = Math.abs(x) < 1e-5;
-      lines.push(
-        <line
-          key={`gx-${x.toFixed(2)}`}
-          x1={rx}
-          y1={0}
-          x2={rx}
-          y2={H}
-          stroke={isAxis ? '#CBD5E1' : '#F0F0F0'}
-          strokeWidth={isAxis ? 1.5 : 1}
-        />
-      );
+    if (!showGrid && !showAxes) return null;
+
+    const left = sx(minX);
+    const right = sx(maxX);
+    const top = sy(maxY);
+    const bottom = sy(minY);
+    const xCount = Math.max(1, Math.round((maxX - minX) / stepUnit));
+    const yCount = Math.max(1, Math.round((maxY - minY) / stepUnit));
+
+    const gridLines: React.ReactNode[] = [];
+    if (showGrid) {
+      for (let i = 0; i <= xCount; i++) {
+        const x = +(minX + i * stepUnit).toFixed(4);
+        const rx = sx(x);
+        const isOriginLine = Math.abs(x) < 1e-5;
+        const isMajor5 = !isOriginLine && Math.round(x / stepUnit) % 5 === 0 && xCount > 10;
+        gridLines.push(
+          <line
+            key={`gx-${i}`}
+            x1={rx}
+            y1={top}
+            x2={rx}
+            y2={bottom}
+            stroke={isOriginLine ? '#CBD5E1' : isMajor5 ? '#CBD5E1' : '#E5E7EB'}
+            strokeWidth={isOriginLine ? 1.5 : isMajor5 ? 1.2 : 1}
+          />
+        );
+      }
+      for (let j = 0; j <= yCount; j++) {
+        const y = +(minY + j * stepUnit).toFixed(4);
+        const ry = sy(y);
+        const isOriginLine = Math.abs(y) < 1e-5;
+        const isMajor5 = !isOriginLine && Math.round(y / stepUnit) % 5 === 0 && yCount > 10;
+        gridLines.push(
+          <line
+            key={`gy-${j}`}
+            x1={left}
+            y1={ry}
+            x2={right}
+            y2={ry}
+            stroke={isOriginLine ? '#CBD5E1' : isMajor5 ? '#CBD5E1' : '#E5E7EB'}
+            strokeWidth={isOriginLine ? 1.5 : isMajor5 ? 1.2 : 1}
+          />
+        );
+      }
     }
-    for (let y = yStart; y <= yEnd + 1e-6; y += stepUnit) {
-      const ry = sy(y);
-      const isAxis = Math.abs(y) < 1e-5;
-      lines.push(
-        <line
-          key={`gy-${y.toFixed(2)}`}
-          x1={0}
-          y1={ry}
-          x2={W}
-          y2={ry}
-          stroke={isAxis ? '#CBD5E1' : '#F0F0F0'}
-          strokeWidth={isAxis ? 1.5 : 1}
-        />
-      );
+
+    const axesNodes: React.ReactNode[] = [];
+    if (showAxes) {
+      const hasXAxis = minY <= 1e-6 && maxY >= -1e-6;
+      const hasYAxis = minX <= 1e-6 && maxX >= -1e-6;
+      const y0 = hasXAxis ? sy(0) : bottom;
+      const x0 = hasYAxis ? sx(0) : left;
+
+      const pxPerStep = stepUnit * scale;
+      const labelStride = pxPerStep >= 22 ? 1 : pxPerStep >= 12 ? 2 : 5;
+      const fmtTick = (n: number) => {
+        const r = Math.round(n * 1000) / 1000;
+        return Number.isInteger(r) ? String(r) : String(r);
+      };
+
+      if (hasXAxis) {
+        const xLeft = left - 12;
+        const xRight = right + 14;
+        axesNodes.push(
+          <g key="axis-x">
+            <line x1={xLeft} y1={y0} x2={xRight} y2={y0} stroke="#334155" strokeWidth={2.2} strokeLinecap="round" />
+            <polygon points={arrowHeadPoints({ x: xRight + 5, y: y0 }, 1, 0, 8.5)} fill="#334155" />
+            <polygon points={arrowHeadPoints({ x: xLeft - 4, y: y0 }, -1, 0, 7.5)} fill="#334155" />
+            <HaloText
+              x={xRight + 16}
+              y={y0 + 5}
+              textAnchor="middle"
+              fontSize={16}
+              fontWeight={900}
+              fill="#1E293B"
+              strokeWidth={4}
+            >
+              س
+            </HaloText>
+          </g>
+        );
+
+        for (let i = 0; i <= xCount; i++) {
+          const x = +(minX + i * stepUnit).toFixed(4);
+          if (Math.abs(x) < 1e-5) continue;
+          const idxFromZero = Math.round(x / stepUnit);
+          const showNum = idxFromZero % labelStride === 0;
+          const rx = sx(x);
+          axesNodes.push(
+            <g key={`xtick-${i}`}>
+              <line
+                x1={rx}
+                y1={y0 - (showNum ? 4 : 2.5)}
+                x2={rx}
+                y2={y0 + (showNum ? 4 : 2.5)}
+                stroke="#334155"
+                strokeWidth={showNum ? 1.6 : 1.1}
+              />
+              {showNum && (
+                <HaloText
+                  x={rx}
+                  y={y0 + 16}
+                  textAnchor="middle"
+                  fontSize={10.5}
+                  fontWeight={800}
+                  fill="#475569"
+                  strokeWidth={3.5}
+                >
+                  {fmtTick(x)}
+                </HaloText>
+              )}
+            </g>
+          );
+        }
+      }
+
+      if (hasYAxis) {
+        const yTop = top - 14;
+        const yBot = bottom + 12;
+        axesNodes.push(
+          <g key="axis-y">
+            <line x1={x0} y1={yBot} x2={x0} y2={yTop} stroke="#334155" strokeWidth={2.2} strokeLinecap="round" />
+            <polygon points={arrowHeadPoints({ x: x0, y: yTop - 5 }, 0, -1, 8.5)} fill="#334155" />
+            <polygon points={arrowHeadPoints({ x: x0, y: yBot + 4 }, 0, 1, 7.5)} fill="#334155" />
+            <HaloText
+              x={x0}
+              y={yTop - 12}
+              textAnchor="middle"
+              fontSize={16}
+              fontWeight={900}
+              fill="#1E293B"
+              strokeWidth={4}
+            >
+              ص
+            </HaloText>
+          </g>
+        );
+
+        for (let j = 0; j <= yCount; j++) {
+          const y = +(minY + j * stepUnit).toFixed(4);
+          if (Math.abs(y) < 1e-5) continue;
+          const idxFromZero = Math.round(y / stepUnit);
+          const showNum = idxFromZero % labelStride === 0;
+          const ry = sy(y);
+          axesNodes.push(
+            <g key={`ytick-${j}`}>
+              <line
+                x1={x0 - (showNum ? 4 : 2.5)}
+                y1={ry}
+                x2={x0 + (showNum ? 4 : 2.5)}
+                y2={ry}
+                stroke="#334155"
+                strokeWidth={showNum ? 1.6 : 1.1}
+              />
+              {showNum && (
+                <HaloText
+                  x={x0 - 8}
+                  y={ry + 3.5}
+                  textAnchor="end"
+                  fontSize={10.5}
+                  fontWeight={800}
+                  fill="#475569"
+                  strokeWidth={3.5}
+                >
+                  {fmtTick(y)}
+                </HaloText>
+              )}
+            </g>
+          );
+        }
+      }
+
+      if (hasXAxis && hasYAxis) {
+        axesNodes.push(
+          <HaloText
+            key="axis-origin"
+            x={x0 - 8}
+            y={y0 + 15}
+            textAnchor="end"
+            fontSize={10.5}
+            fontWeight={900}
+            fill="#334155"
+            strokeWidth={3.5}
+          >
+            0
+          </HaloText>
+        );
+      }
     }
-    return <g>{lines}</g>;
+
+    return (
+      <g pointerEvents="none">
+        {showGrid && (
+          <rect
+            x={left}
+            y={top}
+            width={Math.max(1, right - left)}
+            height={Math.max(1, bottom - top)}
+            fill="#FFFFFF"
+            stroke="#E2E8F0"
+            strokeWidth={1.2}
+          />
+        )}
+        {gridLines}
+        {axesNodes}
+      </g>
+    );
   };
 
   const renderPointMarkersAndLabels = (allowInteractive: boolean) =>

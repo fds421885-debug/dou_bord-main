@@ -389,12 +389,19 @@ export function parseFigure(input: unknown): { figure: QuizFigure | null; warnin
 
   const title = cleanStr(o.title ?? o['عنوان'], FIGURE_LIMITS.title);
   const caption = cleanStr(o.caption ?? o.note, FIGURE_LIMITS.caption);
+  const rawStep = toNumber(o.gridStep);
+  const gridStep =
+    rawStep !== null && Number.isFinite(rawStep) && rawStep > 0 && rawStep <= 1000
+      ? +rawStep.toFixed(4)
+      : undefined;
 
   return {
     figure: {
       ...(title ? { title } : {}),
       ...(caption ? { caption } : {}),
       ...(o.grid === true ? { grid: true } : {}),
+      ...(typeof o.axes === 'boolean' ? { axes: o.axes } : {}),
+      ...(gridStep !== undefined && gridStep !== 1 ? { gridStep } : gridStep === 1 ? { gridStep: 1 } : {}),
       points,
       elements,
     },
@@ -456,7 +463,9 @@ export type FigurePresetId =
   | 'tangent_chord'
   | 'similar_triangles'
   | 'intersecting_circles'
-  | 'regular_hexagon';
+  | 'regular_hexagon'
+  | 'coordinate_plane'
+  | 'coordinate_triangle';
 
 export interface FigurePresetMeta {
   id: FigurePresetId;
@@ -466,6 +475,8 @@ export interface FigurePresetMeta {
 }
 
 export const FIGURE_PRESETS: FigurePresetMeta[] = [
+  { id: 'coordinate_plane', label: 'المستوى الإحداثي (س، ص)', desc: 'نقاط ومستقيم على شبكة 1×1 بمحاور مرقمة', badge: '✛' },
+  { id: 'coordinate_triangle', label: 'مثلث في المستوى (س، ص)', desc: 'مثلث قائم برؤوس إحداثية دقيقة على الشبكة', badge: '⌖' },
   { id: 'triangle_angles', label: 'مثلث وزوايا (س)', desc: 'مثلث بزاويتين معلومتين ومجهول س', badge: '△' },
   { id: 'right_triangle', label: 'مثلث قائم 90°', desc: 'قائم الزاوية بأطوال أضلاع أو وتر', badge: '⊿' },
   { id: 'intersecting_angles', label: 'زوايا متقابلة بالرأس', desc: 'تقاطع مستقيمين وزوايا جبرية', badge: '✕' },
@@ -489,6 +500,40 @@ export const FIGURE_PRESETS: FigurePresetMeta[] = [
 
 export function createFigureFromPreset(preset: FigurePresetId): QuizFigure {
   switch (preset) {
+    case 'coordinate_plane':
+      return {
+        title: 'المستقيم المار بالنقطتين أ، ب في المستوى الإحداثي',
+        caption: 'كل مربع في الشبكة يساوي وحدة واحدة على محوري س و ص',
+        grid: true,
+        axes: true,
+        gridStep: 1,
+        points: [
+          { id: 'A', x: -2, y: -1, label: 'أ(-2, -1)', dot: true, labelPos: 'bottom-left' },
+          { id: 'B', x: 3, y: 4, label: 'ب(3, 4)', dot: true, labelPos: 'top-right' },
+        ],
+        elements: [
+          { type: 'segment', from: 'A', to: 'B', extendFrom: true, extendTo: true, stroke: 'blue' },
+        ],
+      };
+
+    case 'coordinate_triangle':
+      return {
+        title: 'المثلث أ ب ج في المستوى الإحداثي (س، ص)',
+        caption: 'كل خط على المحورين يساوي 1 وحدة',
+        grid: true,
+        axes: true,
+        gridStep: 1,
+        points: [
+          { id: 'A', x: 1, y: 4, label: 'أ(1, 4)', dot: true, labelPos: 'top' },
+          { id: 'B', x: 1, y: 1, label: 'ب(1, 1)', dot: true, labelPos: 'bottom-left' },
+          { id: 'C', x: 5, y: 1, label: 'ج(5, 1)', dot: true, labelPos: 'bottom-right' },
+        ],
+        elements: [
+          { type: 'polygon', points: ['A', 'B', 'C'], fill: 'green', fillOpacity: 0.16, stroke: 'ink' },
+          { type: 'angle', a: 'A', vertex: 'B', b: 'C', right: true, color: 'ink', r: 0.55 },
+        ],
+      };
+
     case 'triangle_angles':
       return {
         title: 'أوجد قيمة س في المثلث',

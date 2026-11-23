@@ -1,26 +1,27 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, BookOpen, Play, RotateCcw, Shuffle } from 'lucide-react';
-import type { ExamSettings, ExamQuestion, MyQuiz } from '../types';
+import type { ExamSettings, ExamQuestion, MyQuiz, QuizAttempt } from '../types';
 import {
   availableCount,
   buildExam,
   buildExamWithRotation,
+  deriveRotationFromAttempts,
   describeTiming,
   EXAM_MAX_QUESTIONS,
   getExamRotationStats,
   validPool,
 } from '../exam';
 import {
-  loadExamRotationMap,
-  loadExamRotationMapSync,
-  resetExamRotationQuizzes,
-  saveExamRotationMap,
+  loadExamRotationResetMap,
+  loadExamRotationResetMapSync,
+  resetExamRotationQuizzesAt,
 } from '../localDraftStore';
 import { DuoLoading } from './DuoLoading';
 
 interface Props {
   ownerId: string;
   quizzes: MyQuiz[];
+  attempts: QuizAttempt[];
   onBack: () => void;
   onStart: (settings: ExamSettings, questions: ExamQuestion[]) => void;
 }
@@ -33,7 +34,7 @@ const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex
 const numInp =
   'w-24 rounded-2xl border-2 border-[#E5E5E5] focus:border-[#A560E8] outline-none px-3 py-2 text-sm font-black font-latin text-center';
 
-export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }) => {
+export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, attempts, onBack, onStart }) => {
   const orderedQuizzes = useMemo(() => {
     const idSet = new Set(quizzes.map((q) => q.id));
     const mains = quizzes.filter((q) => !q.parentQuizId || !idSet.has(q.parentQuizId));
@@ -64,8 +65,8 @@ export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }
   const [shuffleQuestions, setShuffleQuestions] = useState(true);
   const [shuffleChoices, setShuffleChoices] = useState(false);
   const [avoidRepeats, setAvoidRepeats] = useState(true);
-  const [seenByQuizId, setSeenByQuizId] = useState<Record<string, string[]>>(() =>
-    loadExamRotationMapSync(ownerId)
+  const [resetAtByQuizId, setResetAtByQuizId] = useState<Record<string, number>>(() =>
+    loadExamRotationResetMapSync(ownerId)
   );
   const [showLaws, setShowLaws] = useState(false);
   const [timing, setTiming] = useState<'none' | 'perQuestion' | 'total'>('none');
@@ -76,19 +77,24 @@ export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }
 
   useEffect(() => {
     let active = true;
-    void loadExamRotationMap(ownerId).then((loaded) => {
-      if (active) setSeenByQuizId(loaded);
+    void loadExamRotationResetMap(ownerId).then((loaded) => {
+      if (active) setResetAtByQuizId(loaded);
     });
     return () => {
       active = false;
     };
   }, [ownerId]);
 
+  const derivedRotation = useMemo(
+    () => deriveRotationFromAttempts(quizzes, attempts, resetAtByQuizId),
+    [quizzes, attempts, resetAtByQuizId]
+  );
+
   const quizIds = sourceMode === 'single' ? (singleId ? [singleId] : []) : mixIds;
   const avail = availableCount(quizzes, { sourceMode, mixMode, quizIds });
   const rotationStats = useMemo(
-    () => getExamRotationStats(quizzes, quizIds, seenByQuizId),
-    [quizzes, quizIds, seenByQuizId]
+    () => getExamRotationStats(quizzes, quizIds, derivedRotation.seenByQuizId),
+    [quizzes, quizIds, derivedRotation.seenByQuizId]
   );
   const lawsAvailCount = useMemo(
     () =>
@@ -116,8 +122,8 @@ export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }
 
   const handleResetRotation = async () => {
     if (quizIds.length === 0) return;
-    const next = await resetExamRotationQuizzes(ownerId, quizIds);
-    setSeenByQuizId(next);
+    const next = await resetExamRotationQuizzesAt(ownerId, quizIds);
+    setResetAtByQuizId(next);
   };
 
   const start = async () => {
@@ -140,17 +146,9 @@ export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }
       seconds,
     };
 
-    let questions: ExamQuestion[];
-    if (avoidRepeats) {
-      const built = buildExamWithRotation(quizzes, settings, seenByQuizId);
-      questions = built.questions;
-      if (questions.length > 0) {
-        setSeenByQuizId(built.nextSeenByQuizId);
-        await saveExamRotationMap(ownerId, built.nextSeenByQuizId);
-      }
-    } else {
-      questions = buildExam(quizzes, settings);
-    }
+    const questions = avoidRepeats
+      ? buildExamWithRotation(quizzes, settings, derivedRotation.seenByQuizId).questions
+      : buildExam(quizzes, settings);
 
     if (questions.length === 0) {
       setError('تعذر بناء الاختبار، تأكد أن النماذج المختارة فيها أسئلة جاهزة.');
@@ -285,10 +283,10 @@ export const ExamSetup: React.FC<Props> = ({ ownerId, quizzes, onBack, onStart }
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-extrabold text-[#5B21B6]">
               <span>
                 {rotationStats.seenQuestions === 0
-                  ? `بداية دورة جديدة: ${rotationStats.totalQuestions} سؤالاً جاهزاً لم يظهر لك بعد.`
+                  ? `بداية دورة جديدة من محاولاتك السابقة: ${rotationStats.totalQuestions} سؤالاً لم تُجب عليها بعد.`
                   : rotationStats.remainingUnseen > 0
-                  ? `تقدم الدورة: اختبرت ${rotationStats.seenQuestions} من ${rotationStats.totalQuestions} · متبقي ${rotationStats.remainingUnseen} سؤالاً جديداً`
-                  : `أنهيت كل أسئلة الدورة (${rotationStats.totalQuestions} من ${rotationStats.totalQuestions}) — البدء الآن يفتح دورة جديدة`}
+                  ? `حسب محاولاتك السابقة: أجبت على ${rotationStats.seenQuestions} من ${rotationStats.totalQuestions} · متبقي ${rotationStats.remainingUnseen} سؤالاً لم تجب عليه بعد`
+                  : `أنهيت الإجابة على كل أسئلة الدورة (${rotationStats.totalQuestions} من ${rotationStats.totalQuestions}) — البدء الآن يفتح دورة جديدة`}
               </span>
               {rotationStats.seenQuestions > 0 && (
                 <button

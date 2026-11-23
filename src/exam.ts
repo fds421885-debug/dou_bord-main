@@ -112,6 +112,226 @@ export interface ExamRotationStats {
   remainingUnseen: number;
 }
 
+export interface DerivedExamRotation {
+  seenByQuizId: Record<string, string[]>;
+  completedCyclesByQuizId: Record<string, number>;
+}
+
+function normalizeQuestionText(text: string): string {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * يتحقق هل أجاب الطالب فعلاً على السؤال داخل محاولة محفوظة أم تركه فارغاً/تخطاه.
+ * يعمل مع أسئلة الاختيار من متعدد وأسئلة الجداول (حتى لو أُزيل tableAnswers عند الحفظ الاحتياطي).
+ */
+export function isAttemptQuestionAnswered(
+  q: ExamQuestion,
+  idx: number,
+  attempt: Pick<QuizAttempt, 'answers' | 'tableAnswers'>
+): boolean {
+  const ans = Array.isArray(attempt.answers) ? attempt.answers[idx] : undefined;
+  if (q.questionType === 'table' || q.table) {
+    const rawTableAns = attempt.tableAnswers?.[String(idx)];
+    if (rawTableAns && Object.keys(rawTableAns).length > 0) {
+      return gradeTableQuestion(q.table, rawTableAns).answeredBlanks > 0;
+    }
+    return typeof ans === 'number' && ans >= 0;
+  }
+  return typeof ans === 'number' && ans >= 0;
+}
+
+/**
+ * يراجع المحاولات السابقة المحفوظة للمستخدم ترتيباً زمنياً ويستخرج منها الأسئلة التي
+ * أجاب عنها فعلاً في الدورة الحالية لكل نموذج، بينما تبقى الأسئلة التي لم يُجب عنها
+ * (سواء لم تظهر أو ظهرت وتخطّاها/تركها بدون إجابة) ضمن المتبقي.
+ */
+export function deriveRotationFromAttempts(
+  quizzes: MyQuiz[],
+  attempts: QuizAttempt[],
+  resetAtByQuizId: Record<string, number> = {}
+): DerivedExamRotation {
+  type QuizLookup = {
+    quiz: MyQuiz;
+    poolIds: Set<string>;
+    byExactQId: Map<string, string>;
+    byCompositeId: Map<string, string>;
+    byText: Map<string, string>;
+    resetAt: number;
+  };
+
+  const lookupsByQuizId = new Map<string, QuizLookup>();
+  const allLookups: QuizLookup[] = [];
+
+  for (const qz of quizzes) {
+    const pool = validPool(qz);
+    if (pool.length === 0) continue;
+    const poolIds = new Set<string>();
+    const byExactQId = new Map<string, string>();
+    const byCompositeId = new Map<string, string>();
+    const byText = new Map<string, string>();
+    for (const q of pool) {
+      poolIds.add(q.id);
+      byExactQId.set(q.id, q.id);
+      byCompositeId.set(`${qz.id}:${q.id}`.slice(0, 120), q.id);
+      const norm = normalizeQuestionText(q.text);
+      if (norm && !byText.has(norm)) {
+        byText.set(norm, q.id);
+      }
+    }
+    const lookup: QuizLookup = {
+      quiz: qz,
+      poolIds,
+      byExactQId,
+      byCompositeId,
+      byText,
+      resetAt: Number(resetAtByQuizId[qz.id]) || 0,
+    };
+    lookupsByQuizId.set(qz.id, lookup);
+    allLookups.push(lookup);
+  }
+
+  const resolveMatch = (
+    eq: ExamQuestion,
+    attemptQuizIds?: string[]
+  ): { quizId: string; questionId: string } | null => {
+    const eqId = String(eq.id || '');
+    const norm = normalizeQuestionText(eq.text);
+
+    const tryLookup = (lk: QuizLookup): { quizId: string; questionId: string } | null => {
+      const fromComposite = lk.byCompositeId.get(eqId);
+      if (fromComposite) return { quizId: lk.quiz.id, questionId: fromComposite };
+      const prefix = `${lk.quiz.id}:`;
+      if (eqId.startsWith(prefix)) {
+        const stripped = eqId.slice(prefix.length);
+        const fromStripped = lk.byExactQId.get(stripped);
+        if (fromStripped) return { quizId: lk.quiz.id, questionId: fromStripped };
+      }
+      const fromExact = lk.byExactQId.get(eqId);
+      if (fromExact) return { quizId: lk.quiz.id, questionId: fromExact };
+      if (norm) {
+        const fromText = lk.byText.get(norm);
+        if (fromText) return { quizId: lk.quiz.id, questionId: fromText };
+      }
+      return null;
+    };
+
+    if (eq.sourceQuizId) {
+      const lk = lookupsByQuizId.get(eq.sourceQuizId);
+      if (lk) {
+        const hit = tryLookup(lk);
+        if (hit) return hit;
+      }
+    }
+
+    for (const lk of allLookups) {
+      if (eqId.startsWith(`${lk.quiz.id}:`) || lk.byCompositeId.has(eqId)) {
+        const hit = tryLookup(lk);
+        if (hit) return hit;
+      }
+    }
+
+    if (attemptQuizIds && attemptQuizIds.length > 0) {
+      for (const qid of attemptQuizIds) {
+        const lk = lookupsByQuizId.get(qid);
+        if (!lk) continue;
+        const hit = tryLookup(lk);
+        if (hit) return hit;
+      }
+    }
+
+    return null;
+  };
+
+  const stateByQuizId = new Map<string, { seen: Set<string>; completedCycles: number }>();
+  for (const lk of allLookups) {
+    stateByQuizId.set(lk.quiz.id, { seen: new Set<string>(), completedCycles: 0 });
+  }
+
+  const sortedAttempts = attempts
+    .slice()
+    .sort((a, b) => (Number(a.finishedAt) || 0) - (Number(b.finishedAt) || 0));
+
+  for (const attempt of sortedAttempts) {
+    const finishedAt = Number(attempt.finishedAt) || 0;
+    const qs = Array.isArray(attempt.questions) ? attempt.questions : [];
+    const attemptQuizIds = attempt.settings?.quizIds;
+    const answeredByQuizInAttempt = new Map<string, string[]>();
+
+    for (let i = 0; i < qs.length; i++) {
+      const eq = qs[i];
+      if (!isAttemptQuestionAnswered(eq, i, attempt)) continue;
+      const match = resolveMatch(eq, attemptQuizIds);
+      if (!match) continue;
+      const lk = lookupsByQuizId.get(match.quizId);
+      if (!lk || finishedAt <= lk.resetAt) continue;
+
+      let list = answeredByQuizInAttempt.get(match.quizId);
+      if (!list) {
+        list = [];
+        answeredByQuizInAttempt.set(match.quizId, list);
+      }
+      if (!list.includes(match.questionId)) {
+        list.push(match.questionId);
+      }
+    }
+
+    for (const [quizId, answeredIds] of answeredByQuizInAttempt.entries()) {
+      const lk = lookupsByQuizId.get(quizId);
+      const st = stateByQuizId.get(quizId);
+      if (!lk || !st || answeredIds.length === 0) continue;
+      const poolSize = lk.poolIds.size;
+
+      // إذا كانت الدورة السابقة مكتملة بالكامل قبل هذه المحاولة، فهذه المحاولة تفتح دورة جديدة
+      if (st.seen.size >= poolSize) {
+        st.seen = new Set<string>();
+      }
+
+      const finishingOld: string[] = [];
+      const alreadySeen: string[] = [];
+      for (const qId of answeredIds) {
+        if (st.seen.has(qId)) {
+          alreadySeen.push(qId);
+        } else {
+          finishingOld.push(qId);
+        }
+      }
+
+      for (const qId of finishingOld) {
+        st.seen.add(qId);
+      }
+
+      if (st.seen.size >= poolSize) {
+        st.completedCycles += 1;
+        // إذا كان نفس الاختبار قد أكمل المتبقي من الدورة القديمة وسحب أيضاً أسئلة من دورة جديدة
+        if (alreadySeen.length > 0) {
+          st.seen = new Set<string>(alreadySeen);
+          if (st.seen.size >= poolSize) {
+            st.completedCycles += 1;
+          }
+        }
+      } else {
+        for (const qId of alreadySeen) {
+          st.seen.add(qId);
+        }
+      }
+    }
+  }
+
+  const seenByQuizId: Record<string, string[]> = {};
+  const completedCyclesByQuizId: Record<string, number> = {};
+  for (const [quizId, st] of stateByQuizId.entries()) {
+    if (st.seen.size > 0) {
+      seenByQuizId[quizId] = Array.from(st.seen);
+    }
+    if (st.completedCycles > 0) {
+      completedCyclesByQuizId[quizId] = st.completedCycles;
+    }
+  }
+
+  return { seenByQuizId, completedCyclesByQuizId };
+}
+
 /** يحسب إحصائيات التغطية الحالية في الدورة للنماذج المختارة. */
 export function getExamRotationStats(
   quizzes: MyQuiz[],

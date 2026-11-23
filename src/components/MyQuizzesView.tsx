@@ -214,7 +214,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         void saveSessionSnapshot({
           key: 'quiz_attempts',
           ownerId: profile.uid,
-          attempts: list.slice(0, 30),
+          attempts: list.slice(0, 150),
           updatedAt: Date.now(),
         });
       },
@@ -357,6 +357,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       <ExamSetup
         ownerId={profile.uid}
         quizzes={mergedQuizzes}
+        attempts={attempts}
         onBack={() => setMode({ kind: 'list' })}
         onStart={(settings, questions) => {
           void deleteSessionSnapshot('exam_session');

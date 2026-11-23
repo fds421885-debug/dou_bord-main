@@ -75,6 +75,7 @@ const DUOBOARD_QUESTION_SCHEMA_GUIDE = `
      * وتر بعده العمودي d عن المركز O(0,0) في دائرة r: طرفا الوتر (-√(r²-d²), -d) و(+√(r²-d²), -d) مع عمود لمنتصفه وزاوية قائمة "right": true.
      * للمناطق المظللة: الشكل الخارجي أولاً (fill:"blue", fillOpacity:0.32) ثم الداخلي بعده (fill:"white", fillOpacity:1).
      * تسمية المثلث والرؤوس: اكتب في النص «المثلث $\\triangle\\text{ أ ب ج}$» أو «المثلث أ ب ج» وطابق الحروف نفسها حرفياً في figure.points مع labelPos مناسب للخارج وdot:true للرؤوس والمراكز.
+     * أشرطة التطابق (ticks) وعلامات التساوي والتوازي (ضروري جداً!): كلما وُجدت أضلاع أو قطع متطابقة (مثلث متطابق الضلعين/الأضلاع، تنصيف قطعة، أوتار أو أنصاف أقطار متساوية) أضف أشرطة التطابق بدقة: على polygon استخدم "ticks": [1,0,1] بمحاذاة ترتيب points (ticks[i] للضلع points[i]→points[i+1])، وعلى segment استخدم "ticks": 1 | 2 | 3 (عدد مختلف لكل مجموعة متطابقة). وللزوايا المتساوية استخدم "angle.arcs": 1 | 2، وللتوازي استخدم "segment.parallel": 1 | 2، وللزاوية القائمة "angle.right": true.
    - "chart": رسم بياني { "type": "bar"|"hbar"|"line"|"pie", "title": "...", "xLabel": "...", "yLabel": "...", "labels": ["..."], "series": [{"name":"...","values":[10,20]}] }.
    - "table": لأسئلة الجدول التفاعلي { "title":"...", "hasHeaderRow":true, "headers":["القيمة","النسبة"], "rows":[[{"value":"50","isBlank":false},{"value":"","isBlank":true,"inputType":"number","cue":"س","expectedAnswer":"25"}]] }.
    - "explanationTable": { "title": "خطوات الحل", "headers": ["الخطوة","النتيجة"], "rows": [["...","..."]] }.

@@ -357,6 +357,7 @@ export interface QuizQuestion {
   explanationFigure?: QuizFigure;
   explanationTable?: ExplanationTable;
   explanationComparison?: ExplanationComparison;
+  redeemsFingerprint?: string;
 }
 
 export type DrillStyle = 'same_values' | 'same_law_ideas' | 'mixed';
@@ -392,6 +393,8 @@ export interface ExamSettings {
   showLaws?: boolean;
   /** تجنب تكرار الأسئلة التي ظهرت في المحاولات السابقة حتى إكمال الدورة ثم يعيد تلقائياً */
   avoidRepeats?: boolean;
+  /** وضع تصحيح الأخطاء السابقة: يحول الخطأ السابق إلى إجابة صحيحة دون تضخيم الإجمالي */
+  mistakeReviewMode?: boolean;
   timing: ExamTiming;
   /** ثوانٍ لكل سؤال، أو ثوانٍ للاختبار كاملاً حسب timing */
   seconds: number;
@@ -414,6 +417,7 @@ export interface ExamQuestion {
   explanationFigure?: QuizFigure;
   explanationTable?: ExplanationTable;
   explanationComparison?: ExplanationComparison;
+  redeemsFingerprint?: string;
 }
 
 export interface QuizAttempt {

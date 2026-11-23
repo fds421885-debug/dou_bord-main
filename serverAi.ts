@@ -70,6 +70,7 @@ const DUOBOARD_QUESTION_SCHEMA_GUIDE = `
    - "explanationTable": { "title": "خطوات الحل", "headers": ["الخطوة","النتيجة"], "rows": [["...","..."]] }.
    - "explanationComparison": { "title": "المقارنة", "firstLabel": "القيمة الأولى", "firstValue": "...", "secondLabel": "القيمة الثانية", "secondValue": "...", "verdict": "القيمة الأولى أكبر" }.
    - "explanationChart" أو "explanationFigure": اختياريان للشرح البصري.
+   - "sourceMistakeFp": (اختياري) ضع فيه معرف الخطأ "fp" بالضبط إذا كان السؤال مستخرجاً من قائمة أخطاء الطالب السابقة لتصحيحها وحذفها من الأخطاء عند إجابته بشكل صحيح.
 3. تأكد 100% من صحة الحسابات الرياضية وتطابق choices[correctIndex] مع الشرح وanswer.
 `;
 
@@ -236,13 +237,23 @@ export async function runAiCoachAnalyze(payload: AnalyzeRequestPayload): Promise
   };
 }
 
+export interface UnresolvedMistakePromptItem {
+  fp: string;
+  sectionTitle: string;
+  questionText: string;
+  choices?: string[];
+  chosenAnswer: string;
+  correctAnswer: string;
+  laws?: string[];
+}
+
 export interface GenerateQuizRequestPayload {
   studentName: string;
   sectionKey: string;
   sectionTitle: string;
   focusTopic: string;
   questionCount?: number;
-  mode?: 'remedial' | 'foundational_stage' | 'level_up';
+  mode?: 'remedial' | 'foundational_stage' | 'level_up' | 'mistakes_review';
   stageInfo?: {
     order: number;
     title: string;
@@ -251,11 +262,13 @@ export interface GenerateQuizRequestPayload {
     sampleRule: string;
   } | null;
   recentMistakes?: Array<{
+    fp?: string;
     questionText: string;
     chosenAnswer: string;
     correctAnswer: string;
     laws?: string[];
   }>;
+  unresolvedMistakes?: UnresolvedMistakePromptItem[];
   memory?: {
     studentPreferredName?: string;
     personalityNotes?: string[];
@@ -266,11 +279,21 @@ export async function runAiCoachGenerateQuiz(
   payload: GenerateQuizRequestPayload
 ): Promise<{ title: string; ruleTitle: string; questions: unknown[] }> {
   const ai = getAiClient();
-  const count = Math.max(3, Math.min(10, Math.round(Number(payload.questionCount) || 5)));
+  const requestedCount = Math.max(1, Math.min(10, Math.round(Number(payload.questionCount) || 5)));
+  const unresolvedList = Array.isArray(payload.unresolvedMistakes)
+    ? payload.unresolvedMistakes.slice(0, 10)
+    : [];
+  const count =
+    payload.mode === 'mistakes_review' && unresolvedList.length > 0
+      ? Math.min(requestedCount, unresolvedList.length)
+      : Math.max(3, requestedCount);
   const preferredName = payload.memory?.studentPreferredName || payload.studentName || 'الطالب';
 
   const modeNote =
-    payload.mode === 'foundational_stage' && payload.stageInfo
+    payload.mode === 'mistakes_review'
+      ? `الهدف: مراجعة وتصحيح الأخطاء الفعلية التي وقع فيها الطالب سابقاً!
+اختر ${count} أسئلة مباشرة من قائمة "unresolvedMistakes" أدناه، وحافظ على فكرة السؤال وخياراته الصحيحة بدقة مع كتابة شرح واضح وتنبيه لما أخطأ فيه الطالب سابقاً، وضع في كل سؤال الحقل "sourceMistakeFp" مساوياً لقيمة "fp" المطابقة تماماً ليُحذف الخطأ من سجل الطالب ويُحتسب صح عند حله صحيحاً.`
+      : payload.mode === 'foundational_stage' && payload.stageInfo
       ? `هذا الاختبار هو المرحلة رقم ${payload.stageInfo.order} من خطة تقويم المهارات البنائية:
 عنوان المرحلة: ${payload.stageInfo.title}
 الهدف البنائي: ${payload.stageInfo.objective}
@@ -286,7 +309,11 @@ export async function runAiCoachGenerateQuiz(
 ${modeNote}
 
 ${
-  payload.recentMistakes?.length
+  payload.mode === 'mistakes_review' && unresolvedList.length > 0
+    ? `قائمة أخطاء الطالب الفعلية غير المصححة بعد (استخدم "fp" كما هو داخل "sourceMistakeFp"):\n${JSON.stringify(
+        unresolvedList
+      )}`
+    : payload.recentMistakes?.length
     ? `أخطاء الطالب السابقة التي نريد معالجتها:\n${JSON.stringify(payload.recentMistakes.slice(0, 6))}`
     : ''
 }
@@ -323,6 +350,8 @@ ${DUOBOARD_QUESTION_SCHEMA_GUIDE}
     title:
       typeof parsed.title === 'string' && parsed.title.trim()
         ? parsed.title.trim()
+        : payload.mode === 'mistakes_review'
+        ? 'اختبار تصحيح أخطائك السابقة'
         : `تقوية: ${payload.focusTopic || payload.sectionTitle}`,
     ruleTitle:
       typeof parsed.ruleTitle === 'string' && parsed.ruleTitle.trim()
@@ -348,12 +377,15 @@ export interface ChatRequestPayload {
     totalAttempts: number;
     totalQuestions: number;
     correctCount: number;
+    wrongCount?: number;
+    correctedMistakesCount?: number;
     accuracyPct: number;
     avgSecPerQ: number;
     topStrengths: string[];
     topWeaknesses: string[];
     slowTopics: string[];
   };
+  unresolvedMistakes?: UnresolvedMistakePromptItem[];
   history: Array<{ role: 'user' | 'assistant'; text: string }>;
 }
 
@@ -373,6 +405,9 @@ export async function runAiCoachChat(payload: ChatRequestPayload): Promise<{
 }> {
   const ai = getAiClient();
   const preferredName = payload.memory.studentPreferredName || payload.studentName || 'بطل';
+  const unresolvedList = Array.isArray(payload.unresolvedMistakes)
+    ? payload.unresolvedMistakes.slice(0, 8)
+    : [];
 
   const systemInstruction = `أنت «المساعد الذكي» داخل منصة DuoBoard.
 شخصيتك: «المحفز الداعم» — صديق ومعلم ذكي، دافئ، مشجع بلا تصنع، سريع البديهة، يتذكر الطالب وأسلوبه.
@@ -384,14 +419,21 @@ export async function runAiCoachChat(payload: ChatRequestPayload): Promise<{
 
 ملخص أداء الطالب الفعلي:
 - إجمالي الأسئلة المحلولة: ${payload.statsSummary.totalQuestions} (${payload.statsSummary.accuracyPct}% دقة، ${payload.statsSummary.avgSecPerQ} ث/سؤال)
+- الأخطاء المتبقية حالياً: ${payload.statsSummary.wrongCount ?? 0} | الأخطاء التي صححها الطالب سابقاً: ${payload.statsSummary.correctedMistakesCount ?? 0}
 - نقاط القوة: ${payload.statsSummary.topStrengths.join('، ') || 'قيد التقييم'}
 - نقاط تحتاج تقوية: ${payload.statsSummary.topWeaknesses.join('، ') || 'لا توجد أخطاء مسجلة بعد'}
 - مواضع البطء: ${payload.statsSummary.slowTopics.join('، ') || 'لا يوجد بطء ملحوظ'}
 
+${
+  unresolvedList.length > 0
+    ? `أسئلة أخطأ فيها الطالب في اختبارات سابقة ولم يصححها بعد:\n${JSON.stringify(unresolvedList)}`
+    : 'لا توجد أخطاء معلقة غير مصححة حالياً.'
+}
+
 قواعد مهمة:
 1) إذا أخبرك الطالب باسمه أو لقبه المفضل أو معلومة شخصية/دراسية أو هدف أو تفضيل، احفظها في "memoryUpdates" فوراً.
-2) إذا طلب الطالب اختباراً سريعاً داخل الدردشة، أو شعرت أن اختباراً سريعاً من 3 إلى 5 أسئلة سيقيس مستواه بدقة في نقطة معينة، أنشئ "quickQuiz" من 3 إلى 5 أسئلة (يفضل 5 أسئلة إلا إذا طلب أقل) بتنسيق DuoBoard الكامل. في الحوار العادي اجعل "quickQuiz" يساوي null.
-3) لا تفجع الطالب بأسئلة كثيرة؛ دائماً اختبار سريع خفيف وذكي (3 إلى 5 أسئلة).
+2) إذا طلب الطالب اختباراً من أخطائه السابقة، أو اختباراً سريعاً لقياس مستواه وتوجد أخطاء معلقة، اجعل أسئلة "quickQuiz" (من 1 إلى 5 أسئلة، وحتى 5 كحد أقصى) مأخوذة مباشرة من قائمة الأخطاء المعلقة أعلاه مع وضع "sourceMistakeFp": "<fp>" في كل سؤال مطابق؛ لأن النظام عند حله صحيحاً سيزيله من الأخطاء ويحتسبه صح فوراً! وفي الحوار العادي اجعل "quickQuiz" يساوي null.
+3) لا تفجع الطالب بأسئلة كثيرة؛ دائماً اختبار سريع خفيف وذكي (حتى 5 أسئلة).
 ${DUOBOARD_QUESTION_SCHEMA_GUIDE}`;
 
   const historyParts = payload.history.slice(-10).map((m) => ({
@@ -400,7 +442,7 @@ ${DUOBOARD_QUESTION_SCHEMA_GUIDE}`;
   }));
 
   const userPrompt = payload.requestQuickQuiz
-    ? `${payload.message}\n(ملاحظة النظام: الطالب يطلب الآن اختباراً سريعاً مدمجاً داخل المحادثة من 5 أسئلة لقياس مستواه في: ${payload.quickQuizTopic || 'نقطة الضعف الحالية'}).`
+    ? `${payload.message}\n(ملاحظة النظام: الطالب يطلب الآن اختباراً سريعاً مدمجاً داخل المحادثة من حتى 5 أسئلة لقياس مستواه وتصحيح أخطائه في: ${payload.quickQuizTopic || 'الأخطاء السابقة'}).`
     : payload.message;
 
   const response = await ai.models.generateContent({

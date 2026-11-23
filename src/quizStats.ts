@@ -1,4 +1,5 @@
 import type { QuizAttempt } from './types';
+import { computeMistakeLedger, isMistakeReviewAttempt } from './mistakeLedger';
 
 export type StatsTimeRange = 'all' | '30d' | '7d';
 
@@ -71,6 +72,8 @@ export interface ComputedQuizStats {
   correctAnswers: number;
   wrongAnswers: number;
   skippedAnswers: number;
+  correctedMistakesCount: number;
+  pendingMistakesCount: number;
   accuracyPct: number;
   totalDurationSec: number;
   avgSecPerQuestion: number;
@@ -146,10 +149,8 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
   const sortedAsc = attempts
     .slice()
     .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
+  const ledger = computeMistakeLedger(sortedAsc);
 
-  let totalQuestions = 0;
-  let correctAnswers = 0;
-  let skippedAnswers = 0;
   let totalDurationSec = 0;
 
   const typeBreakdown: QuestionTypeBreakdown = {
@@ -196,16 +197,15 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
     const pct = total > 0 ? Math.round((correct / total) * 100) : 0;
     const durationSec = Math.max(0, a.durationSec || 0);
 
-    totalQuestions += total;
-    correctAnswers += correct;
-    totalDurationSec += durationSec;
+    totalDurationSec += Math.max(0, durationSec);
 
-    // تحليل نوع الأسئلة والمتروك
-    if (Array.isArray(a.questions) && Array.isArray(a.answers)) {
+    const isReview = isMistakeReviewAttempt(a);
+
+    // تحليل نوع الأسئلة (من الاختبارات الأصلية، ثم تضاف الأخطاء المصححة من السجل)
+    if (!isReview && Array.isArray(a.questions) && Array.isArray(a.answers)) {
       for (let qi = 0; qi < a.questions.length; qi++) {
         const q = a.questions[qi];
         const ans = a.answers[qi];
-        if (ans === -1) skippedAnswers++;
         const isTable = q.questionType === 'table' || Boolean(q.table);
         const isCorrectQ = isTable ? ans === 1 : ans === q.correctIndex;
         if (isTable) {
@@ -285,7 +285,23 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
     return { ...pt, movingAvgPct };
   });
 
-  const wrongAnswers = Math.max(0, totalQuestions - correctAnswers);
+  typeBreakdown.mcqCorrect = Math.min(
+    typeBreakdown.mcqTotal,
+    typeBreakdown.mcqCorrect + ledger.redeemedMcqCount
+  );
+  typeBreakdown.tableCorrect = Math.min(
+    typeBreakdown.tableTotal,
+    typeBreakdown.tableCorrect + ledger.redeemedTableCount
+  );
+  typeBreakdown.withLawsCorrect = Math.min(
+    typeBreakdown.withLawsTotal,
+    typeBreakdown.withLawsCorrect + ledger.redeemedWithLawsCount
+  );
+
+  const totalQuestions = ledger.totalQuestions;
+  const correctAnswers = ledger.correctAnswers;
+  const wrongAnswers = ledger.wrongAnswers;
+  const skippedAnswers = ledger.skippedAnswers;
   const accuracyPct = totalQuestions > 0 ? Math.round((correctAnswers / totalQuestions) * 100) : 0;
   const avgSecPerQuestion =
     totalQuestions > 0 ? Math.round(totalDurationSec / totalQuestions) : 0;
@@ -392,7 +408,11 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
 
   const quizRows: QuizBreakdownRow[] = Array.from(quizAccum.entries())
     .map(([key, q]) => {
-      const avgPct = q.questions > 0 ? Math.round((q.correct / q.questions) * 100) : 0;
+      const redeemed =
+        key === 'q:coach_mistakes_review' ? 0 : ledger.redeemedByQuizRowKey[key] || 0;
+      const effectiveCorrect = Math.min(q.questions, q.correct + redeemed);
+      const effectiveWrong = Math.max(0, q.questions - effectiveCorrect);
+      const avgPct = q.questions > 0 ? Math.round((effectiveCorrect / q.questions) * 100) : 0;
       const bestQ = q.pcts.length > 0 ? Math.max(...q.pcts) : 0;
       const latestQ = q.pcts.length > 0 ? q.pcts[q.pcts.length - 1] : 0;
       const firstQ = q.pcts.length > 0 ? q.pcts[0] : 0;
@@ -401,8 +421,8 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
         title: q.title,
         attempts: q.attempts,
         questions: q.questions,
-        correct: q.correct,
-        wrong: Math.max(0, q.questions - q.correct),
+        correct: effectiveCorrect,
+        wrong: effectiveWrong,
         avgPct,
         bestPct: bestQ,
         latestPct: latestQ,
@@ -418,6 +438,8 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
     correctAnswers,
     wrongAnswers,
     skippedAnswers,
+    correctedMistakesCount: ledger.correctedMistakesCount,
+    pendingMistakesCount: ledger.unresolvedMistakes.length,
     accuracyPct,
     totalDurationSec,
     avgSecPerQuestion,

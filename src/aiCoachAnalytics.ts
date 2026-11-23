@@ -6,8 +6,14 @@ import type {
   QuizAttempt,
   StarredQuestion,
 } from './types';
+import {
+  computeMistakeLedger,
+  isMistakeReviewAttempt,
+  type UnresolvedMistakeItem,
+} from './mistakeLedger';
 
 export interface LocalMistakeSample {
+  fp?: string;
   sectionKey: string;
   sectionTitle: string;
   questionText: string;
@@ -22,6 +28,8 @@ export interface LocalAnalyticsSummary {
   totalQuestions: number;
   correctCount: number;
   wrongCount: number;
+  correctedMistakesCount: number;
+  unresolvedMistakes: UnresolvedMistakeItem[];
   accuracyPct: number;
   avgSecPerQ: number;
   sectionStats: CoachTopicStat[];
@@ -74,6 +82,7 @@ export function buildLocalCoachAnalytics(params: {
   sectionProgress?: Record<string, CoachSectionProgress>;
 }): LocalAnalyticsSummary {
   const { attempts, quizzes, sectionProgress = {} } = params;
+  const ledger = computeMistakeLedger(attempts, quizzes);
 
   const quizById = new Map<string, MyQuiz>();
   for (const q of quizzes) {
@@ -114,9 +123,6 @@ export function buildLocalCoachAnalytics(params: {
   const buckets = new Map<string, BucketAgg>();
   const recentMistakes: LocalMistakeSample[] = [];
 
-  let totalQuestions = 0;
-  let correctCount = 0;
-  let wrongCount = 0;
   let totalDurationSec = 0;
 
   const sortedAttempts = [...attempts].sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
@@ -125,6 +131,7 @@ export function buildLocalCoachAnalytics(params: {
     const attQuestions = Array.isArray(att.questions) ? att.questions : [];
     if (attQuestions.length === 0) continue;
 
+    const isReviewAtt = isMistakeReviewAttempt(att);
     const perQSec =
       att.durationSec > 0 && attQuestions.length > 0
         ? Math.min(300, Math.max(2, att.durationSec / attQuestions.length))
@@ -137,7 +144,10 @@ export function buildLocalCoachAnalytics(params: {
       const verdict = classifyQuestionCorrect(eq, att.answers?.[idx] ?? -1);
       const sec = resolveSectionForQuizId(eq.sourceQuizId, eq.sourceTitle || att.title);
       const sourceQuiz = quizById.get(eq.sourceQuizId);
-      const isRemedial = sourceQuiz?.quizKind === 'drill' || /تقوية|علاجي|أساسيات|بنائي/.test(att.title || '');
+      const isRemedial =
+        isReviewAtt ||
+        sourceQuiz?.quizKind === 'drill' ||
+        /تقوية|علاجي|أساسيات|بنائي|تصحيح/.test(att.title || '');
       const bucketTitle = sec.title || inferSkillBucket(eq, att.title || 'عام');
 
       let b = buckets.get(sec.key);
@@ -159,15 +169,16 @@ export function buildLocalCoachAnalytics(params: {
       }
 
       if (verdict.answered) {
-        totalQuestions += 1;
-        b.totalQuestions += 1;
         b.totalSecWeighted += perQSec;
-        if (verdict.correct) {
-          correctCount += 1;
-          b.correctCount += 1;
-        } else {
-          wrongCount += 1;
-          b.wrongCount += 1;
+        if (!isReviewAtt) {
+          b.totalQuestions += 1;
+          if (verdict.correct) {
+            b.correctCount += 1;
+          } else {
+            b.wrongCount += 1;
+          }
+        }
+        if (!verdict.correct) {
 
           const chosenIdx = att.answers?.[idx] ?? -1;
           const chosenText =
@@ -249,11 +260,23 @@ export function buildLocalCoachAnalytics(params: {
     }
   }
 
+  // تطبيق الأخطاء المصححة على كل قسم
+  for (const b of buckets.values()) {
+    const redeemed = ledger.redeemedBySectionKey[b.sectionKey] || 0;
+    if (redeemed > 0 && b.totalQuestions > 0) {
+      b.correctCount = Math.min(b.totalQuestions, b.correctCount + redeemed);
+      b.wrongCount = Math.max(0, b.totalQuestions - b.correctCount);
+    }
+  }
+
+  const totalQuestions = ledger.totalQuestions;
+  const correctCount = ledger.correctAnswers;
+  const wrongCount = ledger.wrongAnswers;
   const globalAvgSecPerQ =
     totalQuestions > 0 ? Math.round((totalDurationSec / totalQuestions) * 10) / 10 : 0;
 
   const sectionStats: CoachTopicStat[] = Array.from(buckets.values())
-    .filter((b) => b.totalQuestions > 0)
+    .filter((b) => b.totalQuestions > 0 && b.sectionKey !== 'coach_mistakes_review')
     .map((b) => {
       const accuracyPct = b.totalQuestions > 0 ? Math.round((b.correctCount / b.totalQuestions) * 100) : 0;
       const avgSecPerQ = b.totalQuestions > 0 ? Math.round((b.totalSecWeighted / b.totalQuestions) * 10) / 10 : 0;
@@ -329,11 +352,26 @@ export function buildLocalCoachAnalytics(params: {
   const sectionNeedsFoundationalPlan =
     sectionStats.find((s) => s.needsFoundationalPlan) || null;
 
+  const unresolvedSamples: LocalMistakeSample[] = ledger.unresolvedMistakes
+    .slice(0, 12)
+    .map((m) => ({
+      fp: m.fp,
+      sectionKey: m.sectionKey,
+      sectionTitle: m.sectionTitle,
+      questionText: (m.question.text || '').slice(0, 220),
+      chosenAnswer: m.chosenAnswerText.slice(0, 100),
+      correctAnswer: m.correctAnswerText.slice(0, 100),
+      laws: (m.question.laws || []).slice(0, 2),
+      finishedAt: m.lastMissedAt,
+    }));
+
   return {
     totalAttempts: attempts.length,
     totalQuestions,
     correctCount,
     wrongCount,
+    correctedMistakesCount: ledger.correctedMistakesCount,
+    unresolvedMistakes: ledger.unresolvedMistakes,
     accuracyPct: totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 100) : 0,
     avgSecPerQ: globalAvgSecPerQ,
     sectionStats,
@@ -342,8 +380,9 @@ export function buildLocalCoachAnalytics(params: {
     slowSections,
     prioritySection,
     sectionNeedsFoundationalPlan,
-    recentMistakes: recentMistakes
-      .sort((a, b) => b.finishedAt - a.finishedAt)
-      .slice(0, 12),
+    recentMistakes:
+      unresolvedSamples.length > 0
+        ? unresolvedSamples
+        : recentMistakes.sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 12),
   };
 }

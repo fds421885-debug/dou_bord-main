@@ -19,7 +19,9 @@ import {
   MessageCircle,
   Play,
   RefreshCw,
+  RotateCcw,
   Send,
+  ShieldCheck,
   Sparkles,
   Target,
   TrendingUp,
@@ -28,9 +30,11 @@ import {
 } from 'lucide-react';
 import { buildLocalCoachAnalytics } from '../aiCoachAnalytics';
 import {
+  buildDirectMistakeReviewQuestions,
   buildFoundationalPlanFromDiagnosis,
   checkAiServerStatus,
   createEmptyCoachState,
+  generateAiMistakeReviewQuestions,
   generateAndSaveSectionQuiz,
   requestAiDiagnosis,
   saveCoachStateToCloud,
@@ -45,6 +49,7 @@ import type {
   FoundationalStage,
   MyQuiz,
   QuizAttempt,
+  QuizQuestion,
   StarredQuestion,
   UserProfile,
 } from '../types';
@@ -56,6 +61,7 @@ interface Props {
   starredItems: StarredQuestion[];
   onStartQuiz: (quiz: MyQuiz) => void;
   onStartQuickQuiz: (quickQuiz: CoachQuickQuiz, messageId: string) => void;
+  onStartMistakesReview: (questions: QuizQuestion[], title: string) => void;
 }
 
 const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white';
@@ -67,6 +73,7 @@ export const SmartAssistantView: React.FC<Props> = ({
   starredItems,
   onStartQuiz,
   onStartQuickQuiz,
+  onStartMistakesReview,
 }) => {
   const [coachState, setCoachState] = useState<CoachStateDoc>(() =>
     createEmptyCoachState(profile.uid)
@@ -86,6 +93,10 @@ export const SmartAssistantView: React.FC<Props> = ({
   const [generatingStageId, setGeneratingStageId] = useState<string | null>(null);
   const [quizGenError, setQuizGenError] = useState<string | null>(null);
   const [lastCreatedQuiz, setLastCreatedQuiz] = useState<MyQuiz | null>(null);
+
+  const [mistakeScope, setMistakeScope] = useState<'all' | 'section'>('all');
+  const [generatingMistakeQuiz, setGeneratingMistakeQuiz] = useState(false);
+  const [mistakeQuizError, setMistakeQuizError] = useState<string | null>(null);
 
   const [chatInput, setChatInput] = useState('');
   const [sendingChat, setSendingChat] = useState(false);
@@ -342,6 +353,63 @@ export const SmartAssistantView: React.FC<Props> = ({
     if (nextTarget) {
       setSelectedSectionKey(nextTarget.sectionKey);
       setLastCreatedQuiz(null);
+    }
+  };
+
+  const scopedUnresolvedMistakes = useMemo(() => {
+    if (mistakeScope === 'section' && activeSectionStat?.sectionKey) {
+      const sub = analytics.unresolvedMistakes.filter(
+        (m) => m.sectionKey === activeSectionStat.sectionKey
+      );
+      if (sub.length > 0) return sub;
+    }
+    return analytics.unresolvedMistakes;
+  }, [analytics.unresolvedMistakes, mistakeScope, activeSectionStat]);
+
+  const handleStartDirectMistakeReview = () => {
+    setMistakeQuizError(null);
+    const qs = buildDirectMistakeReviewQuestions(
+      scopedUnresolvedMistakes,
+      undefined,
+      Math.min(5, scopedUnresolvedMistakes.length)
+    );
+    if (qs.length === 0) {
+      setMistakeQuizError('لا توجد أخطاء معلقة حالياً للمراجعة.');
+      return;
+    }
+    const label =
+      mistakeScope === 'section' && activeSectionStat
+        ? `تصحيح أخطاء: ${activeSectionStat.sectionTitle}`
+        : 'تصحيح أخطائك الفعلية السابقة';
+    onStartMistakesReview(qs, label);
+  };
+
+  const handleStartAiMistakeReview = async () => {
+    if (generatingMistakeQuiz || scopedUnresolvedMistakes.length === 0) return;
+    setGeneratingMistakeQuiz(true);
+    setMistakeQuizError(null);
+    try {
+      const res = await generateAiMistakeReviewQuestions({
+        studentName: profile.fullNameQuad,
+        sectionKey: mistakeScope === 'section' ? activeSectionStat?.sectionKey : 'all',
+        sectionTitle:
+          mistakeScope === 'section' && activeSectionStat
+            ? activeSectionStat.sectionTitle
+            : 'بنك أخطائك الفعلية',
+        questionCount: Math.min(5, scopedUnresolvedMistakes.length),
+        analytics,
+        memory: coachState.memory,
+      });
+      onStartMistakesReview(res.questions, res.title);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      setMistakeQuizError(
+        msg === 'BACKEND_UNAVAILABLE'
+          ? 'يلزم اتصال بخادم الذكاء الاصطناعي — يمكنك بدء الاختبار المباشر من أخطائك فوراً بالزر المجاور.'
+          : msg || 'تعذر تجهيز اختبار الأخطاء بالذكاء الاصطناعي.'
+      );
+    } finally {
+      setGeneratingMistakeQuiz(false);
     }
   };
 
@@ -815,6 +883,146 @@ export const SmartAssistantView: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* 3.5. بنك تصحيح الأخطاء الفعلية من اختباراتك الذاتية */}
+      {(analytics.unresolvedMistakes.length > 0 || analytics.correctedMistakesCount > 0) && (
+        <div className="rounded-3xl border-2 border-b-4 border-[#FF4B4B]/70 bg-gradient-to-l from-[#FFF5F5] via-white to-[#FFFDF8] p-5 flex flex-col gap-3.5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <div className="w-10 h-10 rounded-2xl bg-[#FF4B4B] border-b-4 border-[#EA2B2B] text-white flex items-center justify-center shrink-0">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-base font-black text-[#3C3C3C]">
+                  بنك تصحيح أخطائك الفعلية (من اختباراتك الذاتية)
+                </h4>
+                <p className="text-xs font-bold text-[#666666] leading-relaxed">
+                  يستخرج المساعد الأسئلة التي أخطأت فيها سابقاً؛ وأي سؤال تحله هنا بشكل صحيح يُحذف من أخطائك وينقص من عدد الأخطاء ويُحتسب إجابةً صحيحة تلقائياً في إحصائياتك ولوحة الشرف.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs font-black shrink-0">
+              <span className="px-3 py-1.5 rounded-xl bg-[#FFDFE0] border border-[#FF4B4B]/50 text-[#C81E1E]">
+                معلّق: <span className="font-latin tabular-nums">{analytics.unresolvedMistakes.length}</span>
+              </span>
+              <span className="px-3 py-1.5 rounded-xl bg-[#D7FFB8] border border-[#58CC02]/60 text-[#2F6F00]">
+                مصحّح ✓: <span className="font-latin tabular-nums">{analytics.correctedMistakesCount}</span>
+              </span>
+            </div>
+          </div>
+
+          {analytics.unresolvedMistakes.length === 0 ? (
+            <div className="rounded-2xl bg-[#F6FFED] border-2 border-[#58CC02] p-3.5 flex items-center gap-2.5 text-xs font-black text-[#2F6F00]">
+              <ShieldCheck className="w-5 h-5 text-[#46A302] shrink-0" />
+              <span>
+                أحسنت يا {preferredName}! تم تصحيح جميع أخطائك السابقة ({analytics.correctedMistakesCount}) وتحويلها إلى إجابات صحيحة في سجلك ولوحة الشرف.
+              </span>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="inline-flex rounded-xl border border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black">
+                  <button
+                    type="button"
+                    onClick={() => setMistakeScope('all')}
+                    className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                      mistakeScope === 'all'
+                        ? 'bg-white text-[#EA2B2B] shadow-xs'
+                        : 'text-[#666666] hover:text-[#3C3C3C]'
+                    }`}
+                  >
+                    كل الأخطاء ({analytics.unresolvedMistakes.length})
+                  </button>
+                  {activeSectionStat && (
+                    <button
+                      type="button"
+                      onClick={() => setMistakeScope('section')}
+                      className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors ${
+                        mistakeScope === 'section'
+                          ? 'bg-white text-[#EA2B2B] shadow-xs'
+                          : 'text-[#666666] hover:text-[#3C3C3C]'
+                      }`}
+                    >
+                      قسم «{activeSectionStat.sectionTitle}» (
+                      {
+                        analytics.unresolvedMistakes.filter(
+                          (m) => m.sectionKey === activeSectionStat.sectionKey
+                        ).length
+                      }
+                      )
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleStartDirectMistakeReview}
+                    className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-[#58CC02] hover:bg-[#61E002] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+                  >
+                    <Play className="w-4 h-4" />
+                    <span>
+                      ابدأ اختبار تصحيح أخطائك الآن ({Math.min(5, scopedUnresolvedMistakes.length)}{' '}
+                      أسئلة)
+                    </span>
+                  </button>
+
+                  {aiReady && (
+                    <button
+                      type="button"
+                      disabled={generatingMistakeQuiz}
+                      onClick={() => void handleStartAiMistakeReview()}
+                      className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-[#A560E8] hover:bg-[#B477EE] border-2 border-b-4 border-[#8938D6] text-white text-xs font-black cursor-pointer disabled:opacity-50"
+                    >
+                      {generatingMistakeQuiz ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4" />
+                      )}
+                      <span>
+                        {generatingMistakeQuiz
+                          ? 'جاري تجهيز شرح الأخطاء بالذكاء الاصطناعي...'
+                          : 'توليد بالذكاء الاصطناعي مع شرح مخصص (5)'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {mistakeQuizError && (
+                <div className="rounded-2xl bg-[#FFDFE0] border border-[#FF4B4B] px-3 py-2 text-xs font-bold text-[#EA2B2B]">
+                  {mistakeQuizError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {scopedUnresolvedMistakes.slice(0, 4).map((m) => (
+                  <div
+                    key={m.fp}
+                    className="rounded-2xl bg-white border border-[#FFD6D6] p-3 flex flex-col gap-1"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[10px] font-black">
+                      <span className="text-[#EA2B2B] truncate">{m.sectionTitle}</span>
+                      {m.mistakeCount > 1 && (
+                        <span className="px-2 py-0.5 rounded-lg bg-[#FFF4CC] text-[#9A6B00] shrink-0">
+                          تكرر {m.mistakeCount} مرات
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs font-black text-[#3C3C3C] line-clamp-2 leading-relaxed">
+                      {m.question.text}
+                    </p>
+                    <p className="text-[11px] font-bold text-[#777777] truncate">
+                      إجابتك السابقة: <span className="text-[#EA2B2B]">{m.chosenAnswerText}</span>
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* 4. منشئ اختبارات التقوية المتدرجة قسم بقسم (الافتراضي: 5 أسئلة) */}
       <div className="rounded-3xl border-2 border-b-4 border-[#A560E8] bg-gradient-to-l from-[#FAF5FF] to-white p-5 flex flex-col gap-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1141,7 +1349,9 @@ export const SmartAssistantView: React.FC<Props> = ({
                 {[
                   'مرحباً! نادني بالاسم الذي أحبه وذكّرني بخطتي',
                   'وش أهم نقطة أخطئ فيها وكيف أصلحها؟',
-                  'اختبر مستواي باختبار سريع من 5 أسئلة الآن!',
+                  analytics.unresolvedMistakes.length > 0
+                    ? 'اختبرني بـ 5 أسئلة من أخطائي السابقة لأصححها!'
+                    : 'اختبر مستواي باختبار سريع من 5 أسئلة الآن!',
                 ].map((promptTxt, idx) => (
                   <button
                     key={idx}
@@ -1255,15 +1465,23 @@ export const SmartAssistantView: React.FC<Props> = ({
                 void handleSendChat({
                   overrideText:
                     chatInput.trim() ||
-                    `اعمل لي اختباراً سريعاً من 5 أسئلة تقيس فيه مستواي في: ${activeSectionTitle}`,
+                    (analytics.unresolvedMistakes.length > 0
+                      ? 'اعمل لي اختباراً سريعاً من 5 أسئلة من أخطائي السابقة لتصحيحها'
+                      : `اعمل لي اختباراً سريعاً من 5 أسئلة تقيس فيه مستواي في: ${activeSectionTitle}`),
                   requestQuickQuiz: true,
                 })
               }
-              title="إنشاء اختبار سريع 5 أسئلة في المحادثة"
+              title={
+                analytics.unresolvedMistakes.length > 0
+                  ? 'اختبار سريع من أخطائك السابقة داخل المحادثة'
+                  : 'إنشاء اختبار سريع 5 أسئلة في المحادثة'
+              }
               className="duo-btn flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl bg-[#A560E8] border-2 border-b-4 border-[#8938D6] text-white text-xs font-black cursor-pointer disabled:opacity-50 shrink-0"
             >
               <Zap className="w-4 h-4" />
-              <span>اختبار سريع (5)</span>
+              <span>
+                {analytics.unresolvedMistakes.length > 0 ? 'اختبار أخطائي (5)' : 'اختبار سريع (5)'}
+              </span>
             </button>
             <button
               type="button"

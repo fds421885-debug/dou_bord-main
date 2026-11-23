@@ -93,6 +93,7 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     ...(explanationFigure ? { explanationFigure } : {}),
     ...(explanationTable ? { explanationTable } : {}),
     ...(explanationComparison ? { explanationComparison } : {}),
+    ...(q.redeemsFingerprint ? { redeemsFingerprint: q.redeemsFingerprint } : {}),
   };
 }
 

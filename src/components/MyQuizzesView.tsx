@@ -727,6 +727,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     };
     const readyPool = tempQuiz.questions.filter(isExamReady);
     if (readyPool.length === 0) return;
+    const isPureMistakeReview = readyPool.every((q) => Boolean(q.redeemsFingerprint));
     const settings: ExamSettings = {
       sourceMode: 'single',
       mixMode: 'total',
@@ -736,6 +737,39 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       shuffleQuestions: false,
       shuffleChoices: false,
       showLaws: false,
+      ...(isPureMistakeReview ? { mistakeReviewMode: true } : {}),
+      timing: 'none',
+      seconds: 0,
+    };
+    const qs = buildExam([tempQuiz], settings);
+    if (qs.length === 0) return;
+    void deleteSessionSnapshot('exam_session');
+    setMode({ kind: 'examRun', settings, questions: qs });
+  };
+
+  const startMistakesReview = (questions: QuizQuestion[], title: string) => {
+    const tempQuiz: MyQuiz = {
+      id: 'coach_mistakes_review',
+      ownerId: profile.uid,
+      title: title || 'تصحيح أخطائك السابقة',
+      questions,
+      questionCount: questions.length,
+    };
+    const readyPool = tempQuiz.questions.filter(isExamReady);
+    if (readyPool.length === 0) {
+      setNotice('لا توجد أسئلة أخطاء جاهزة للمراجعة الآن.');
+      return;
+    }
+    const settings: ExamSettings = {
+      sourceMode: 'single',
+      mixMode: 'total',
+      quizIds: ['coach_mistakes_review'],
+      quizTitles: [tempQuiz.title],
+      questionCount: readyPool.length,
+      shuffleQuestions: false,
+      shuffleChoices: true,
+      showLaws: readyPool.some((q) => Array.isArray(q.laws) && q.laws.length > 0),
+      mistakeReviewMode: true,
       timing: 'none',
       seconds: 0,
     };
@@ -821,6 +855,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           starredItems={starredItems}
           onStartQuiz={(q) => startSingleQuizNow(q)}
           onStartQuickQuiz={(qq, msgId) => startCoachQuickQuiz(qq, msgId)}
+          onStartMistakesReview={(qs, title) => startMistakesReview(qs, title)}
         />
       ) : subTab === 'stats' ? (
         <MyQuizStatsView

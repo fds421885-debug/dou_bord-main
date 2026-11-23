@@ -303,6 +303,9 @@ export const MyQuizStatsView: React.FC<Props> = ({
               </p>
               <p className="text-[11px] font-bold text-[#15803D] mt-1">
                 إجابة صحيحة · دقة {stats.accuracyPct}%
+                {stats.correctedMistakesCount > 0
+                  ? ` · منها ${stats.correctedMistakesCount} خطأ مصحّح ✓`
+                  : ''}
               </p>
             </div>
 
@@ -313,6 +316,11 @@ export const MyQuizStatsView: React.FC<Props> = ({
               </p>
               <p className="text-[11px] font-bold text-[#991B1B] mt-1">
                 إجابة خاطئة
+                {stats.pendingMistakesCount > 0
+                  ? ` · ${stats.pendingMistakesCount} سؤال بانتظار التصحيح`
+                  : stats.correctedMistakesCount > 0
+                  ? ' · تم تصحيح كل الأخطاء المعلقة'
+                  : ''}
                 {stats.skippedAnswers > 0 ? ` · منها ${stats.skippedAnswers} متروك` : ''}
               </p>
             </div>

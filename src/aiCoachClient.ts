@@ -14,6 +14,7 @@ import type {
   QuizQuestion,
 } from './types';
 import type { LocalAnalyticsSummary } from './aiCoachAnalytics';
+import { computeQuestionFingerprint, type UnresolvedMistakeItem } from './mistakeLedger';
 
 const LOCAL_COACH_STATE_PREFIX = 'duoboard_ai_coach_state_v1_';
 
@@ -249,14 +250,142 @@ export async function requestAiDiagnosis(params: {
   return res.diagnosis;
 }
 
-export function normalizeGeneratedQuestions(rawQuestions: unknown[], fallbackTitle: string): QuizQuestion[] {
+function mapUnresolvedForPrompt(items: UnresolvedMistakeItem[]) {
+  return items.slice(0, 10).map((m) => ({
+    fp: m.fp,
+    sectionTitle: m.sectionTitle,
+    questionText: (m.question.text || '').slice(0, 260),
+    choices: Array.isArray(m.question.choices) ? m.question.choices.slice(0, 4) : [],
+    chosenAnswer: m.chosenAnswerText.slice(0, 100),
+    correctAnswer: m.correctAnswerText.slice(0, 100),
+    laws: (m.question.laws || []).slice(0, 2),
+  }));
+}
+
+export function normalizeGeneratedQuestions(
+  rawQuestions: unknown[],
+  fallbackTitle: string,
+  unresolvedMistakes: UnresolvedMistakeItem[] = []
+): QuizQuestion[] {
+  const fpByRawIndex = new Map<number, string>();
+  const fpByNormText = new Map<string, string>();
+  const byFp = new Map<string, UnresolvedMistakeItem>();
+
+  for (const m of unresolvedMistakes) {
+    byFp.set(m.fp, m);
+    const norm = String(m.question.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (norm) fpByNormText.set(norm, m.fp);
+  }
+
+  rawQuestions.forEach((item, idx) => {
+    if (!item || typeof item !== 'object') return;
+    const rec = item as Record<string, unknown>;
+    const rawFp =
+      typeof rec.sourceMistakeFp === 'string' && rec.sourceMistakeFp.trim()
+        ? rec.sourceMistakeFp.trim()
+        : typeof rec.redeemsFingerprint === 'string' && rec.redeemsFingerprint.trim()
+        ? rec.redeemsFingerprint.trim()
+        : '';
+    if (rawFp) {
+      fpByRawIndex.set(idx, rawFp);
+    }
+  });
+
   const bundle = parseQuizBundleJson(
     JSON.stringify({
       title: fallbackTitle,
       questions: rawQuestions,
     })
   );
-  return bundle.questions;
+
+  return bundle.questions.map((q, idx) => {
+    const norm = String(q.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const matchedFp =
+      fpByRawIndex.get(idx) || fpByNormText.get(norm) || (byFp.has(computeQuestionFingerprint(q)) ? computeQuestionFingerprint(q) : '');
+    if (!matchedFp) return q;
+    const orig = byFp.get(matchedFp)?.question;
+    return {
+      ...q,
+      ...(orig?.figure && !q.figure ? { figure: orig.figure } : {}),
+      ...(orig?.chart && !q.chart ? { chart: orig.chart } : {}),
+      ...(orig?.table && !q.table ? { table: orig.table } : {}),
+      ...(orig?.explanationFigure && !q.explanationFigure ? { explanationFigure: orig.explanationFigure } : {}),
+      ...(orig?.explanationChart && !q.explanationChart ? { explanationChart: orig.explanationChart } : {}),
+      redeemsFingerprint: matchedFp,
+    };
+  });
+}
+
+export function buildDirectMistakeReviewQuestions(
+  unresolvedMistakes: UnresolvedMistakeItem[],
+  sectionKeyFilter?: string,
+  maxCount = 5
+): QuizQuestion[] {
+  const pool =
+    sectionKeyFilter && sectionKeyFilter !== 'all'
+      ? unresolvedMistakes.filter((m) => m.sectionKey === sectionKeyFilter)
+      : unresolvedMistakes;
+  const source = pool.length > 0 ? pool : unresolvedMistakes;
+  return source.slice(0, Math.max(1, maxCount)).map((m) => ({
+    ...m.question,
+    redeemsFingerprint: m.fp,
+  }));
+}
+
+export async function generateAiMistakeReviewQuestions(params: {
+  studentName: string;
+  sectionKey?: string;
+  sectionTitle?: string;
+  questionCount?: number;
+  analytics: LocalAnalyticsSummary;
+  memory: CoachMemory;
+}): Promise<{ title: string; questions: QuizQuestion[] }> {
+  const pool =
+    params.sectionKey && params.sectionKey !== 'all'
+      ? params.analytics.unresolvedMistakes.filter((m) => m.sectionKey === params.sectionKey)
+      : params.analytics.unresolvedMistakes;
+  const targetList = (pool.length > 0 ? pool : params.analytics.unresolvedMistakes).slice(0, 10);
+  if (targetList.length === 0) {
+    throw new Error('لا توجد أخطاء معلقة غير مصححة حالياً.');
+  }
+
+  const count = Math.max(1, Math.min(targetList.length, Math.round(params.questionCount ?? 5)));
+  const res = await callAiEndpoint<{
+    ok: boolean;
+    title: string;
+    ruleTitle: string;
+    questions: unknown[];
+  }>('/api/ai/generate-quiz', {
+    studentName: params.studentName,
+    sectionKey: params.sectionKey || 'all',
+    sectionTitle: params.sectionTitle || 'بنك أخطائك الفعلية',
+    focusTopic: 'مراجعة وتصحيح الأخطاء السابقة',
+    questionCount: count,
+    mode: 'mistakes_review',
+    unresolvedMistakes: mapUnresolvedForPrompt(targetList),
+    memory: params.memory,
+  });
+
+  const clean = normalizeGeneratedQuestions(res.questions, res.title, targetList).slice(0, count);
+  if (clean.length === 0) {
+    // fallback آمن يعرض الأسئلة الحقيقية نفسها إن فشل تحليل المخرجات
+    return {
+      title: res.title || 'اختبار تصحيح أخطائك السابقة',
+      questions: buildDirectMistakeReviewQuestions(targetList, undefined, count),
+    };
+  }
+
+  // تأكيد ربط كل سؤال ببصمة الخطأ المطابقة
+  const finalQuestions = clean.map((q, i) => {
+    if (q.redeemsFingerprint) return q;
+    const fallbackItem = targetList[i];
+    return fallbackItem ? { ...q, redeemsFingerprint: fallbackItem.fp } : q;
+  });
+
+  return {
+    title: res.title || 'اختبار تصحيح أخطائك السابقة',
+    questions: finalQuestions,
+  };
 }
 
 export async function generateAndSaveSectionQuiz(params: {
@@ -367,12 +496,15 @@ export async function sendAiCoachChatMessage(params: {
       totalAttempts: params.analytics.totalAttempts,
       totalQuestions: params.analytics.totalQuestions,
       correctCount: params.analytics.correctCount,
+      wrongCount: params.analytics.wrongCount,
+      correctedMistakesCount: params.analytics.correctedMistakesCount,
       accuracyPct: params.analytics.accuracyPct,
       avgSecPerQ: params.analytics.avgSecPerQ,
       topStrengths: params.analytics.strongSections.slice(0, 3).map((s) => `${s.sectionTitle} (${s.accuracyPct}%)`),
       topWeaknesses: params.analytics.weakSections.slice(0, 3).map((s) => `${s.sectionTitle} (${s.accuracyPct}%)`),
       slowTopics: params.analytics.slowSections.slice(0, 3).map((s) => `${s.sectionTitle} (${s.avgSecPerQ} ث)`),
     },
+    unresolvedMistakes: mapUnresolvedForPrompt(params.analytics.unresolvedMistakes),
     history: params.history.slice(-10).map((m) => ({ role: m.role, text: m.text })),
   });
 
@@ -400,7 +532,8 @@ export async function sendAiCoachChatMessage(params: {
     try {
       const parsedQuestions = normalizeGeneratedQuestions(
         res.quickQuiz.questions,
-        res.quickQuiz.title
+        res.quickQuiz.title,
+        params.analytics.unresolvedMistakes
       ).slice(0, 5);
       if (parsedQuestions.length > 0) {
         quickQuiz = {

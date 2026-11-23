@@ -5,9 +5,11 @@ self.addEventListener('notificationclick', function (event) {
   var senderUid = data.senderUid || '';
   var chatId = data.chatId || '';
   var actionTab = data.actionTab || (senderUid ? 'friends' : 'friends');
-  var targetUrl = senderUid
-    ? '/?openChat=' + encodeURIComponent(senderUid)
-    : '/?openTab=' + encodeURIComponent(actionTab);
+  var scopeUrl = (self.registration && self.registration.scope) ? self.registration.scope : '/';
+  var targetPath = senderUid
+    ? '?openChat=' + encodeURIComponent(senderUid)
+    : '?openTab=' + encodeURIComponent(actionTab);
+  var targetUrl = scopeUrl + targetPath;
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
@@ -35,11 +37,12 @@ self.addEventListener('push', function (event) {
   if (!event.data) return;
   try {
     var payload = event.data.json();
+    var scopeBase = (self.registration && self.registration.scope) ? self.registration.scope : '/';
     var title = payload.title || 'DuoBoard — رسالة جديدة';
     var options = {
       body: payload.body || '',
-      icon: '/pwa-192x192.png',
-      badge: '/pwa-192x192.png',
+      icon: scopeBase + 'pwa-192x192.png',
+      badge: scopeBase + 'pwa-192x192.png',
       dir: 'rtl',
       lang: 'ar',
       tag: payload.tag || 'duoboard-msg',

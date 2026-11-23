@@ -766,3 +766,131 @@ export interface InAppNotificationToast {
   chatId?: string;
 }
 
+/* ===================== المساعد الذكي وتقويم المهارات البنائية ===================== */
+
+export type FoundationalStageStatus = 'locked' | 'active' | 'completed';
+
+export interface FoundationalStage {
+  id: string;
+  order: number;
+  title: string;
+  objective: string;
+  coreConcept: string;
+  sampleRule: string;
+  targetScorePct: number;
+  status: FoundationalStageStatus;
+  bestScorePct?: number;
+  attemptsCount?: number;
+  quizId?: string;
+}
+
+export interface FoundationalPlan {
+  id: string;
+  sectionKey: string;
+  sectionTitle: string;
+  focusTopic: string;
+  reason: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  stages: FoundationalStage[];
+}
+
+export interface CoachMemory {
+  studentPreferredName?: string;
+  personalityNotes: string[];
+  learningGoals: string[];
+  weakFocusHistory: string[];
+  customFacts: string[];
+  updatedAt: number;
+}
+
+export interface CoachTopicStat {
+  key: string;
+  title: string;
+  sectionKey: string;
+  sectionTitle: string;
+  totalQuestions: number;
+  correctCount: number;
+  wrongCount: number;
+  accuracyPct: number;
+  avgSecPerQ: number;
+  speedStatus: 'fast' | 'balanced' | 'slow';
+  strengthStatus: 'strong' | 'developing' | 'weak';
+  recentTrend: 'up' | 'down' | 'flat';
+  remedialAttempts: number;
+  lastRemedialPct?: number;
+  needsFoundationalPlan: boolean;
+}
+
+export interface CoachQuickQuiz {
+  id: string;
+  title: string;
+  topic: string;
+  questions: QuizQuestion[];
+  completedScore?: number;
+  completedTotal?: number;
+  completedDurationSec?: number;
+  completedAt?: number;
+}
+
+export interface CoachChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAtMs: number;
+  quickQuiz?: CoachQuickQuiz;
+}
+
+export interface CoachDiagnosisResult {
+  generatedAt: number;
+  summaryHeadline: string;
+  encouragementNote: string;
+  strengths: Array<{ title: string; detail: string; accuracyPct: number }>;
+  weaknesses: Array<{
+    title: string;
+    sectionKey: string;
+    sectionTitle: string;
+    detail: string;
+    accuracyPct: number;
+  }>;
+  slowAreas: Array<{ title: string; avgSecPerQ: number; advice: string }>;
+  recommendedSectionKey: string;
+  recommendedSectionTitle: string;
+  recommendedFocusReason: string;
+  suggestedPlan?: {
+    focusTopic: string;
+    reason: string;
+    stages: Array<{
+      title: string;
+      objective: string;
+      coreConcept: string;
+      sampleRule: string;
+    }>;
+  } | null;
+}
+
+export interface CoachSectionProgress {
+  sectionKey: string;
+  sectionTitle: string;
+  drillsCompleted: number;
+  lastScorePct?: number;
+  lastDurationSec?: number;
+  mastered: boolean;
+  repeatedLowCount: number;
+  updatedAt: number;
+}
+
+export interface CoachStateDoc {
+  id: 'state';
+  ownerId: string;
+  memory: CoachMemory;
+  diagnosis: CoachDiagnosisResult | null;
+  activeFoundationalPlan: FoundationalPlan | null;
+  completedPlansCount: number;
+  sectionProgress: Record<string, CoachSectionProgress>;
+  chatMessages: CoachChatMessage[];
+  updatedAt: number;
+}
+
+

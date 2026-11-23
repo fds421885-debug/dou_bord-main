@@ -632,6 +632,25 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidAiCoachState(data) {
+      return data.keys().hasAll(['id', 'ownerId', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'memory', 'diagnosis', 'activeFoundationalPlan',
+          'completedPlansCount', 'sectionProgress', 'chatMessages', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id == 'state'
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && (!('memory' in data) || data.memory is map)
+        && (!('diagnosis' in data) || data.diagnosis == null || data.diagnosis is map)
+        && (!('activeFoundationalPlan' in data) || data.activeFoundationalPlan == null || data.activeFoundationalPlan is map)
+        && (!('completedPlansCount' in data) || (data.completedPlansCount is int && data.completedPlansCount >= 0 && data.completedPlansCount <= 10000))
+        && (!('sectionProgress' in data) || data.sectionProgress is map)
+        && (!('chatMessages' in data) || (data.chatMessages is list && data.chatMessages.size() <= 120))
+        && data.updatedAt is int && data.updatedAt >= 0;
+    }
+
     match /platform/{docId} {
       allow get: if isValidId(docId) && (docId == 'migration' || ((docId == 'registry' || docId == 'leaderboardMeta') && isVerified()));
       allow list: if false;
@@ -853,6 +872,18 @@ service cloud.firestore {
           'updatedAt'
         ]);
       allow delete: if isValidId(userId) && isValidId(quizId) && isOwner(userId);
+    }
+
+    match /users/{userId}/aiCoach/{docId} {
+      allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(docId) && docId == 'state' && isOwner(userId)
+        && isValidAiCoachState(incoming());
+      allow update: if isValidId(userId) && isValidId(docId) && docId == 'state' && isOwner(userId)
+        && isValidAiCoachState(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId;
+      allow delete: if isValidId(userId) && isValidId(docId) && isOwner(userId);
     }
 
     match /users/{userId}/savedTests/{testId} {

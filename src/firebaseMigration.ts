@@ -21,6 +21,7 @@ import {
   writeBatch,
   type Firestore,
 } from './firestoreTracked';
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
@@ -4801,12 +4802,8 @@ async function callProgrammerEndpoint<T>(
   payload: Record<string, unknown> = {}
 ): Promise<T> {
   const bootBackendKnown = getInitialServerPlatformStatus().backendAvailable;
-  if (
-    typeof window !== 'undefined' &&
-    (window.location.hostname.endsWith('.github.io') ||
-      window.location.hostname.endsWith('.netlify.app'))
-  ) {
-    throw new ApiUnavailableError('Static host (GitHub Pages / Netlify) uses serverless mode');
+  if (!isBackendServerDetected() && !bootBackendKnown) {
+    throw new ApiUnavailableError('Static host without configured backend API uses serverless mode');
   }
 
   const sendWithToken = async (forceRefresh: boolean) => {
@@ -4814,7 +4811,7 @@ async function callProgrammerEndpoint<T>(
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), bootBackendKnown ? 6000 : 1800);
     try {
-      return await fetch(endpoint, {
+      return await fetch(resolveApiUrl(endpoint), {
         method: 'POST',
         signal: controller.signal,
         headers: {

@@ -29,6 +29,7 @@ import {
   type FirebaseAppConfig,
   type PublicDatabaseSummary,
 } from '../firebase';
+import { isBackendServerDetected, resolveApiUrl } from '../apiBase';
 import { readCloudRegistryDoc, writePlatformMigrationPointer } from '../firebaseMigration';
 
 interface CandidateDbHealth {
@@ -98,13 +99,14 @@ export const QuotaFullDbSelectorModal: React.FC<QuotaFullDbSelectorModalProps> =
     let quotaByProject: Record<string, { minRemainingPct?: number; exhausted?: boolean }> = {};
     let rev = 1;
 
-    try {
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 2200);
-      const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
+    if (isBackendServerDetected()) {
+      try {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 2200);
+        const resp = await fetch(resolveApiUrl(`/api/platform-db?t=${Date.now()}`), {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
       window.clearTimeout(timer);
       if (resp.ok && (resp.headers.get('content-type') || '').includes('application/json')) {
         const data = (await resp.json()) as {
@@ -122,12 +124,13 @@ export const QuotaFullDbSelectorModal: React.FC<QuotaFullDbSelectorModalProps> =
         if (Array.isArray(data.backupConfigs)) {
           saveBackupFirebaseConfigs(data.backupConfigs);
         }
-        if (data.quotaByProject && typeof data.quotaByProject === 'object') {
-          quotaByProject = data.quotaByProject;
+          if (data.quotaByProject && typeof data.quotaByProject === 'object') {
+            quotaByProject = data.quotaByProject;
+          }
         }
+      } catch {
+        // Fall back to local cache / Firestore registry if backend offline
       }
-    } catch {
-      // Fall back to local cache / Firestore registry if backend offline
     }
 
     if (publicList.length === 0) {
@@ -246,7 +249,8 @@ export const QuotaFullDbSelectorModal: React.FC<QuotaFullDbSelectorModalProps> =
         }
       }
 
-      const resp = await fetch('/api/platform/quota-failover', {
+      const resp = isBackendServerDetected()
+        ? await fetch(resolveApiUrl('/api/platform/quota-failover'), {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -257,7 +261,7 @@ export const QuotaFullDbSelectorModal: React.FC<QuotaFullDbSelectorModalProps> =
         }),
       });
 
-      if (!resp.ok) {
+      if (resp && !resp.ok) {
         const errData = (await resp.json().catch(() => null)) as { error?: string } | null;
         if (resp.status !== 404 && resp.status !== 503 && errData?.error) {
           throw new Error(errData.error);

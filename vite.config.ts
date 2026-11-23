@@ -6,9 +6,12 @@ import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
+  const rawBase = process.env.VITE_BASE || '/';
+  const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
+
   return {
     // على GitHub Pages يُمرَّر VITE_BASE=/اسم-المستودع/ من ملف النشر
-    base: process.env.VITE_BASE || '/',
+    base,
     plugins: [
       react(),
       tailwindcss(),
@@ -23,7 +26,7 @@ export default defineConfig(() => {
           'sw-notifications.js',
         ],
         manifest: {
-          id: '/',
+          id: base,
           name: 'DuoBoard | السبورة التفاعلية والاختبارات',
           short_name: 'DuoBoard',
           description: 'منصة اختبارات وسبورات تفاعلية، لوحة شرف، محادثات الأصدقاء ومشاركة النماذج',
@@ -33,8 +36,8 @@ export default defineConfig(() => {
           orientation: 'any',
           dir: 'rtl',
           lang: 'ar',
-          start_url: '/',
-          scope: '/',
+          start_url: base,
+          scope: base,
           icons: [
             {
               src: 'pwa-192x192.png',
@@ -55,7 +58,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          importScripts: ['/sw-notifications.js'],
+          importScripts: [`${base}sw-notifications.js`],
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
           navigateFallback: 'index.html',

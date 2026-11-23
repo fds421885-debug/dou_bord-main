@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { registerSW } from 'virtual:pwa-register';
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -175,8 +176,8 @@ export async function triggerSystemNotification(opts: {
       if (reg && 'showNotification' in reg) {
         await reg.showNotification(opts.title, {
           body: opts.body,
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
+          icon: 'pwa-192x192.png',
+          badge: 'pwa-192x192.png',
           dir: 'rtl',
           lang: 'ar',
           tag: opts.tag,
@@ -192,7 +193,7 @@ export async function triggerSystemNotification(opts: {
   try {
     const n = new Notification(opts.title, {
       body: opts.body,
-      icon: '/pwa-192x192.png',
+      icon: 'pwa-192x192.png',
       dir: 'rtl',
       lang: 'ar',
       tag: opts.tag,
@@ -236,10 +237,13 @@ export async function subscribeBrowserToWebPush(
     return false;
   }
 
+  if (!isBackendServerDetected()) return false;
+
   try {
     if (!cachedVapidPublicKey) {
-      const keyRes = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
-      if (!keyRes.ok) return false;
+      const keyRes = await fetch(resolveApiUrl('/api/push/vapid-public-key'), { cache: 'no-store' });
+      const ct = keyRes.headers.get('content-type') || '';
+      if (!keyRes.ok || !ct.includes('application/json')) return false;
       const keyJson = (await keyRes.json()) as { enabled?: boolean; publicKey?: string };
       if (!keyJson.enabled || !keyJson.publicKey) return false;
       cachedVapidPublicKey = keyJson.publicKey;
@@ -260,7 +264,7 @@ export async function subscribeBrowserToWebPush(
       });
     }
 
-    const res = await fetch('/api/push/subscribe', {
+    const res = await fetch(resolveApiUrl('/api/push/subscribe'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -298,8 +302,8 @@ export async function unsubscribeBrowserFromWebPush(
     if (!sub) return true;
 
     const endpoint = sub.endpoint;
-    if (idToken && endpoint) {
-      await fetch('/api/push/unsubscribe', {
+    if (idToken && endpoint && isBackendServerDetected()) {
+      await fetch(resolveApiUrl('/api/push/unsubscribe'), {
         method: 'POST',
         keepalive: true,
         headers: {

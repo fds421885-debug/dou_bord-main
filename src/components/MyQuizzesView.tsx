@@ -4,6 +4,7 @@ import {
   ArrowRight,
   BarChart3,
   BookOpen,
+  Brain,
   CheckCircle2,
   ClipboardCopy,
   Download,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react';
 import { db, formatTimestamp, getTimestampMillis } from '../firebase';
 import type {
+  CoachQuickQuiz,
   DrillStyle,
   ExamQuestion,
   ExamSettings,
@@ -86,6 +88,12 @@ import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 import { DuoLoading } from './DuoLoading';
 import { MyQuizStatsView } from './MyQuizStatsView';
+import { SmartAssistantView } from './SmartAssistantView';
+import {
+  applySectionAttemptResultToState,
+  loadLocalCoachState,
+  saveCoachStateToCloud,
+} from '../aiCoachClient';
 import { syncUserStatsToLeaderboard } from '../social';
 
 type Mode =
@@ -121,7 +129,7 @@ const card = 'rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white';
 
 export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [mode, setMode] = useState<Mode>({ kind: 'list' });
-  const [subTab, setSubTab] = useState<'quizzes' | 'starred' | 'stats'>('quizzes');
+  const [subTab, setSubTab] = useState<'quizzes' | 'starred' | 'stats' | 'assistant'>('quizzes');
   const [quizzes, setQuizzes] = useState<MyQuiz[]>([]);
   const [starredItems, setStarredItems] = useState<StarredQuestion[]>([]);
   const [revealedStarExplanations, setRevealedStarExplanations] = useState<Record<string, boolean>>({});
@@ -379,7 +387,64 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           setMode({ kind: 'list' });
           void refreshDraft();
         }}
-        onFinish={(answers, durationSec, tableAnswers) =>
+        onFinish={(answers, durationSec, tableAnswers) => {
+          const qs = mode.questions;
+          const total = qs.length;
+          let score = 0;
+          qs.forEach((eq, idx) => {
+            const isTable = eq.questionType === 'table' || Boolean(eq.table);
+            if (isTable) {
+              if (answers[idx] === 1) score += 1;
+            } else if (answers[idx] === eq.correctIndex) {
+              score += 1;
+            }
+          });
+
+          const firstQuizId = mode.settings.quizIds?.[0] || '';
+          const quickChatMatch = firstQuizId.startsWith('coach_quick::')
+            ? firstQuizId.slice('coach_quick::'.length)
+            : '';
+
+          if (quickChatMatch) {
+            const currentCoach = loadLocalCoachState(profile.uid);
+            const updatedMsgs = currentCoach.chatMessages.map((m) =>
+              m.id === quickChatMatch && m.quickQuiz
+                ? {
+                    ...m,
+                    quickQuiz: {
+                      ...m.quickQuiz,
+                      completedScore: score,
+                      completedTotal: total,
+                      completedDurationSec: durationSec,
+                      completedAt: Date.now(),
+                    },
+                  }
+                : m
+            );
+            void saveCoachStateToCloud(profile.uid, {
+              ...currentCoach,
+              chatMessages: updatedMsgs,
+              updatedAt: Date.now(),
+            });
+          } else if (firstQuizId) {
+            const matchedQuiz = mergedQuizzes.find((q) => q.id === firstQuizId);
+            if (matchedQuiz && (matchedQuiz.quizKind === 'drill' || matchedQuiz.parentQuizId)) {
+              const secKey = matchedQuiz.parentQuizId || matchedQuiz.id;
+              const parentObj = mergedQuizzes.find((q) => q.id === secKey);
+              const currentCoach = loadLocalCoachState(profile.uid);
+              const nextCoach = applySectionAttemptResultToState({
+                state: currentCoach,
+                sectionKey: secKey,
+                sectionTitle: parentObj?.title || matchedQuiz.title,
+                score,
+                total,
+                durationSec,
+                quizId: matchedQuiz.id,
+              });
+              void saveCoachStateToCloud(profile.uid, nextCoach);
+            }
+          }
+
           setMode({
             kind: 'examResult',
             attemptId: newAttemptId(),
@@ -389,8 +454,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             tableAnswers,
             durationSec,
             finishedAt: Date.now(),
-          })
-        }
+          });
+        }}
       />
     );
   }
@@ -652,16 +717,44 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     });
   };
 
+  const startCoachQuickQuiz = (quickQuiz: CoachQuickQuiz, messageId: string) => {
+    const tempQuiz: MyQuiz = {
+      id: `coach_quick::${messageId}`,
+      ownerId: profile.uid,
+      title: quickQuiz.title || 'اختبار سريع من المساعد الذكي',
+      questions: quickQuiz.questions,
+      questionCount: quickQuiz.questions.length,
+    };
+    const readyPool = tempQuiz.questions.filter(isExamReady);
+    if (readyPool.length === 0) return;
+    const settings: ExamSettings = {
+      sourceMode: 'single',
+      mixMode: 'total',
+      quizIds: [tempQuiz.id],
+      quizTitles: [tempQuiz.title],
+      questionCount: readyPool.length,
+      shuffleQuestions: false,
+      shuffleChoices: false,
+      showLaws: false,
+      timing: 'none',
+      seconds: 0,
+    };
+    const qs = buildExam([tempQuiz], settings);
+    if (qs.length === 0) return;
+    void deleteSessionSnapshot('exam_session');
+    setMode({ kind: 'examRun', settings, questions: qs });
+  };
+
   /* ---------------- القائمة ---------------- */
   return (
     <div
-      className={`${subTab === 'stats' ? 'max-w-5xl' : 'max-w-3xl'} mx-auto w-full flex flex-col gap-4`}
+      className={`${subTab === 'stats' || subTab === 'assistant' ? 'max-w-5xl' : 'max-w-3xl'} mx-auto w-full flex flex-col gap-4`}
       dir="rtl"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-black text-[#3C3C3C]">اختباراتي</h2>
-          <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها من JSON، وتابع أسئلتك المميزة وإحصائياتك.</p>
+          <p className="text-xs font-bold text-[#777777]">أنشئ اختباراتك بنفسك أو استوردها، وتابع إحصائياتك ومساعدك الذكي.</p>
         </div>
         <div className="inline-flex flex-wrap items-center rounded-2xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black gap-0.5">
           <button
@@ -705,10 +798,31 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             <BarChart3 className="w-4 h-4" />
             <span>إحصائياتي</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('assistant')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              subTab === 'assistant'
+                ? 'bg-[#DDF4FF] text-[#1899D6] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <Brain className="w-4 h-4" />
+            <span>المساعد الذكي</span>
+          </button>
         </div>
       </div>
 
-      {subTab === 'stats' ? (
+      {subTab === 'assistant' ? (
+        <SmartAssistantView
+          profile={profile}
+          attempts={attempts}
+          quizzes={mergedQuizzes}
+          starredItems={starredItems}
+          onStartQuiz={(q) => startSingleQuizNow(q)}
+          onStartQuickQuiz={(qq, msgId) => startCoachQuickQuiz(qq, msgId)}
+        />
+      ) : subTab === 'stats' ? (
         <MyQuizStatsView
           attempts={attempts}
           quizzes={mergedQuizzes}

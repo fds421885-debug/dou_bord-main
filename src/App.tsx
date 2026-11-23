@@ -11,6 +11,7 @@ import {
   setDoc,
   where,
 } from './firestoreTracked';
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import {
   AlertCircle,
   Archive,
@@ -1186,63 +1187,67 @@ export default function App() {
 
     const checkServerPointer = async (forceRestFallback = false) => {
       if (disposed) return;
-      try {
-        const controller = new AbortController();
-        const timer = window.setTimeout(() => controller.abort(), 2500);
-        const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-        window.clearTimeout(timer);
-        const contentType = resp.headers.get('content-type') || '';
-        if (resp.ok && contentType.includes('application/json')) {
-          const data = (await resp.json()) as {
-            pointer?: ServerPlatformPointer | null;
-            playerDatabasesCount?: number;
-            backupDatabasesCount?: number;
-            backupConfigs?: FirebaseAppConfig[];
-            poolUpdatedAt?: number;
-            quotaStatus?: ProjectQuotaStatus;
-          };
-          if (data?.quotaStatus) {
-            applyServerQuotaStatus(data.quotaStatus);
+      if (isBackendServerDetected()) {
+        try {
+          const controller = new AbortController();
+          const timer = window.setTimeout(() => controller.abort(), 2500);
+          const resp = await fetch(resolveApiUrl(`/api/platform-db?t=${Date.now()}`), {
+            cache: 'no-store',
+            signal: controller.signal,
+          });
+          window.clearTimeout(timer);
+          const contentType = resp.headers.get('content-type') || '';
+          if (resp.ok && contentType.includes('application/json')) {
+            const data = (await resp.json()) as {
+              pointer?: ServerPlatformPointer | null;
+              playerDatabasesCount?: number;
+              backupDatabasesCount?: number;
+              backupConfigs?: FirebaseAppConfig[];
+              poolUpdatedAt?: number;
+              quotaStatus?: ProjectQuotaStatus;
+            };
+            if (data?.quotaStatus) {
+              applyServerQuotaStatus(data.quotaStatus);
+            }
+            handleServerPayload(data?.pointer, data);
+            return;
           }
-          handleServerPayload(data?.pointer, data);
-          return;
+        } catch {
+          // Static host or server offline — fall back to REST check
         }
-      } catch {
-        // Static host or server offline — fall back to REST check
       }
       await checkStaticBackupAndChain(forceRestFallback);
     };
 
-    try {
-      es = new EventSource('/api/platform-db/stream');
-      es.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data) as {
-            type?: string;
-            pointer?: ServerPlatformPointer | null;
-            playerDatabasesCount?: number;
-            backupDatabasesCount?: number;
-            backupConfigs?: FirebaseAppConfig[];
-            poolUpdatedAt?: number;
-            quotaStatus?: ProjectQuotaStatus;
-          };
-          if (msg?.quotaStatus) {
-            applyServerQuotaStatus(msg.quotaStatus);
+    if (isBackendServerDetected()) {
+      try {
+        es = new EventSource(resolveApiUrl('/api/platform-db/stream'));
+        es.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data) as {
+              type?: string;
+              pointer?: ServerPlatformPointer | null;
+              playerDatabasesCount?: number;
+              backupDatabasesCount?: number;
+              backupConfigs?: FirebaseAppConfig[];
+              poolUpdatedAt?: number;
+              quotaStatus?: ProjectQuotaStatus;
+            };
+            if (msg?.quotaStatus) {
+              applyServerQuotaStatus(msg.quotaStatus);
+            }
+            if (msg?.type === 'quota_alert') return;
+            handleServerPayload(msg?.pointer, msg, msg?.type);
+          } catch {
+            // Ignore malformed SSE payload
           }
-          if (msg?.type === 'quota_alert') return;
-          handleServerPayload(msg?.pointer, msg, msg?.type);
-        } catch {
-          // Ignore malformed SSE payload
-        }
-      };
-      es.onerror = () => {
-        // Browser auto-reconnects or polling checks static fallback
-      };
-    } catch {
-      // EventSource unsupported or static host
+        };
+        es.onerror = () => {
+          // Browser auto-reconnects or polling checks static fallback
+        };
+      } catch {
+        // EventSource unsupported or static host
+      }
     }
 
     const onVisibilityOrFocus = () => {

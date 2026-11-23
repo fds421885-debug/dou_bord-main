@@ -1,4 +1,5 @@
 import defaultFirebaseConfigJson from '../firebase-applet-config.json';
+import { getConfiguredApiOrigin, resolveApiUrl, setBackendServerDetected } from './apiBase';
 
 export interface FirebaseAppConfig {
   apiKey: string;
@@ -795,13 +796,20 @@ export async function syncPlatformDbBeforeBoot(
   let backendAvailable = false;
   let backupSignalProjectId: string | null = null;
 
-  try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 1800);
-    const resp = await fetch(`/api/platform-db?t=${Date.now()}`, {
-      cache: 'no-store',
-      signal: controller.signal,
-    });
+  const hasApiOrigin = Boolean(getConfiguredApiOrigin());
+  const isKnownStaticWithoutOrigin =
+    !hasApiOrigin &&
+    (window.location.hostname.endsWith('.github.io') ||
+      window.location.hostname.endsWith('.netlify.app'));
+
+  if (!isKnownStaticWithoutOrigin) {
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 1800);
+      const resp = await fetch(resolveApiUrl(`/api/platform-db?t=${Date.now()}`), {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
     window.clearTimeout(timer);
     const contentType = resp.headers.get('content-type') || '';
     if (resp.ok && contentType.includes('application/json')) {
@@ -832,9 +840,11 @@ export async function syncPlatformDbBeforeBoot(
         }
       }
     }
-  } catch {
-    // Static host or server offline
+    } catch {
+      // Static host or server offline
+    }
   }
+  setBackendServerDetected(backendAvailable || hasApiOrigin);
 
   onProgress?.({
     percent: 58,

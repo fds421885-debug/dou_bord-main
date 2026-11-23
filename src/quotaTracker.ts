@@ -1,4 +1,5 @@
 import { type User } from 'firebase/auth';
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import { activeFirebaseConfig, activeProjectId } from './firebase';
 
 export const SPARK_DAILY_LIMITS = {
@@ -260,6 +261,10 @@ async function flushPendingQuotaReports(): Promise<void> {
     window.clearTimeout(flushTimer);
     flushTimer = null;
   }
+  if (!isBackendServerDetected()) {
+    pendingOpsByProject.clear();
+    return;
+  }
   const entries = Array.from(pendingOpsByProject.entries());
   if (entries.length === 0) return;
 
@@ -272,7 +277,7 @@ async function flushPendingQuotaReports(): Promise<void> {
     try {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), 3500);
-      const resp = await fetch('/api/quota/report', {
+      const resp = await fetch(resolveApiUrl('/api/quota/report'), {
         method: 'POST',
         signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
@@ -375,11 +380,12 @@ export function reportFirestoreQuotaExhausted(projectId?: string | null): void {
 export async function fetchServerQuotaStatus(
   projectId = activeProjectId
 ): Promise<ProjectQuotaStatus | null> {
+  if (!isBackendServerDetected()) return getCachedProjectQuotaStatus(projectId);
   try {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 3000);
     const resp = await fetch(
-      `/api/quota/status?projectId=${encodeURIComponent(projectId)}&t=${Date.now()}`,
+      resolveApiUrl(`/api/quota/status?projectId=${encodeURIComponent(projectId)}&t=${Date.now()}`),
       { cache: 'no-store', signal: controller.signal }
     );
     window.clearTimeout(timer);
@@ -414,33 +420,35 @@ export async function fetchAllServerQuotaStatuses(
   }
   result[activeProjectId] = getCachedProjectQuotaStatus(activeProjectId);
 
-  try {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3000);
-    const resp = await fetch(
-      `/api/quota/status?projectId=${encodeURIComponent(activeProjectId)}&t=${Date.now()}`,
-      { cache: 'no-store', signal: controller.signal }
-    );
-    window.clearTimeout(timer);
-    const contentType = resp.headers.get('content-type') || '';
-    if (resp.ok && contentType.includes('application/json')) {
-      const data = (await resp.json()) as {
-        quotaStatus?: ProjectQuotaStatus;
-        quotaByProject?: Record<string, ProjectQuotaStatus>;
-      };
-      if (data?.quotaByProject) {
-        for (const [pid, st] of Object.entries(data.quotaByProject)) {
-          applyServerQuotaStatus(st);
-          result[pid] = st;
+  if (isBackendServerDetected()) {
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 3000);
+      const resp = await fetch(
+        resolveApiUrl(`/api/quota/status?projectId=${encodeURIComponent(activeProjectId)}&t=${Date.now()}`),
+        { cache: 'no-store', signal: controller.signal }
+      );
+      window.clearTimeout(timer);
+      const contentType = resp.headers.get('content-type') || '';
+      if (resp.ok && contentType.includes('application/json')) {
+        const data = (await resp.json()) as {
+          quotaStatus?: ProjectQuotaStatus;
+          quotaByProject?: Record<string, ProjectQuotaStatus>;
+        };
+        if (data?.quotaByProject) {
+          for (const [pid, st] of Object.entries(data.quotaByProject)) {
+            applyServerQuotaStatus(st);
+            result[pid] = st;
+          }
+        }
+        if (data?.quotaStatus) {
+          applyServerQuotaStatus(data.quotaStatus);
+          result[data.quotaStatus.projectId] = data.quotaStatus;
         }
       }
-      if (data?.quotaStatus) {
-        applyServerQuotaStatus(data.quotaStatus);
-        result[data.quotaStatus.projectId] = data.quotaStatus;
-      }
+    } catch {
+      // Fallback to local cache map
     }
-  } catch {
-    // Fallback to local cache map
   }
   return result;
 }
@@ -458,11 +466,14 @@ export async function calibrateProjectQuotaUsage(params: {
   const dateKey = getFirebaseQuotaDateKey();
   pendingOpsByProject.delete(projectId);
 
+  if (!isBackendServerDetected()) {
+    return getCachedProjectQuotaStatus(projectId);
+  }
   try {
     const idToken = await params.user.getIdToken(false);
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 5000);
-    const resp = await fetch('/api/programmer/quota/calibrate', {
+    const resp = await fetch(resolveApiUrl('/api/programmer/quota/calibrate'), {
       method: 'POST',
       signal: controller.signal,
       headers: {

@@ -10,6 +10,7 @@ import {
   setDoc,
   where,
 } from './firestoreTracked';
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
 import { computeQuizStats } from './quizStats';
@@ -447,12 +448,13 @@ async function notifyRecipientViaServerPush(params: {
   actionTab?: 'friends' | 'leaderboard';
 }): Promise<void> {
   try {
+    if (!isBackendServerDetected()) return;
     const user = auth.currentUser;
     if (!user || !params.recipientUid || params.recipientUid === user.uid) return;
     const idToken = await user.getIdToken();
     if (!idToken) return;
 
-    await fetch('/api/push/notify', {
+    await fetch(resolveApiUrl('/api/push/notify'), {
       method: 'POST',
       keepalive: true,
       headers: {

@@ -4,6 +4,15 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import * as webpush from 'web-push';
+import {
+  isAiConfigured,
+  runAiCoachAnalyze,
+  runAiCoachChat,
+  runAiCoachGenerateQuiz,
+  type AnalyzeRequestPayload,
+  type ChatRequestPayload,
+  type GenerateQuizRequestPayload,
+} from './serverAi';
 
 type DatabaseRole = 'player' | 'backup';
 
@@ -1273,11 +1282,96 @@ async function authenticateRequest(
 
 async function startServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '2mb' }));
+
+  // CORS support so a static GitHub Pages build can talk to this backend when VITE_API_ORIGIN is configured
+  app.use((req: Request, res: Response, next) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-DuoBoard-Name'
+    );
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   app.get('/api/platform-db', (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(buildPublicPayload(platformState));
+  });
+
+  app.get('/api/ai/status', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({ ok: true, aiConfigured: isAiConfigured() });
+  });
+
+  app.post('/api/ai/analyze', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+    if (!isAiConfigured()) {
+      res.status(503).json({ error: 'خدمة المساعد الذكي غير مهيأة على الخادم حالياً.' });
+      return;
+    }
+    try {
+      const result = await runAiCoachAnalyze(body as unknown as AnalyzeRequestPayload);
+      res.json({ ok: true, diagnosis: result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'فشل التحليل الذكي';
+      console.error('/api/ai/analyze error:', err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.post('/api/ai/generate-quiz', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+    if (!isAiConfigured()) {
+      res.status(503).json({ error: 'خدمة المساعد الذكي غير مهيأة على الخادم حالياً.' });
+      return;
+    }
+    try {
+      const result = await runAiCoachGenerateQuiz(body as unknown as GenerateQuizRequestPayload);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'فشل إنشاء اختبار التقوية';
+      console.error('/api/ai/generate-quiz error:', err);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.post('/api/ai/chat', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+    if (!isAiConfigured()) {
+      res.status(503).json({ error: 'خدمة المساعد الذكي غير مهيأة على الخادم حالياً.' });
+      return;
+    }
+    try {
+      const result = await runAiCoachChat(body as unknown as ChatRequestPayload);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'فشل الرد في المحادثة الذكية';
+      console.error('/api/ai/chat error:', err);
+      res.status(500).json({ error: msg });
+    }
   });
 
   // Web Push notifications (deliver OS notifications even when browser/site is closed)

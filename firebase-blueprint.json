@@ -1087,13 +1087,14 @@
         "senderId": { "type": "string" },
         "senderName": { "type": "string" },
         "recipientId": { "type": "string" },
+        "participantIds": { "type": "array" },
         "type": { "type": "string", "enum": ["text", "quiz_share"] },
         "text": { "type": "string" },
         "quizShare": { "type": "object" },
         "createdAtMs": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "chatId", "senderId", "senderName", "recipientId", "type", "text", "createdAtMs", "createdAt"]
+      "required": ["id", "chatId", "senderId", "senderName", "recipientId", "participantIds", "type", "text", "createdAtMs", "createdAt"]
     },
     "SharedFriendQuiz": {
       "title": "SharedFriendQuiz",

@@ -109,12 +109,12 @@ import type {
   UserProfile,
 } from './types';
 
-export const REQUIRED_RULES_VERSION = 'v8_social_leaderboard_2026_11_22';
+export const REQUIRED_RULES_VERSION = 'v9_direct_chat_fix_2026_11_23';
 
 export const RULES_UPDATE_CHANGES_AR: string[] = [
   'رفع حد الأسئلة داخل الاختبار الواحد ونتائج المحاولات والنماذج المشتركة (myQuizzes, quizAttempts, sharedQuizzes) من 100 إلى 10,000 سؤال.',
   'دعم لوحة الشرف العالمية وتصفيرها من المبرمج (leaderboardUsers, platform/leaderboardMeta).',
-  'دعم طلبات الصداقة وقائمة الأصدقاء والمحادثات الفورية وإرسال الاختبارات بين الأصدقاء (friendRequests, friendships, directChats, sharedFriendQuizzes).',
+  'دعم طلبات الصداقة وقائمة الأصدقاء والمحادثات الفورية وإرسال الاختبارات بين الأصدقاء (friendRequests, friendships, directChats, sharedFriendQuizzes) مع إصلاح فتح وإرسال المحادثات.',
   'دعم «الأسئلة المميزة ⭐» و«اختبارات التقوية» وحقول القوانين والجداول التفاعلية.',
 ];
 
@@ -125,7 +125,7 @@ export const RULES_UPDATE_STEPS_AR: string[] = [
   '4. انتظر ثانيتين بعد النشر ثم عد هنا واضغط «إعادة فحص القواعد الآن» للتأكد من تفعيلها 100%.',
 ];
 
-const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v8_ok_';
+const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v9_ok_';
 
 export interface RulesProbeCheckItem {
   id: 'anti_test_mode' | 'starred' | 'my_quizzes_v7' | 'attempts_v7' | 'social_v8';
@@ -237,7 +237,7 @@ export async function checkActiveDatabaseRulesCompliance(
       integerValue: '-1',
     }));
 
-    const [rogueResp, starredResp, quizCommitResp, attemptCommitResp, socialResp] = await Promise.all([
+    const [rogueResp, starredResp, quizCommitResp, attemptCommitResp, socialResp, directChatResp] = await Promise.all([
       fetchProbe('/platform/rules_probe_check', {
         method: 'PATCH',
         body: JSON.stringify({ fields: { id: { stringValue: 'rules_probe_check' } } }),
@@ -303,6 +303,9 @@ export async function checkActiveDatabaseRulesCompliance(
       fetchProbe(`/leaderboardUsers/${encodedUid}`, {
         method: 'GET',
       }),
+      fetchProbe(`/directChats/${encodedUid}__probe_chat_check`, {
+        method: 'GET',
+      }),
     ]);
 
     // Immediate cleanup of any created probe documents (even if another probe failed)
@@ -334,7 +337,8 @@ export async function checkActiveDatabaseRulesCompliance(
       starredResp.status === 429 ||
       quizCommitResp.status === 429 ||
       attemptCommitResp.status === 429 ||
-      socialResp.status === 429
+      socialResp.status === 429 ||
+      directChatResp.status === 429
     ) {
       return {
         compliant: true,
@@ -348,7 +352,9 @@ export async function checkActiveDatabaseRulesCompliance(
     const starredOk = starredResp.ok || starredResp.status === 404;
     const myQuizzesOk = quizCommitResp.ok;
     const attemptsOk = attemptCommitResp.ok;
-    const socialOk = socialResp.ok || socialResp.status === 404;
+    const socialOk =
+      (socialResp.ok || socialResp.status === 404) &&
+      (directChatResp.ok || directChatResp.status === 404);
 
     const checks: RulesProbeCheckItem[] = [
       {
@@ -385,16 +391,16 @@ export async function checkActiveDatabaseRulesCompliance(
       },
       {
         id: 'social_v8',
-        label: 'لوحة الشرف والأصدقاء والمحادثات (leaderboardUsers, friendRequests)',
+        label: 'لوحة الشرف والأصدقاء والمحادثات (leaderboardUsers, directChats)',
         passed: socialOk,
         detail: socialOk
-          ? 'صلاحيات لوحة الشرف والأصدقاء والرسائل مفعّلة'
-          : `مرفوضة (${socialResp.status}) — القواعد قديمة ولا تدعم لوحة الشرف والأصدقاء`,
+          ? 'صلاحيات لوحة الشرف والأصدقاء والمحادثات الفورية مفعّلة'
+          : `مرفوضة (${directChatResp.status === 403 ? 'directChats 403' : socialResp.status}) — قواعد الأمان قديمة وتحتاج تحديثاً لفتح وإرسال المحادثات`,
       },
     ];
 
     recordFirestoreOperations(projectId, {
-      reads: 2,
+      reads: 3,
       writes:
         (rogueResp.ok ? 1 : 0) + (quizCommitResp.ok ? 1 : 0) + (attemptCommitResp.ok ? 1 : 0),
       deletes: cleanupPromises.length,

@@ -585,16 +585,22 @@ service cloud.firestore {
 
     function isValidDirectMessage(data) {
       return data.keys().hasAll([
-          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'type', 'text', 'createdAtMs', 'createdAt'
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'participantIds',
+          'type', 'text', 'createdAtMs', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'type', 'text', 'quizShare', 'createdAtMs', 'createdAt'
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'participantIds',
+          'type', 'text', 'quizShare', 'createdAtMs', 'createdAt'
         ])
         && isValidId(data.id)
         && isValidId(data.chatId)
         && isValidId(data.senderId)
         && data.senderId == request.auth.uid
         && isValidId(data.recipientId)
+        && data.senderId != data.recipientId
+        && data.participantIds is list && data.participantIds.size() == 2
+        && isValidId(data.participantIds[0]) && isValidId(data.participantIds[1])
+        && (data.senderId in data.participantIds) && (data.recipientId in data.participantIds)
         && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
         && data.type in ['text', 'quiz_share']
         && data.text is string && data.text.size() <= 4000
@@ -733,7 +739,10 @@ service cloud.firestore {
 
     match /directChats/{chatId} {
       allow get: if isValidId(chatId) && isVerified()
-        && (request.auth.uid in resource.data.participantIds);
+        && (
+          (resource != null && request.auth.uid in resource.data.participantIds)
+          || (resource == null && request.auth.uid in chatId.split('__'))
+        );
       allow list: if isVerified()
         && (request.auth.uid in resource.data.participantIds);
       allow create: if isValidId(chatId) && isVerified()
@@ -754,7 +763,7 @@ service cloud.firestore {
         allow get: if isValidId(chatId) && isValidId(msgId) && isVerified()
           && (request.auth.uid in get(/databases/$(database)/documents/directChats/$(chatId)).data.participantIds);
         allow list: if isValidId(chatId) && isVerified()
-          && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+          && (request.auth.uid in resource.data.participantIds);
         allow create: if isValidId(chatId) && isValidId(msgId) && isVerified()
           && isValidDirectMessage(incoming())
           && incoming().id == msgId

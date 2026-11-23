@@ -734,6 +734,7 @@ export interface DirectMessageDoc {
   senderId: string;
   senderName: string;
   recipientId: string;
+  participantIds?: string[];
   type: 'text' | 'quiz_share';
   text: string;
   quizShare?: SharedQuizSummaryMeta;

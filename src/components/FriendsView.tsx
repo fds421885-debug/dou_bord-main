@@ -87,6 +87,7 @@ export const FriendsView: React.FC<Props> = ({
   const { myQuizzes } = useMyQuizzes(profile.uid);
   const [messages, setMessages] = useState<DirectMessageDoc[]>([]);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState('');
   const [sendingMsg, setSendingMsg] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -178,22 +179,43 @@ export const FriendsView: React.FC<Props> = ({
   useEffect(() => {
     if (!activeChatId || !activeFriend) {
       setMessages([]);
+      setLoadingMsgs(false);
+      setChatError(null);
       return;
     }
     let alive = true;
     setLoadingMsgs(true);
+    setChatError(null);
+
     void ensureDirectChatThread({
       myUid: profile.uid,
       myName: profile.fullNameQuad,
       friendUid: activeFriend.friendUid,
       friendName: activeFriend.friendName,
-    }).catch(() => undefined);
-
-    const unsub = subscribeChatMessages(activeChatId, (list) => {
-      if (!alive) return;
-      setMessages(list);
-      setLoadingMsgs(false);
+    }).catch((err) => {
+      console.error('ensureDirectChatThread error', err);
     });
+
+    const unsub = subscribeChatMessages(
+      activeChatId,
+      profile.uid,
+      (list) => {
+        if (!alive) return;
+        setMessages(list);
+        setLoadingMsgs(false);
+        setChatError(null);
+      },
+      (err) => {
+        if (!alive) return;
+        setLoadingMsgs(false);
+        const msg = String((err as { message?: string })?.message || '');
+        setChatError(
+          /permission/i.test(msg)
+            ? 'قواعد الأمان للمحادثات تحتاج تحديثاً في Firebase أو جارٍ تجهيز غرفة المحادثة.'
+            : 'تعذر تحميل رسائل المحادثة حالياً، تأكد من الاتصال.'
+        );
+      }
+    );
     return () => {
       alive = false;
       unsub();
@@ -255,10 +277,17 @@ export const FriendsView: React.FC<Props> = ({
         friendName: activeFriend.friendName,
         text: msgText,
       });
+      setChatError(null);
       playDuoSound('pop');
-    } catch {
+    } catch (err) {
+      console.error('sendDirectTextMessage error', err);
       setTextInput(msgText);
-      showNotice('تعذر إرسال الرسالة، تأكد من الاتصال وحاول مجدداً.');
+      const errMsg = String((err as { message?: string })?.message || '');
+      showNotice(
+        /permission/i.test(errMsg)
+          ? 'تعذر الإرسال بسبب صلاحيات قاعدة البيانات (يرجى التأكد من نشر قواعد الأمان المحدثة).'
+          : 'تعذر إرسال الرسالة، تأكد من الاتصال وحاول مجدداً.'
+      );
     } finally {
       setSendingMsg(false);
     }
@@ -586,6 +615,11 @@ export const FriendsView: React.FC<Props> = ({
 
                 {/* Messages Stream */}
                 <div className="flex-1 overflow-y-auto p-3.5 sm:p-4 bg-[#F8FAFC] flex flex-col gap-2.5">
+                  {chatError && (
+                    <div className="p-3 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs font-extrabold text-[#EA2B2B]">
+                      {chatError}
+                    </div>
+                  )}
                   {loadingMsgs ? (
                     <div className="m-auto flex flex-col items-center gap-2 text-xs font-black text-[#777777]">
                       <Loader2 className="w-6 h-6 animate-spin text-[#1CB0F6]" />

@@ -598,23 +598,34 @@ export async function ensureDirectChatThread(params: {
   friendName: string;
 }): Promise<string> {
   const { myUid, myName, friendUid, friendName } = params;
+  if (!myUid || !friendUid || myUid === friendUid) {
+    throw new Error('معرّف الطرف الآخر غير صالح للمحادثة.');
+  }
   const chatId = makePairId(myUid, friendUid);
   const chatRef = doc(db, 'directChats', chatId);
-  const snap = await getDoc(chatRef);
-  if (!snap.exists()) {
+  let exists = false;
+  try {
+    const snap = await getDoc(chatRef);
+    exists = snap.exists();
+  } catch {
+    exists = false;
+  }
+  if (!exists) {
     const sorted = [myUid, friendUid].sort();
-    const nowMs = Date.now();
+    const nowMs = Math.floor(Date.now());
+    const safeMyName = (myName.trim() || 'مستخدم').slice(0, 120);
+    const safeFriendName = (friendName.trim() || 'صديق').slice(0, 120);
     await setDoc(chatRef, {
       id: chatId,
       participantIds: sorted,
       participantNames: {
-        [myUid]: myName.trim() || 'مستخدم',
-        [friendUid]: friendName.trim() || 'صديق',
+        [myUid]: safeMyName,
+        [friendUid]: safeFriendName,
       },
       lastMessageText: '',
       lastMessageType: 'init',
       lastSenderId: myUid,
-      lastSenderName: myName.trim() || 'مستخدم',
+      lastSenderName: safeMyName,
       lastMessageAtMs: 0,
       readAtMsByUid: {
         [myUid]: nowMs,
@@ -636,40 +647,53 @@ export async function sendDirectTextMessage(params: {
   const cleanText = params.text.trim();
   if (!cleanText) return;
   const chatId = await ensureDirectChatThread(params);
-  const nowMs = Date.now();
+  const nowMs = Math.floor(Date.now());
   const msgId = `msg_${nowMs.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const sorted = [params.myUid, params.friendUid].sort();
+  const safeMyName = (params.myName.trim() || 'مستخدم').slice(0, 120);
+  const safeFriendName = (params.friendName.trim() || 'صديق').slice(0, 120);
 
   const msgRef = doc(db, 'directChats', chatId, 'messages', msgId);
   await setDoc(msgRef, {
     id: msgId,
     chatId,
     senderId: params.myUid,
-    senderName: params.myName.trim() || 'مستخدم',
+    senderName: safeMyName,
     recipientId: params.friendUid,
+    participantIds: sorted,
     type: 'text',
     text: cleanText.slice(0, 4000),
     createdAtMs: nowMs,
     createdAt: serverTimestamp(),
   });
 
-  const sorted = [params.myUid, params.friendUid].sort();
   const chatRef = doc(db, 'directChats', chatId);
-  const prevSnap = await getDoc(chatRef);
-  const prevReadMap = prevSnap.exists()
-    ? ((prevSnap.data() as DirectChatDoc).readAtMsByUid || {})
-    : {};
+  let prevReadMap: Record<string, number> = {};
+  let participantIds = sorted;
+  try {
+    const prevSnap = await getDoc(chatRef);
+    if (prevSnap.exists()) {
+      const prevData = prevSnap.data() as DirectChatDoc;
+      prevReadMap = prevData.readAtMsByUid || {};
+      if (Array.isArray(prevData.participantIds) && prevData.participantIds.length === 2) {
+        participantIds = prevData.participantIds;
+      }
+    }
+  } catch {
+    // Use defaults
+  }
 
   await setDoc(chatRef, {
     id: chatId,
-    participantIds: sorted,
+    participantIds,
     participantNames: {
-      [params.myUid]: params.myName.trim() || 'مستخدم',
-      [params.friendUid]: params.friendName.trim() || 'صديق',
+      [params.myUid]: safeMyName,
+      [params.friendUid]: safeFriendName,
     },
     lastMessageText: cleanText.slice(0, 220),
     lastMessageType: 'text',
     lastSenderId: params.myUid,
-    lastSenderName: params.myName.trim() || 'مستخدم',
+    lastSenderName: safeMyName,
     lastMessageAtMs: nowMs,
     readAtMsByUid: {
       ...prevReadMap,
@@ -737,14 +761,27 @@ export async function sendQuizToFriend(params: {
 
   const chatId = await ensureDirectChatThread({ myUid, myName, friendUid, friendName });
   const chatRef = doc(db, 'directChats', chatId);
-  const prevSnap = await getDoc(chatRef);
-  const prevReadMap = prevSnap.exists()
-    ? ((prevSnap.data() as DirectChatDoc).readAtMsByUid || {})
-    : {};
+  const sorted = [myUid, friendUid].sort();
+  const safeMyName = (myName.trim() || 'صديق').slice(0, 120);
+  const safeFriendName = (friendName.trim() || 'صديق').slice(0, 120);
+  let prevReadMap: Record<string, number> = {};
+  let participantIds = sorted;
+  try {
+    const prevSnap = await getDoc(chatRef);
+    if (prevSnap.exists()) {
+      const prevData = prevSnap.data() as DirectChatDoc;
+      prevReadMap = prevData.readAtMsByUid || {};
+      if (Array.isArray(prevData.participantIds) && prevData.participantIds.length === 2) {
+        participantIds = prevData.participantIds;
+      }
+    }
+  } catch {
+    // Use defaults
+  }
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    const nowMs = Date.now() + i;
+    const nowMs = Math.floor(Date.now()) + i;
     const sharedId = `shq_${nowMs.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const encodedQuestions = prepareQuestionsForFirestore(part.questions);
 
@@ -752,7 +789,7 @@ export async function sendQuizToFriend(params: {
       id: sharedId,
       chatId,
       senderId: myUid,
-      senderName: myName.trim() || 'صديق',
+      senderName: safeMyName,
       recipientId: friendUid,
       title: part.title,
       questions: encodedQuestions,
@@ -766,15 +803,16 @@ export async function sendQuizToFriend(params: {
       id: msgId,
       chatId,
       senderId: myUid,
-      senderName: myName.trim() || 'صديق',
+      senderName: safeMyName,
       recipientId: friendUid,
+      participantIds,
       type: 'quiz_share',
       text: `أرسل لك اختباراً: ${part.title} (${part.questions.length} سؤال)`,
       quizShare: {
         sharedQuizDocId: sharedId,
         quizTitle: part.title,
         questionCount: part.questions.length,
-        senderName: myName.trim() || 'صديق',
+        senderName: safeMyName,
       },
       createdAtMs: nowMs,
       createdAt: serverTimestamp(),
@@ -782,19 +820,18 @@ export async function sendQuizToFriend(params: {
   }
 
   const lastPart = parts[parts.length - 1];
-  const lastNowMs = Date.now() + parts.length;
-  const sorted = [myUid, friendUid].sort();
+  const lastNowMs = Math.floor(Date.now()) + parts.length;
   await setDoc(chatRef, {
     id: chatId,
-    participantIds: sorted,
+    participantIds,
     participantNames: {
-      [myUid]: myName.trim() || 'مستخدم',
-      [friendUid]: friendName.trim() || 'صديق',
+      [myUid]: safeMyName,
+      [friendUid]: safeFriendName,
     },
-    lastMessageText: `أرسل اختباراً: ${lastPart.title}`,
+    lastMessageText: `أرسل اختباراً: ${lastPart.title}`.slice(0, 220),
     lastMessageType: 'quiz_share',
     lastSenderId: myUid,
-    lastSenderName: myName.trim() || 'مستخدم',
+    lastSenderName: safeMyName,
     lastMessageAtMs: lastNowMs,
     readAtMsByUid: {
       ...prevReadMap,
@@ -870,14 +907,21 @@ export async function acceptSharedFriendQuizToMyQuizzes(params: {
 export async function markDirectChatRead(chat: DirectChatDoc, myUid: string): Promise<void> {
   if (!chat?.id || !myUid) return;
   const myRead = Number(chat.readAtMsByUid?.[myUid] || 0);
-  const lastMsgAt = Number(chat.lastMessageAtMs || 0);
+  const lastMsgAt = Math.floor(Number(chat.lastMessageAtMs || 0));
   if (lastMsgAt === 0 || myRead >= lastMsgAt) return;
 
   await setDoc(doc(db, 'directChats', chat.id), {
-    ...chat,
+    id: chat.id,
+    participantIds: chat.participantIds,
+    participantNames: chat.participantNames || {},
+    lastMessageText: String(chat.lastMessageText || '').slice(0, 500),
+    lastMessageType: chat.lastMessageType || 'text',
+    lastSenderId: String(chat.lastSenderId || '').slice(0, 128),
+    lastSenderName: String(chat.lastSenderName || '').slice(0, 120),
+    lastMessageAtMs: lastMsgAt,
     readAtMsByUid: {
       ...(chat.readAtMsByUid || {}),
-      [myUid]: Date.now(),
+      [myUid]: Math.floor(Date.now()),
     },
     updatedAt: serverTimestamp(),
   });
@@ -903,10 +947,15 @@ export function subscribeDirectChats(
 
 export function subscribeChatMessages(
   chatId: string,
-  onChange: (msgs: DirectMessageDoc[]) => void
+  myUid: string,
+  onChange: (msgs: DirectMessageDoc[]) => void,
+  onError?: (err: unknown) => void
 ): () => void {
   return onSnapshot(
-    collection(db, 'directChats', chatId, 'messages'),
+    query(
+      collection(db, 'directChats', chatId, 'messages'),
+      where('participantIds', 'array-contains', myUid)
+    ),
     (snap) => {
       const list: DirectMessageDoc[] = [];
       snap.forEach((d) => list.push(d.data() as DirectMessageDoc));
@@ -915,6 +964,7 @@ export function subscribeChatMessages(
     },
     (err) => {
       console.error('chat messages listener error', err);
+      onError?.(err);
     }
   );
 }

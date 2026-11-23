@@ -240,24 +240,26 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
       da.correct += correct;
     }
 
-    const qKey =
-      a.settings?.quizIds?.length === 1
-        ? `q:${a.settings.quizIds[0]}`
-        : `t:${(a.title || 'اختبار').trim()}`;
-    const qa = quizAccum.get(qKey) ?? {
-      title: a.title || 'اختبار',
-      attempts: 0,
-      questions: 0,
-      correct: 0,
-      durationSec: 0,
-      pcts: [],
-    };
-    qa.attempts++;
-    qa.questions += total;
-    qa.correct += correct;
-    qa.durationSec += durationSec;
-    qa.pcts.push(pct);
-    quizAccum.set(qKey, qa);
+    if (!isReview) {
+      const qKey =
+        a.settings?.quizIds?.length === 1
+          ? `q:${a.settings.quizIds[0]}`
+          : `t:${(a.title || 'اختبار').trim()}`;
+      const qa = quizAccum.get(qKey) ?? {
+        title: a.title || 'اختبار',
+        attempts: 0,
+        questions: 0,
+        correct: 0,
+        durationSec: 0,
+        pcts: [],
+      };
+      qa.attempts++;
+      qa.questions += total;
+      qa.correct += correct;
+      qa.durationSec += durationSec;
+      qa.pcts.push(pct);
+      quizAccum.set(qKey, qa);
+    }
 
     rawPoints.push({
       attempt: a,

@@ -14,7 +14,7 @@ import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
 import { computeQuizStats } from './quizStats';
-import { decodeMyQuizFromFirestore } from './quizTable';
+import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from './quizTable';
 import type {
   DirectChatDoc,
   DirectMessageDoc,
@@ -151,7 +151,7 @@ export function buildLeaderboardStatsSnapshot(
 
   return {
     correctCount: computed.correctAnswers,
-    wrongCount: computed.wrongAnswers + computed.skippedAnswers,
+    wrongCount: computed.wrongAnswers,
     totalQuestions: computed.totalQuestions,
     attemptsCount: computed.attemptsCount,
     statsSnapshot: {
@@ -369,7 +369,7 @@ export async function fetchUserAttemptsAndSyncLeaderboard(
   );
   const byId = new Map<string, QuizAttempt>();
   attemptsSnap.forEach((d) => {
-    const a = d.data() as QuizAttempt;
+    const a = decodeExamAttemptFromFirestore(d.data() as QuizAttempt);
     if (a?.id) byId.set(a.id, a);
   });
   if (extraAttempt?.id) {

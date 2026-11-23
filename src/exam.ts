@@ -577,8 +577,14 @@ export function scoreExam(
 }
 
 export function defaultExamTitle(settings: ExamSettings): string {
-  if (settings.sourceMode === 'single' || settings.quizTitles.length === 1) return settings.quizTitles[0] || 'اختبار';
-  return `مزيج من ${settings.quizTitles.length} نماذج`;
+  const base =
+    settings.sourceMode === 'single' || settings.quizTitles.length === 1
+      ? settings.quizTitles[0] || 'اختبار'
+      : `مزيج من ${settings.quizTitles.length} نماذج`;
+  if (settings.mistakeReviewMode && !base.startsWith('تصحيح أخطاء')) {
+    return `تصحيح أخطاء: ${base}`;
+  }
+  return base;
 }
 
 export function formatDuration(totalSec: number): string {

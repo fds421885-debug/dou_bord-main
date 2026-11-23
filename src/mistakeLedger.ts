@@ -357,3 +357,43 @@ export function computeMistakeLedger(
     redeemedWithLawsCount,
   };
 }
+
+export const OTHER_MISTAKES_QUIZ_ID = '__other_mistakes__';
+
+export function matchUnresolvedMistakesForQuiz(
+  quiz: MyQuiz,
+  unresolvedMistakes: UnresolvedMistakeItem[]
+): UnresolvedMistakeItem[] {
+  if (unresolvedMistakes.length === 0) return [];
+  const fpSet = new Set<string>();
+  for (const qq of quiz.questions || []) {
+    if (qq?.text?.trim()) {
+      fpSet.add(computeQuestionFingerprint(qq));
+    }
+  }
+  return unresolvedMistakes.filter(
+    (m) => m.sourceQuizId === quiz.id || fpSet.has(m.fp)
+  );
+}
+
+export function groupUnresolvedMistakesByQuiz(
+  quizzes: MyQuiz[],
+  unresolvedMistakes: UnresolvedMistakeItem[]
+): {
+  byQuizId: Record<string, UnresolvedMistakeItem[]>;
+  otherMistakes: UnresolvedMistakeItem[];
+} {
+  const byQuizId: Record<string, UnresolvedMistakeItem[]> = {};
+  const claimedFps = new Set<string>();
+
+  for (const qz of quizzes) {
+    const matched = matchUnresolvedMistakesForQuiz(qz, unresolvedMistakes);
+    byQuizId[qz.id] = matched;
+    for (const m of matched) {
+      claimedFps.add(m.fp);
+    }
+  }
+
+  const otherMistakes = unresolvedMistakes.filter((m) => !claimedFps.has(m.fp));
+  return { byQuizId, otherMistakes };
+}

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, onSnapshot, query, where } from '../firestoreTracked';
 import {
+  AlertCircle,
   ArrowRight,
   BarChart3,
   BookOpen,
@@ -18,6 +19,7 @@ import {
   Layers,
   ListChecks,
   Loader2,
+  Lock,
   Pencil,
   Play,
   Sparkles,
@@ -95,6 +97,11 @@ import {
   saveCoachStateToCloud,
 } from '../aiCoachClient';
 import { syncUserStatsToLeaderboard } from '../social';
+import {
+  computeMistakeLedger,
+  groupUnresolvedMistakesByQuiz,
+  isMistakeReviewAttempt,
+} from '../mistakeLedger';
 
 type Mode =
   | { kind: 'list' }
@@ -107,7 +114,7 @@ type Mode =
       warnings: string[];
     }
   | { kind: 'view'; quiz: MyQuiz }
-  | { kind: 'examSetup' }
+  | { kind: 'examSetup'; initialExamMode?: 'normal' | 'mistakes'; initialQuizId?: string }
   | { kind: 'examRun'; settings: ExamSettings; questions: ExamQuestion[]; initial?: ExamInitialState }
   | {
       kind: 'examResult';
@@ -287,6 +294,33 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     return map;
   }, [mergedQuizzes]);
 
+  const mistakeLedger = useMemo(
+    () => computeMistakeLedger(attempts, mergedQuizzes),
+    [attempts, mergedQuizzes]
+  );
+
+  const groupedMistakes = useMemo(
+    () => groupUnresolvedMistakesByQuiz(mergedQuizzes, mistakeLedger.unresolvedMistakes),
+    [mergedQuizzes, mistakeLedger.unresolvedMistakes]
+  );
+
+  const readyMistakesCountByQuizId = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const q of mergedQuizzes) {
+      const list = groupedMistakes.byQuizId[q.id] || [];
+      map[q.id] = list.filter((m) => isExamReady(m.question)).length;
+    }
+    return map;
+  }, [mergedQuizzes, groupedMistakes]);
+
+  const totalPendingMistakes = useMemo(() => {
+    const seen = new Set<string>();
+    for (const m of mistakeLedger.unresolvedMistakes) {
+      if (isExamReady(m.question)) seen.add(m.fp);
+    }
+    return seen.size;
+  }, [mistakeLedger.unresolvedMistakes]);
+
   const finish = (msg: string) => {
     setNotice(msg);
     setMode({ kind: 'list' });
@@ -340,6 +374,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   const getLatestScoreForQuiz = (quizId: string): QuizAttempt | null => {
     for (const a of attempts) {
+      if (isMistakeReviewAttempt(a)) continue;
       if (a.settings?.quizIds?.length === 1 && a.settings.quizIds[0] === quizId) {
         return a;
       }
@@ -366,6 +401,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         ownerId={profile.uid}
         quizzes={mergedQuizzes}
         attempts={attempts}
+        initialExamMode={mode.initialExamMode}
+        initialQuizId={mode.initialQuizId}
         onBack={() => setMode({ kind: 'list' })}
         onStart={(settings, questions) => {
           void deleteSessionSnapshot('exam_session');
@@ -426,7 +463,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               chatMessages: updatedMsgs,
               updatedAt: Date.now(),
             });
-          } else if (firstQuizId) {
+          } else if (firstQuizId && !mode.settings.mistakeReviewMode) {
             const matchedQuiz = mergedQuizzes.find((q) => q.id === firstQuizId);
             if (matchedQuiz && (matchedQuiz.quizKind === 'drill' || matchedQuiz.parentQuizId)) {
               const secKey = matchedQuiz.parentQuizId || matchedQuiz.id;
@@ -478,7 +515,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             setMode({ kind: 'list' });
             void refreshDraft();
           }}
-          onRetake={() => setMode({ kind: 'examSetup' })}
+          onRetake={() =>
+            setMode({
+              kind: 'examSetup',
+              initialExamMode: mode.settings.mistakeReviewMode ? 'mistakes' : 'normal',
+            })
+          }
           onCreateDrill={(exQ) =>
             setDrillModalTarget({
               question: { ...exQ, answer: exQ.choices?.[exQ.correctIndex] || '' },
@@ -1075,14 +1117,57 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <button
           type="button"
-          onClick={() => setMode({ kind: 'examSetup' })}
+          onClick={() => setMode({ kind: 'examSetup', initialExamMode: 'normal' })}
           disabled={quizzes.length === 0}
-          className="duo-btn sm:col-span-2 flex items-center gap-3 p-4 rounded-3xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-white text-right cursor-pointer disabled:opacity-50"
+          className="duo-btn flex items-center gap-3 p-4 rounded-3xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-white text-right cursor-pointer disabled:opacity-50"
         >
           <Play className="w-7 h-7 shrink-0" />
           <span>
-            <span className="block text-base font-black">بدء اختبار</span>
+            <span className="block text-base font-black">بدء اختبار (طبيعي)</span>
             <span className="block text-[11px] font-bold opacity-90">اختر نموذجاً أو امزج عدة نماذج، وحدد العدد والوقت</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (totalPendingMistakes === 0) return;
+            setMode({ kind: 'examSetup', initialExamMode: 'mistakes' });
+          }}
+          disabled={totalPendingMistakes === 0}
+          title={
+            totalPendingMistakes === 0
+              ? 'بنك الأسئلة الخاطئة فارغ — صححت جميع أخطائك السابقة'
+              : 'اختبر نفسك في الأسئلة التي أخطأت فيها لتصحيحها ونقلها للأجوبة الصحيحة'
+          }
+          className={`duo-btn flex items-center gap-3 p-4 rounded-3xl border-2 border-b-4 text-right transition-colors ${
+            totalPendingMistakes > 0
+              ? 'bg-[#FF9600] hover:bg-[#FFA524] border-[#E08000] text-white cursor-pointer'
+              : 'bg-[#F3F4F6] border-[#D1D5DB] text-[#6B7280] cursor-not-allowed opacity-85'
+          }`}
+        >
+          {totalPendingMistakes > 0 ? (
+            <AlertCircle className="w-7 h-7 shrink-0" />
+          ) : (
+            <Lock className="w-7 h-7 shrink-0 text-[#46A302]" />
+          )}
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center justify-between gap-2 text-base font-black">
+              <span>اختبار أخطائي</span>
+              <span
+                className={`px-2 py-0.5 rounded-xl text-[11px] font-black font-latin ${
+                  totalPendingMistakes > 0
+                    ? 'bg-white/25 text-white'
+                    : 'bg-[#D7FFB8] text-[#46A302]'
+                }`}
+              >
+                {totalPendingMistakes > 0 ? `${totalPendingMistakes} خطأ` : 'مكتمل ✓'}
+              </span>
+            </span>
+            <span className="block text-[11px] font-bold opacity-90">
+              {totalPendingMistakes > 0
+                ? 'حدد عدد أخطائك والوقت — والصح ينتقل للأجوبة الصحيحة ولوحة الشرف'
+                : 'بنك الأخطاء فارغ حالياً — لا يمكن الدخول حتى تسجّل أخطاء جديدة'}
+            </span>
           </span>
         </button>
         <button
@@ -1263,6 +1348,18 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                     >
                       <Play className="w-3.5 h-3.5" /> ابدأ
                     </button>
+                    {(readyMistakesCountByQuizId[q.id] || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setMode({ kind: 'examSetup', initialExamMode: 'mistakes', initialQuizId: q.id })
+                        }
+                        className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#FF9600] hover:bg-[#FFA524] border-2 border-b-4 border-[#E08000] text-xs font-black text-white cursor-pointer"
+                      >
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>أخطائي ({readyMistakesCountByQuizId[q.id]})</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setMode({ kind: 'view', quiz: q })}
@@ -1397,6 +1494,22 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                             >
                               <Play className="w-3.5 h-3.5" /> ابدأ التدريب
                             </button>
+                            {(readyMistakesCountByQuizId[child.id] || 0) > 0 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setMode({
+                                    kind: 'examSetup',
+                                    initialExamMode: 'mistakes',
+                                    initialQuizId: child.id,
+                                  })
+                                }
+                                className="duo-btn flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#FF9600] border-2 border-b-4 border-[#E08000] text-white text-[11px] font-black cursor-pointer"
+                              >
+                                <AlertCircle className="w-3.5 h-3.5" />
+                                <span>أخطائي ({readyMistakesCountByQuizId[child.id]})</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => setMode({ kind: 'view', quiz: child })}
@@ -1514,6 +1627,22 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       >
                         <Play className="w-3.5 h-3.5" /> ابدأ التدريب
                       </button>
+                      {(readyMistakesCountByQuizId[drill.id] || 0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMode({
+                              kind: 'examSetup',
+                              initialExamMode: 'mistakes',
+                              initialQuizId: drill.id,
+                            })
+                          }
+                          className="duo-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#FF9600] border-2 border-b-4 border-[#E08000] text-xs font-black text-white cursor-pointer"
+                        >
+                          <AlertCircle className="w-3.5 h-3.5" />
+                          <span>أخطائي ({readyMistakesCountByQuizId[drill.id]})</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setMode({ kind: 'view', quiz: drill })}

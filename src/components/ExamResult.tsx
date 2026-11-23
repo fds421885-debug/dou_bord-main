@@ -98,8 +98,15 @@ export const ExamResult: React.FC<Props> = ({
         />
       )}
       {state === 'saved' && (
-        <div className="flex items-center gap-2 p-3 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-xs font-extrabold text-[#46A302]">
-          <CheckCircle2 className="w-4 h-4" /> تم حفظ المحاولة، تجدها دائماً في «محاولاتي السابقة» لتراجعها.
+        <div className="flex flex-col gap-1 p-3 rounded-2xl bg-[#D7FFB8] border-2 border-[#58CC02] text-xs font-extrabold text-[#46A302]">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>
+              {settings.mistakeReviewMode && score > 0
+                ? `تم الحفظ بنجاح! انتقل ${score} سؤال من الأخطاء إلى رصيد الإجابات الصحيحة وتحدّثت نتيجتك في لوحة الشرف.`
+                : 'تم حفظ المحاولة، تجدها دائماً في «محاولاتي السابقة» لتراجعها.'}
+            </span>
+          </div>
         </div>
       )}
       {state === 'failed' && (

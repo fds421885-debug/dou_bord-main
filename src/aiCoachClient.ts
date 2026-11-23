@@ -153,7 +153,27 @@ export function subscribeCoachState(
   );
 }
 
-async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, timeoutMs = 45000): Promise<T> {
+function formatClientAiErrorMessage(rawMessage: unknown, httpStatus?: number): string {
+  const msg = typeof rawMessage === 'string' ? rawMessage.trim() : '';
+  if (
+    httpStatus === 503 ||
+    /503|UNAVAILABLE|high demand|overloaded|try again later/i.test(msg)
+  ) {
+    return 'خادم الذكاء الاصطناعي يواجه ضغطاً مؤقتاً حالياً. انتظر ثوانٍ قليلة ثم أعد المحاولة.';
+  }
+  if (httpStatus === 429 || /429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(msg)) {
+    return 'تم الوصول للحد المؤقت لطلبات الذكاء الاصطناعي حالياً. انتظر قليلاً ثم أعد المحاولة.';
+  }
+  if (httpStatus === 403 || /403|PERMISSION_DENIED|API_KEY_INVALID/i.test(msg)) {
+    return 'مفتاح الذكاء الاصطناعي على الخادم غير صالح أو يفتقد الصلاحية المطلوبة.';
+  }
+  if (msg && !msg.startsWith('{') && !msg.includes('"error"') && /[\u0600-\u06FF]/.test(msg)) {
+    return msg;
+  }
+  return `تعذر الاتصال بالمساعد الذكي مؤقتاً${httpStatus ? ` (${httpStatus})` : ''}. أعد المحاولة بعد لحظات.`;
+}
+
+async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, timeoutMs = 55000): Promise<T> {
   if (!isBackendServerDetected()) {
     throw new Error('BACKEND_UNAVAILABLE');
   }
@@ -162,35 +182,57 @@ async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, ti
     throw new Error('يلزم تسجيل الدخول لاستخدام المساعد الذكي.');
   }
   const idToken = await user.getIdToken(false);
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  const attemptFetch = async (): Promise<{ resp: Response; data: (T & { error?: string }) | null }> => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(resolveApiUrl(path), {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          ...body,
+          tokenProjectId: activeFirebaseConfig.projectId,
+          tokenApiKey: activeFirebaseConfig.apiKey,
+          tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
+        }),
+      });
+      const ct = resp.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('BACKEND_UNAVAILABLE');
+      }
+      const data = (await resp.json()) as T & { error?: string };
+      return { resp, data };
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
 
   try {
-    const resp = await fetch(resolveApiUrl(path), {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${idToken}`,
-      },
-      body: JSON.stringify({
-        ...body,
-        tokenProjectId: activeFirebaseConfig.projectId,
-        tokenApiKey: activeFirebaseConfig.apiKey,
-        tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
-      }),
-    });
-    const ct = resp.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      throw new Error('BACKEND_UNAVAILABLE');
+    let { resp, data } = await attemptFetch();
+    if (resp.status === 503) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      ({ resp, data } = await attemptFetch());
     }
-    const data = (await resp.json()) as T & { error?: string };
     if (!resp.ok) {
-      throw new Error(data?.error || `تعذر الاتصال بالمساعد الذكي (${resp.status})`);
+      throw new Error(formatClientAiErrorMessage(data?.error, resp.status));
     }
-    return data;
-  } finally {
-    window.clearTimeout(timer);
+    return data as T;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('استغرق المساعد الذكي وقتاً أطول من المعتاد بسبب ضغط الطلبات. أعد المحاولة الآن.');
+    }
+    if (err instanceof Error && err.message === 'BACKEND_UNAVAILABLE') {
+      throw err;
+    }
+    if (err instanceof Error) {
+      throw new Error(formatClientAiErrorMessage(err.message));
+    }
+    throw new Error('تعذر الاتصال بالمساعد الذكي مؤقتاً. أعد المحاولة بعد لحظات.');
   }
 }
 

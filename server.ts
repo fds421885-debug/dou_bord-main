@@ -5,10 +5,12 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import * as webpush from 'web-push';
 import {
+  AiCoachUpstreamError,
   isAiConfigured,
   runAiCoachAnalyze,
   runAiCoachChat,
   runAiCoachGenerateQuiz,
+  toFriendlyAiError,
   type AnalyzeRequestPayload,
   type ChatRequestPayload,
   type GenerateQuizRequestPayload,
@@ -1419,9 +1421,9 @@ async function startServer(): Promise<void> {
       const result = await runAiCoachAnalyze(body as unknown as AnalyzeRequestPayload);
       res.json({ ok: true, diagnosis: result });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل التحليل الذكي';
+      const friendly = err instanceof AiCoachUpstreamError ? err : toFriendlyAiError(err);
       console.error('/api/ai/analyze error:', err);
-      res.status(500).json({ error: msg });
+      res.status(friendly.httpStatus).json({ error: friendly.message });
     }
   });
 
@@ -1440,9 +1442,9 @@ async function startServer(): Promise<void> {
       const result = await runAiCoachGenerateQuiz(body as unknown as GenerateQuizRequestPayload);
       res.json({ ok: true, ...result });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل إنشاء اختبار التقوية';
+      const friendly = err instanceof AiCoachUpstreamError ? err : toFriendlyAiError(err);
       console.error('/api/ai/generate-quiz error:', err);
-      res.status(500).json({ error: msg });
+      res.status(friendly.httpStatus).json({ error: friendly.message });
     }
   });
 
@@ -1461,9 +1463,9 @@ async function startServer(): Promise<void> {
       const result = await runAiCoachChat(body as unknown as ChatRequestPayload);
       res.json({ ok: true, ...result });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'فشل الرد في المحادثة الذكية';
+      const friendly = err instanceof AiCoachUpstreamError ? err : toFriendlyAiError(err);
       console.error('/api/ai/chat error:', err);
-      res.status(500).json({ error: msg });
+      res.status(friendly.httpStatus).json({ error: friendly.message });
     }
   });
 

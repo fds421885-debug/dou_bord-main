@@ -1,6 +1,16 @@
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type, type GenerateContentParameters, type GenerateContentResponse } from '@google/genai';
 
-const MODEL_NAME = 'gemini-4-hydrogen';
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+
+export class AiCoachUpstreamError extends Error {
+  readonly httpStatus: number;
+  constructor(message: string, httpStatus = 500) {
+    super(message);
+    this.name = 'AiCoachUpstreamError';
+    this.httpStatus = httpStatus;
+  }
+}
 
 function getApiKey(): string {
   return (process.env.GEMINI_API_KEY || '').trim();
@@ -13,7 +23,7 @@ export function isAiConfigured(): boolean {
 function getAiClient(): GoogleGenAI {
   const apiKey = getApiKey();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server');
+    throw new AiCoachUpstreamError('خدمة المساعد الذكي غير مهيأة على الخادم حالياً.', 503);
   }
   return new GoogleGenAI({
     apiKey,
@@ -23,6 +33,205 @@ function getAiClient(): GoogleGenAI {
       },
     },
   });
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function extractGeminiErrorMeta(err: unknown): {
+  statusCode?: number;
+  statusText?: string;
+  message: string;
+} {
+  let statusCode: number | undefined;
+  let statusText: string | undefined;
+  let message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+
+  if (err && typeof err === 'object') {
+    const rec = err as Record<string, unknown>;
+    const rawCode = rec.status ?? rec.statusCode ?? rec.code;
+    if (typeof rawCode === 'number' && Number.isFinite(rawCode)) {
+      statusCode = rawCode;
+    } else if (typeof rawCode === 'string' && /^\d{3}$/.test(rawCode.trim())) {
+      statusCode = Number(rawCode.trim());
+    }
+    if (typeof rec.status === 'string' && !/^\d+$/.test(rec.status)) {
+      statusText = rec.status;
+    }
+  }
+
+  const trimmed = message.trim();
+  const braceStart = trimmed.indexOf('{');
+  const braceEnd = trimmed.lastIndexOf('}');
+  if (braceStart !== -1 && braceEnd > braceStart) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(braceStart, braceEnd + 1)) as {
+        error?: { code?: unknown; status?: unknown; message?: unknown };
+        code?: unknown;
+        status?: unknown;
+        message?: unknown;
+      };
+      const inner = parsed?.error || parsed;
+      if (typeof inner?.code === 'number' && !statusCode) {
+        statusCode = inner.code;
+      }
+      if (typeof inner?.status === 'string' && !statusText) {
+        statusText = inner.status;
+      }
+      if (typeof inner?.message === 'string' && inner.message.trim()) {
+        message = inner.message.trim();
+      }
+    } catch {
+      // Ignore malformed JSON inside error message
+    }
+  }
+
+  return { statusCode, statusText, message };
+}
+
+export function isTransientAiError(err: unknown): boolean {
+  const { statusCode, statusText, message } = extractGeminiErrorMeta(err);
+  if (statusCode !== undefined && [429, 500, 502, 503, 504].includes(statusCode)) {
+    return true;
+  }
+  const upperStatus = (statusText || '').toUpperCase();
+  if (['UNAVAILABLE', 'RESOURCE_EXHAUSTED', 'INTERNAL', 'DEADLINE_EXCEEDED'].includes(upperStatus)) {
+    return true;
+  }
+  return /high demand|overloaded|unavailable|temporarily|try again later|rate limit|resource_exhausted|quota|timeout|timed out|econnreset|etimedout|socket hang up|fetch failed/i.test(
+    message
+  );
+}
+
+export function toFriendlyAiError(err: unknown): AiCoachUpstreamError {
+  if (err instanceof AiCoachUpstreamError) {
+    return err;
+  }
+  const { statusCode, statusText, message } = extractGeminiErrorMeta(err);
+  const upperStatus = (statusText || '').toUpperCase();
+
+  if (
+    statusCode === 503 ||
+    upperStatus === 'UNAVAILABLE' ||
+    /high demand|overloaded|unavailable|try again later/i.test(message)
+  ) {
+    return new AiCoachUpstreamError(
+      'نموذج الذكاء الاصطناعي يواجه ضغطاً مؤقتاً حالياً بسبب كثرة الطلبات. انتظر ثوانٍ قليلة ثم أعد المحاولة.',
+      503
+    );
+  }
+
+  if (
+    statusCode === 429 ||
+    upperStatus === 'RESOURCE_EXHAUSTED' ||
+    /resource_exhausted|rate limit|quota/i.test(message)
+  ) {
+    return new AiCoachUpstreamError(
+      'تم الوصول إلى الحد المؤقت لطلبات الذكاء الاصطناعي حالياً. انتظر قليلاً ثم أعد المحاولة.',
+      429
+    );
+  }
+
+  if (
+    statusCode === 403 ||
+    upperStatus === 'PERMISSION_DENIED' ||
+    /api[_ ]?key.*invalid|api_key_invalid|permission_denied/i.test(message)
+  ) {
+    return new AiCoachUpstreamError(
+      'مفتاح الذكاء الاصطناعي على الخادم غير صالح أو يفتقد الصلاحية المطلوبة.',
+      403
+    );
+  }
+
+  if (statusCode === 404 || upperStatus === 'NOT_FOUND') {
+    return new AiCoachUpstreamError(
+      'نموذج الذكاء الاصطناعي المطلوب غير متاح حالياً على الخادم.',
+      502
+    );
+  }
+
+  if (
+    statusCode === 502 ||
+    statusCode === 504 ||
+    upperStatus === 'DEADLINE_EXCEEDED' ||
+    /timeout|timed out|econnreset|etimedout|socket hang up|fetch failed/i.test(message)
+  ) {
+    return new AiCoachUpstreamError(
+      'تعذر الاتصال بخادم الذكاء الاصطناعي مؤقتاً، أعد المحاولة بعد لحظات.',
+      503
+    );
+  }
+
+  const looksArabic = /[\u0600-\u06FF]/.test(message);
+  if (looksArabic && !message.includes('{') && message.length <= 240) {
+    return new AiCoachUpstreamError(message, 500);
+  }
+
+  return new AiCoachUpstreamError(
+    'حدث تعذر مؤقت أثناء معالجة طلب الذكاء الاصطناعي، يرجى المحاولة مرة أخرى بعد قليل.',
+    500
+  );
+}
+
+export async function generateContentWithRetry(
+  generateFn: (params: GenerateContentParameters) => Promise<GenerateContentResponse>,
+  request: Omit<GenerateContentParameters, 'model'>,
+  options?: {
+    sleep?: (ms: number) => Promise<void>;
+    primaryModel?: string;
+    fallbackModel?: string;
+  }
+): Promise<GenerateContentResponse> {
+  const sleep = options?.sleep || defaultSleep;
+  const primaryModel = options?.primaryModel || PRIMARY_MODEL;
+  const fallbackModel = options?.fallbackModel || FALLBACK_MODEL;
+
+  const attemptPlan: Array<{ model: string; waitBeforeMs: number }> = [
+    { model: primaryModel, waitBeforeMs: 0 },
+    { model: primaryModel, waitBeforeMs: 700 + Math.floor(Math.random() * 200) },
+    ...(fallbackModel !== primaryModel
+      ? [
+          { model: fallbackModel, waitBeforeMs: 250 },
+          { model: fallbackModel, waitBeforeMs: 900 + Math.floor(Math.random() * 200) },
+        ]
+      : []),
+  ];
+
+  let lastErr: unknown;
+  for (let i = 0; i < attemptPlan.length; i++) {
+    const step = attemptPlan[i];
+    if (step.waitBeforeMs > 0) {
+      await sleep(step.waitBeforeMs);
+    }
+    try {
+      return await generateFn({
+        ...request,
+        model: step.model,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientAiError(err)) {
+        throw toFriendlyAiError(err);
+      }
+      const nextStep = attemptPlan[i + 1];
+      if (nextStep) {
+        console.warn(
+          `[serverAi] Transient Gemini error on ${step.model}; retrying with ${nextStep.model}:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+  }
+
+  throw toFriendlyAiError(lastErr);
+}
+
+function generateContentResilient(
+  ai: GoogleGenAI,
+  request: Omit<GenerateContentParameters, 'model'>
+): Promise<GenerateContentResponse> {
+  return generateContentWithRetry((params) => ai.models.generateContent(params), request);
 }
 
 function safeParseJson<T = Record<string, unknown>>(raw: string | undefined | null): T {
@@ -143,8 +352,7 @@ export async function runAiCoachAnalyze(payload: AnalyzeRequestPayload): Promise
 5) إذا تكررت أخطاء الطالب في قسم أو طُلب له تقويم مهارات بنائية، اكتب له خطة «تقويم المهارات البنائية» متدرجة من الصفر (3 إلى 4 مراحل واضحة).
 استخدم أسلوباً مشجعاً دافئاً وواضحاً ينادي الطالب باسمه المفضل: ${preferredName}.`;
 
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
+  const response = await generateContentResilient(ai, {
     contents: [
       {
         role: 'user',
@@ -338,8 +546,7 @@ ${DUOBOARD_QUESTION_SCHEMA_GUIDE}
   "questions": [ ... ${count} أسئلة كاملة ومشروحة بالتفصيل الممل ومعها laws ورسوم figure/chart أو جدول تفاعلي عند مناسبتها ... ]
 }`;
 
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
+  const response = await generateContentResilient(ai, {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     config: {
       systemInstruction:
@@ -456,8 +663,7 @@ ${DUOBOARD_QUESTION_SCHEMA_GUIDE}`;
     ? `${payload.message}\n(ملاحظة النظام: الطالب يطلب الآن اختباراً سريعاً مدمجاً داخل المحادثة من حتى 5 أسئلة لقياس مستواه وتصحيح أخطائه في: ${payload.quickQuizTopic || 'الأخطاء السابقة'}).`
     : payload.message;
 
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
+  const response = await generateContentResilient(ai, {
     contents: [...historyParts, { role: 'user', parts: [{ text: userPrompt }] }],
     config: {
       systemInstruction,

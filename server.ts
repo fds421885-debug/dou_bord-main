@@ -904,6 +904,95 @@ function parseEntriesFromRestArray(
   return renumberEntries(out);
 }
 
+async function fetchPlatformMigrationDocPublicRest(
+  targetCfg: SanitizedFirebaseConfig
+): Promise<{
+  config: SanitizedFirebaseConfig;
+  previousConfigs: SanitizedFirebaseConfig[];
+  migratedRoomId: string | null;
+  migrationEpoch: string;
+} | null> {
+  try {
+    const dbName = encodeURIComponent((targetCfg.firestoreDatabaseId || '(default)').trim());
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      targetCfg.projectId
+    )}/databases/${dbName}/documents/platform/migration?key=${encodeURIComponent(targetCfg.apiKey)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1800);
+    const resp = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { fields?: Record<string, FirestoreRestVal> };
+    const fields = json?.fields;
+    if (!fields) return null;
+    const cfg = parseConfigFromRestMap(fields);
+    if (!cfg) return null;
+    const migrationEpoch = (fields.migrationEpoch?.stringValue || '').trim();
+    const migratedRoomId = (fields.migratedRoomId?.stringValue || '').trim() || null;
+    const prevList: SanitizedFirebaseConfig[] = [];
+    for (const item of fields.previousConfigs?.arrayValue?.values || []) {
+      const pCfg = parseConfigFromRestMap(item?.mapValue?.fields);
+      if (pCfg && !prevList.some((x) => isSameConfig(x, pCfg))) {
+        prevList.push(pCfg);
+      }
+    }
+    return { config: cfg, previousConfigs: prevList, migratedRoomId, migrationEpoch };
+  } catch {
+    return null;
+  }
+}
+
+async function hydratePlatformStateFromPublicMigration(): Promise<void> {
+  if (
+    platformState.revision > 1 &&
+    !isSameConfig(platformState.activeTargetConfig, defaultAppletConfig)
+  ) {
+    return;
+  }
+  const visited = new Set<string>();
+  let current: SanitizedFirebaseConfig = platformState.activeTargetConfig || defaultAppletConfig;
+  let resolved: SanitizedFirebaseConfig | null = null;
+  const collectedPrev: SanitizedFirebaseConfig[] = [...platformState.previousConfigs];
+  let resolvedRoomId: string | null = platformState.migratedRoomId ?? null;
+
+  for (let hop = 0; hop < 4; hop++) {
+    const key = `${current.projectId}::${current.firestoreDatabaseId || '(default)'}`;
+    if (visited.has(key)) break;
+    visited.add(key);
+
+    const doc = await fetchPlatformMigrationDocPublicRest(current);
+    if (!doc || doc.migrationEpoch !== CURRENT_DB_EPOCH) break;
+
+    for (const p of doc.previousConfigs) {
+      if (!collectedPrev.some((x) => isSameConfig(x, p))) {
+        collectedPrev.push(p);
+      }
+    }
+    if (doc.migratedRoomId) resolvedRoomId = doc.migratedRoomId;
+    resolved = doc.config;
+    if (isSameConfig(doc.config, current)) break;
+    if (!collectedPrev.some((x) => isSameConfig(x, current))) {
+      collectedPrev.push(current);
+    }
+    current = doc.config;
+  }
+
+  if (resolved && !isSameConfig(resolved, platformState.activeTargetConfig)) {
+    platformState.activeTargetConfig = resolved;
+    platformState.previousConfigs = collectedPrev
+      .filter((x) => !isSameConfig(x, resolved!))
+      .slice(0, 12);
+    platformState.migratedRoomId = resolvedRoomId;
+    platformState.revision = Math.max(2, platformState.revision + 1);
+    platformState.updatedAt = Date.now();
+    getOrCreateProjectQuotaRecord(resolved.projectId);
+    saveQuotaStateFile();
+    savePlatformState(platformState);
+  }
+}
+
+const bootPublicHydrationPromise = hydratePlatformStateFromPublicMigration().catch(() => undefined);
+
 async function fetchPlatformMigrationPointerRest(
   idToken: string,
   targetCfg: SanitizedFirebaseConfig
@@ -1301,7 +1390,11 @@ async function startServer(): Promise<void> {
     next();
   });
 
-  app.get('/api/platform-db', (_req: Request, res: Response) => {
+  app.get('/api/platform-db', async (_req: Request, res: Response) => {
+    await Promise.race([
+      bootPublicHydrationPromise,
+      new Promise<void>((resolve) => setTimeout(resolve, 1600)),
+    ]);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(buildPublicPayload(platformState));
   });

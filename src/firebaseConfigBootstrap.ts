@@ -107,6 +107,7 @@ export const SWITCH_REQUIRE_LOGIN_KEY = 'duoboard_switched_require_login_v1';
 export const LEGACY_STATIC_POOL_KEY = 'duoboard_static_programmer_pool_v1';
 export const PUBLIC_PLAYER_DBS_STORAGE_KEY = 'duoboard_public_player_dbs_v1';
 export const MANUAL_DB_PIN_KEY = 'duoboard_manual_db_pin_v1';
+export const SWITCH_LOOP_GUARD_KEY = 'duoboard_switch_loop_guard_v1';
 export const CURRENT_DB_EPOCH = 'qdrat1_base_v4_2026_11_19';
 
 export interface BootProgress {
@@ -411,6 +412,7 @@ export function wipeLegacyDatabaseStorage(): void {
   try {
     sessionStorage.removeItem('duoboard_auto_switched_to');
     sessionStorage.removeItem('duoboard_self_migrated_target');
+    sessionStorage.removeItem(SWITCH_LOOP_GUARD_KEY);
   } catch {
     // Ignore sessionStorage errors
   }
@@ -430,10 +432,51 @@ export function clearStaleRoomAndSessionKeys(): void {
   } catch {
     // Ignore localStorage errors
   }
+}
+
+export function isSwitchLoopBlocked(candidateTargetKey?: string): boolean {
   try {
-    sessionStorage.removeItem('duoboard_auto_switched_to');
+    const raw = sessionStorage.getItem(SWITCH_LOOP_GUARD_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as {
+      events?: Array<{ from: string; to: string; ts: number }>;
+    };
+    const now = Date.now();
+    const recent = (Array.isArray(parsed?.events) ? parsed.events : []).filter(
+      (e) => e && typeof e.ts === 'number' && now - e.ts < 25_000
+    );
+    if (recent.length >= 2) {
+      return true;
+    }
+    if (
+      candidateTargetKey &&
+      recent.some((e) => e.from === candidateTargetKey && now - e.ts < 25_000)
+    ) {
+      return true;
+    }
+    return false;
   } catch {
-    // Ignore sessionStorage errors
+    return false;
+  }
+}
+
+export function recordSwitchLoopEvent(fromTargetKey: string, toTargetKey: string): void {
+  try {
+    const raw = sessionStorage.getItem(SWITCH_LOOP_GUARD_KEY);
+    const parsed = raw
+      ? (JSON.parse(raw) as { events?: Array<{ from: string; to: string; ts: number }> })
+      : {};
+    const now = Date.now();
+    const recent = (Array.isArray(parsed?.events) ? parsed.events : []).filter(
+      (e) => e && typeof e.ts === 'number' && now - e.ts < 30_000
+    );
+    recent.push({ from: fromTargetKey, to: toTargetKey, ts: now });
+    sessionStorage.setItem(
+      SWITCH_LOOP_GUARD_KEY,
+      JSON.stringify({ events: recent.slice(-6) })
+    );
+  } catch {
+    // Ignore sessionStorage restrictions
   }
 }
 
@@ -892,12 +935,12 @@ export async function syncPlatformDbBeforeBoot(
   let chosenDocTs: number | undefined;
 
   const sCfg = serverPtr ? sanitizeFirebaseConfig(serverPtr.config) : null;
-  const lastAppliedTs = getLastAppliedBackupDocTs();
+  const resetToDefaultExplicit = Boolean(serverPtr?.resetToDefault);
 
   const restOverridesFreshServer =
     Boolean(restPtr) &&
     restPtr!.migrationEpoch === CURRENT_DB_EPOCH &&
-    restPtr!.updatedAtMs > lastAppliedTs &&
+    !resetToDefaultExplicit &&
     serverRevision <= 1 &&
     Boolean(sCfg && isSameFirebaseTarget(sCfg, defaultFirebaseConfig)) &&
     !isSameFirebaseTarget(restPtr!.config, defaultFirebaseConfig);
@@ -912,12 +955,12 @@ export async function syncPlatformDbBeforeBoot(
     }
   } else if (sCfg) {
     chosenTarget = sCfg;
-    chosenResetToDefault = Boolean(serverPtr?.resetToDefault);
+    chosenResetToDefault = resetToDefaultExplicit;
     chosenExtras = [
       ...(Array.isArray(serverPtr?.previousConfigs) ? serverPtr!.previousConfigs! : []),
       ...(restPtr?.previousConfigs ?? []),
     ];
-  } else if (restPtr && restPtr.updatedAtMs > lastAppliedTs) {
+  } else if (restPtr) {
     chosenTarget = restPtr.config;
     chosenResetToDefault = restPtr.resetToDefault;
     chosenExtras = restPtr.previousConfigs;
@@ -941,13 +984,22 @@ export async function syncPlatformDbBeforeBoot(
     clearManualDbPin();
   }
 
-  if (chosenTarget && !manualPinStillValid) {
+  const chosenTargetKey = chosenTarget ? firebaseTargetKey(chosenTarget) : '';
+  const currentTargetKey = firebaseTargetKey(currentStoredCfg);
+  const bootSwitchBlocked =
+    Boolean(chosenTarget && chosenTargetKey !== currentTargetKey) &&
+    isSwitchLoopBlocked(chosenTargetKey);
+
+  if (chosenTarget && !manualPinStillValid && !bootSwitchBlocked) {
     switchedOnBoot = persistResolvedTargetConfig({
       targetCfg: chosenTarget,
       resetToDefault: chosenResetToDefault,
       extras: chosenExtras,
       announcedDocTs: chosenDocTs,
     });
+    if (switchedOnBoot) {
+      recordSwitchLoopEvent(currentTargetKey, chosenTargetKey);
+    }
     if (switchedOnBoot) {
       let isSelfInitiated = false;
       try {

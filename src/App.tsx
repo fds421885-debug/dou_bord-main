@@ -54,9 +54,11 @@ import {
   isMasterProgrammerIdentity,
   isQuadNameValid,
   isSameFirebaseTarget,
+  isSwitchLoopBlocked,
   justConsolidatedFrom,
   markSwitchRequiresLogin,
   OperationType,
+  recordSwitchLoopEvent,
   resetToDefaultFirebaseConfig,
   resolveBackupAnnouncementsRest,
   resolveLatestFirestoreMigrationRest,
@@ -402,6 +404,9 @@ export default function App() {
 
       const switchRevision = String(incoming.revision || CURRENT_DB_EPOCH);
       const switchToken = `${targetKey}::${wantsDefault ? 'default' : 'custom'}::${switchRevision}`;
+      if (isSwitchLoopBlocked(targetKey)) {
+        return;
+      }
       try {
         if (sessionStorage.getItem('duoboard_auto_switched_to') === switchToken) {
           return;
@@ -410,6 +415,7 @@ export default function App() {
       } catch {
         // Ignore storage restrictions
       }
+      recordSwitchLoopEvent(firebaseTargetKey(activeFirebaseConfig), targetKey);
 
       switchingInProgressRef.current = true;
       if (incoming.backupDocTs) {
@@ -1146,9 +1152,9 @@ export default function App() {
       // Ignore a fresh-restarted default pointer (revision <= 1) while user is actively on a migrated custom DB
       if (
         (ptr.revision || 1) <= 1 &&
+        !ptr.resetToDefault &&
         isSameFirebaseTarget(ptr.config, defaultFirebaseConfig) &&
-        !isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig) &&
-        (counts?.playerDatabasesCount ?? 0) === 0
+        !isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig)
       ) {
         return;
       }

@@ -29,6 +29,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { buildLocalCoachAnalytics } from '../aiCoachAnalytics';
+import { MathText } from '../mathText';
 import {
   buildDirectMistakeReviewQuestions,
   buildFoundationalPlanFromDiagnosis,
@@ -1009,12 +1010,15 @@ export const SmartAssistantView: React.FC<Props> = ({
                         </span>
                       )}
                     </div>
-                    <p className="text-xs font-black text-[#3C3C3C] line-clamp-2 leading-relaxed">
-                      {m.question.text}
-                    </p>
-                    <p className="text-[11px] font-bold text-[#777777] truncate">
-                      إجابتك السابقة: <span className="text-[#EA2B2B]">{m.chosenAnswerText}</span>
-                    </p>
+                    <div className="text-xs font-black text-[#3C3C3C] line-clamp-2 leading-relaxed">
+                      <MathText text={m.question.text} inline />
+                    </div>
+                    <div className="text-[11px] font-bold text-[#777777] truncate">
+                      إجابتك السابقة:{' '}
+                      <span className="text-[#EA2B2B]">
+                        <MathText text={m.chosenAnswerText} inline />
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1385,7 +1389,7 @@ export const SmartAssistantView: React.FC<Props> = ({
                         : 'bg-white border-2 border-[#E5E5E5] text-[#3C3C3C]'
                     }`}
                   >
-                    {msg.text}
+                    <MathText text={msg.text} />
 
                     {msg.quickQuiz && (
                       <div className="mt-3 rounded-2xl border-2 border-[#A560E8] bg-[#FAF5FF] p-3 flex flex-col gap-2">

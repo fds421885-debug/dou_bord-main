@@ -62,16 +62,26 @@ const DUOBOARD_QUESTION_SCHEMA_GUIDE = `
    - "answer": نص الإجابة النهائية.
    - "laws": مصفوفة قوانين/قواعد عامة مساعدة للطالب بدون كشف الجواب النهائي، مثال: ["مساحة المثلث = (القاعدة × الارتفاع) ÷ 2"].
    - "explanation": شرح مفصل ومبسط خطوة بخطوة لماذا هذه الإجابة صحيحة.
-2. الإثراء البصري عند الحاجة (أضفه حين يخدم السؤال كالهندسة والبيانات والمقارنة):
-   - "figure": رسم هندسي متجهي دقيق { "title": "...", "grid": false, "points": [{"id":"A","x":0,"y":0,"label":"أ","labelPos":"bottom-left","dot":true}], "elements": [{"type":"polygon","points":["A","B","C"],"fill":"blue","fillOpacity":0.14,"stroke":"ink","sideLabels":["6 سم","8 سم",""]}] }.
-     العناصر المدعومة في figure.elements: polygon | segment | circle | arc | angle | label. الإحداثيات منطقية ومتناسبة ومغلقة بدقة.
+2. الإثراء البصري عند الحاجة (إلزامي 100% في الأسئلة الهندسية!):
+   - "figure": **إلزامي وجوباً** لأي سؤال هندسي أو يذكر «في الشكل المجاور» أو يصف مثلثاً/دائرة/وتراً/مماساً/أشكالاً متداخلة أو زوايا برؤوس مسماة! يُمنع ذكر «في الشكل المجاور» بدون كائن "figure" حقيقي.
+     البنية: { "title": "...", "grid": false, "points": [{"id":"A","x":0,"y":0,"label":"أ","labelPos":"bottom-left","dot":true}], "elements": [{"type":"polygon","points":["A","B","C"],"fill":"blue","fillOpacity":0.14,"stroke":"ink","sideLabels":["6 سم","8 سم",""]}] }.
+     العناصر المدعومة في figure.elements: polygon | segment | circle | arc | angle | label.
+     قواعد الدقة الهندسية للأشكال المتداخلة (احسب الإحداثيات بالمعادلات ولا تخمّن!):
+     * مثلث داخل دائرة مركزها O(0,0) ونصف قطرها r: كل رأس على المحيط يحقق x²+y² = r² تماماً (وإذا كان قائماً على القطر فضَع طرفي القطر (-r,0) و(r,0) والرأس الثالث على المحيط مع angle { "right": true }).
+     * دائرة تمس أضلاع مثلث من الداخل: استخدم المركز الداخلي Incenter:
+       - لمثلث متطابق الأضلاع طول ضلعه a=6: B(-3,0), C(3,0), A(0,5.196)، المركز O(0,1.732) ونصف القطر r=1.732.
+       - لمثلث قائم أضلاعه a,b ووتره c: نصف القطر r=(a+b-c)/2 والمركز O(r,r).
+       - لأي مثلث عام: المركز ((a·xA+b·xB+c·xC)/(a+b+c), (a·yA+b·yB+c·yC)/(a+b+c)) و r=2·المساحة/(a+b+c) بحيث تمس الدائرة الأضلاع الثلاثة بدقة تامة.
+     * وتر بعده العمودي d عن المركز O(0,0) في دائرة r: طرفا الوتر (-√(r²-d²), -d) و(+√(r²-d²), -d) مع عمود لمنتصفه وزاوية قائمة "right": true.
+     * للمناطق المظللة: الشكل الخارجي أولاً (fill:"blue", fillOpacity:0.32) ثم الداخلي بعده (fill:"white", fillOpacity:1).
+     * تسمية المثلث والرؤوس: اكتب في النص «المثلث $\\triangle\\text{ أ ب ج}$» أو «المثلث أ ب ج» وطابق الحروف نفسها حرفياً في figure.points مع labelPos مناسب للخارج وdot:true للرؤوس والمراكز.
    - "chart": رسم بياني { "type": "bar"|"hbar"|"line"|"pie", "title": "...", "xLabel": "...", "yLabel": "...", "labels": ["..."], "series": [{"name":"...","values":[10,20]}] }.
    - "table": لأسئلة الجدول التفاعلي { "title":"...", "hasHeaderRow":true, "headers":["القيمة","النسبة"], "rows":[[{"value":"50","isBlank":false},{"value":"","isBlank":true,"inputType":"number","cue":"س","expectedAnswer":"25"}]] }.
    - "explanationTable": { "title": "خطوات الحل", "headers": ["الخطوة","النتيجة"], "rows": [["...","..."]] }.
    - "explanationComparison": { "title": "المقارنة", "firstLabel": "القيمة الأولى", "firstValue": "...", "secondLabel": "القيمة الثانية", "secondValue": "...", "verdict": "القيمة الأولى أكبر" }.
    - "explanationChart" أو "explanationFigure": اختياريان للشرح البصري.
    - "sourceMistakeFp": (اختياري) ضع فيه معرف الخطأ "fp" بالضبط إذا كان السؤال مستخرجاً من قائمة أخطاء الطالب السابقة لتصحيحها وحذفها من الأخطاء عند إجابته بشكل صحيح.
-3. تأكد 100% من صحة الحسابات الرياضية وتطابق choices[correctIndex] مع الشرح وanswer.
+3. تأكد 100% من صحة الحسابات الرياضية وتطابق choices[correctIndex] مع الشرح وanswer، ومن وجود "figure" في كل سؤال هندسي قبل الإرسال.
 `;
 
 export interface AnalyzeRequestPayload {

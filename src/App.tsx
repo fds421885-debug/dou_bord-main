@@ -127,9 +127,12 @@ import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
 import {
   initPWA,
+  isNotificationsEnabledPref,
   requestNotificationPermissionSafe,
+  setNotificationsEnabledPref,
   subscribeBrowserToWebPush,
   triggerSystemNotification,
+  unsubscribeBrowserFromWebPush,
 } from './pwa';
 import {
   ensureLeaderboardPresence,
@@ -868,6 +871,7 @@ export default function App() {
 
   const pushInAppToast = useCallback(
     (toast: InAppNotificationToast) => {
+      if (!isNotificationsEnabledPref()) return;
       setInAppToasts((prev) => {
         if (prev.some((t) => t.id === toast.id)) return prev;
         return [toast, ...prev].slice(0, 4);
@@ -919,9 +923,26 @@ export default function App() {
 
     const syncPushSubscription = () => {
       if (!alive) return;
-      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
       const user = auth.currentUser;
       if (!user || user.uid !== uid) return;
+
+      if (!isNotificationsEnabledPref()) {
+        setInAppToasts([]);
+        void user
+          .getIdToken()
+          .then((idToken) => {
+            if (!idToken) return;
+            return unsubscribeBrowserFromWebPush(idToken, {
+              projectId: activeFirebaseConfig.projectId,
+              apiKey: activeFirebaseConfig.apiKey,
+              firestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId,
+            });
+          })
+          .catch(() => undefined);
+        return;
+      }
+
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
       void user
         .getIdToken()
         .then((idToken) => {
@@ -1069,6 +1090,7 @@ export default function App() {
     };
     window.addEventListener('online', handleOnlineReconnect);
     window.addEventListener('duoboard:notifications-granted', syncPushSubscription);
+    window.addEventListener('duoboard:notifications-pref-changed', syncPushSubscription);
 
     return () => {
       alive = false;
@@ -1080,6 +1102,7 @@ export default function App() {
       unsubChats();
       window.removeEventListener('online', handleOnlineReconnect);
       window.removeEventListener('duoboard:notifications-granted', syncPushSubscription);
+      window.removeEventListener('duoboard:notifications-pref-changed', syncPushSubscription);
     };
   }, [profile?.uid, profile?.fullNameQuad, pushInAppToast]);
 
@@ -2393,6 +2416,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
+                      setNotificationsEnabledPref(true);
                       void requestNotificationPermissionSafe().then((perm) => {
                         if (perm === 'granted' && typeof window !== 'undefined') {
                           window.dispatchEvent(new CustomEvent('duoboard:notifications-granted'));

@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Bell, BellOff, Check, Download, Share, Smartphone, X } from 'lucide-react';
 import {
   getNotificationPermission,
+  isNotificationsEnabledPref,
   requestNotificationPermissionSafe,
+  setNotificationsEnabledPref,
   useOnlineStatus,
   usePWAInstall,
   type NotificationPermState,
@@ -12,12 +14,18 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
   const { canNativeInstall, isInstalled, isIOS, promptInstall } = usePWAInstall();
   const isOnline = useOnlineStatus();
   const [perm, setPerm] = useState<NotificationPermState>(() => getNotificationPermission());
+  const [enabled, setEnabled] = useState<boolean>(() => isNotificationsEnabledPref());
   const [guideModal, setGuideModal] = useState<'ios' | 'desktop' | null>(null);
 
   useEffect(() => {
     const syncPerm = () => setPerm(getNotificationPermission());
+    const syncPref = () => setEnabled(isNotificationsEnabledPref());
     window.addEventListener('duoboard:notifications-granted', syncPerm);
-    return () => window.removeEventListener('duoboard:notifications-granted', syncPerm);
+    window.addEventListener('duoboard:notifications-pref-changed', syncPref);
+    return () => {
+      window.removeEventListener('duoboard:notifications-granted', syncPerm);
+      window.removeEventListener('duoboard:notifications-pref-changed', syncPref);
+    };
   }, []);
 
   const handleInstallClick = async () => {
@@ -29,12 +37,19 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
     }
   };
 
-  const handleEnableNotifications = async () => {
+  const handleTurnOnNotifications = async () => {
+    setNotificationsEnabledPref(true);
+    setEnabled(true);
     const next = await requestNotificationPermissionSafe();
     setPerm(next);
     if (next === 'granted' && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('duoboard:notifications-granted'));
     }
+  };
+
+  const handleTurnOffNotifications = () => {
+    setNotificationsEnabledPref(false);
+    setEnabled(false);
   };
 
   return (
@@ -46,36 +61,67 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
           </span>
         )}
 
-        {perm !== 'unsupported' && perm !== 'granted' && (
+        {!enabled ? (
           <button
             type="button"
-            onClick={() => void handleEnableNotifications()}
-            className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#FFF4CC] hover:bg-[#FFE999] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
-            title="تفعيل إشعارات الرسائل وطلبات الصداقة حتى أثناء وجودك في تطبيق آخر"
+            onClick={() => void handleTurnOnNotifications()}
+            className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#F7F7F7] hover:bg-[#EFEFEF] border-2 border-b-4 border-[#D9D9D9] text-[#666666] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
+            title="الإشعارات مغلقة حالياً — اضغط لتفعيل الإشعارات مجدداً"
+          >
+            <BellOff className="w-3.5 h-3.5" />
+            <span>{compact ? 'الإشعارات مغلقة' : 'الإشعارات مغلقة (اضغط للتفعيل)'}</span>
+          </button>
+        ) : perm === 'granted' ? (
+          <button
+            type="button"
+            onClick={handleTurnOffNotifications}
+            className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#D7FFB8] hover:bg-[#C6F69D] border-2 border-b-4 border-[#58CC02] text-[#3B8D00] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
+            title="الإشعارات مفعّلة — اضغط لإغلاق الإشعارات"
           >
             <Bell className="w-3.5 h-3.5" />
-            <span>{compact ? 'الإشعارات' : 'تفعيل إشعارات الجهاز'}</span>
+            <span>{compact ? 'الإشعارات مفعّلة' : 'الإشعارات مفعّلة (اضغط للإغلاق)'}</span>
           </button>
-        )}
-
-        {perm === 'granted' && !compact && (
-          <span
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-[#D7FFB8]/60 border border-[#58CC02]/50 text-[#46A302] text-[11px] font-black"
-            title="إشعارات الجهاز مفعّلة"
+        ) : perm === 'default' ? (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void handleTurnOnNotifications()}
+              className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#FFF4CC] hover:bg-[#FFE999] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
+              title="تفعيل إشعارات الرسائل وطلبات الصداقة حتى أثناء وجودك في تطبيق آخر أو إغلاق المتصفح"
+            >
+              <Bell className="w-3.5 h-3.5" />
+              <span>{compact ? 'تفعيل الإشعارات' : 'تفعيل إشعارات الجهاز'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleTurnOffNotifications}
+              className="duo-btn flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-xl bg-[#F7F7F7] hover:bg-[#EFEFEF] border-2 border-b-4 border-[#E5E5E5] text-[#777777] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
+              title="إغلاق وكتم الإشعارات"
+            >
+              <BellOff className="w-3.5 h-3.5" />
+              <span>{compact ? 'إغلاق' : 'إغلاق الإشعارات'}</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={handleTurnOffNotifications}
+            className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#E6F7FF] hover:bg-[#D5F0FF] border-2 border-b-4 border-[#1CB0F6] text-[#1899D6] text-[11px] sm:text-xs font-black whitespace-nowrap cursor-pointer"
+            title={
+              perm === 'denied'
+                ? 'إشعارات المتصفح محظورة من الإعدادات، وإشعارات التطبيق مفعّلة — اضغط للإغلاق'
+                : 'إشعارات التطبيق مفعّلة — اضغط للإغلاق'
+            }
           >
-            <Bell className="w-3 h-3" />
-            <span>الإشعارات مفعّلة</span>
-          </span>
-        )}
-
-        {perm === 'denied' && !compact && (
-          <span
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-[#F7F7F7] border border-[#E5E5E5] text-[#777777] text-[11px] font-bold"
-            title="تم حظر الإشعارات من إعدادات المتصفح"
-          >
-            <BellOff className="w-3 h-3" />
-            <span>الإشعارات محظورة</span>
-          </span>
+            <Bell className="w-3.5 h-3.5" />
+            <span>
+              {compact
+                ? 'إشعارات التطبيق'
+                : perm === 'denied'
+                ? 'محظورة من المتصفح (اضغط لإغلاق تنبيهات التطبيق)'
+                : 'إشعارات التطبيق مفعّلة (اضغط للإغلاق)'}
+            </span>
+          </button>
         )}
 
         {!isInstalled && (

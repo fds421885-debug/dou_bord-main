@@ -105,6 +105,29 @@ export function usePWAInstall() {
 
 export type NotificationPermState = NotificationPermission | 'unsupported';
 
+const NOTIFICATIONS_ENABLED_KEY = 'duoboard_notifications_enabled_v1';
+
+export function isNotificationsEnabledPref(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    return localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export function setNotificationsEnabledPref(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // Ignore storage restriction
+  }
+  window.dispatchEvent(
+    new CustomEvent('duoboard:notifications-pref-changed', { detail: { enabled } })
+  );
+}
+
 export function getNotificationPermission(): NotificationPermState {
   if (typeof window === 'undefined' || typeof Notification === 'undefined') {
     return 'unsupported';
@@ -133,6 +156,7 @@ export async function triggerSystemNotification(opts: {
   actionTab?: 'friends' | 'leaderboard';
   onInAppClick?: () => void;
 }): Promise<void> {
+  if (!isNotificationsEnabledPref()) return;
   if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
   if (Notification.permission !== 'granted') return;
 
@@ -202,6 +226,7 @@ export async function subscribeBrowserToWebPush(
 ): Promise<boolean> {
   if (
     !idToken ||
+    !isNotificationsEnabledPref() ||
     typeof window === 'undefined' ||
     typeof Notification === 'undefined' ||
     Notification.permission !== 'granted' ||
@@ -249,6 +274,49 @@ export async function subscribeBrowserToWebPush(
       }),
     });
     return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function unsubscribeBrowserFromWebPush(
+  idToken: string,
+  tokenMeta?: { projectId?: string; apiKey?: string; firestoreDatabaseId?: string }
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return false;
+  }
+
+  try {
+    const reg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<null>((r) => window.setTimeout(() => r(null), 2000)),
+    ]);
+    if (!reg || !reg.pushManager) return false;
+
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return true;
+
+    const endpoint = sub.endpoint;
+    if (idToken && endpoint) {
+      await fetch('/api/push/unsubscribe', {
+        method: 'POST',
+        keepalive: true,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          endpoint,
+          tokenProjectId: tokenMeta?.projectId,
+          tokenApiKey: tokenMeta?.apiKey,
+          tokenFirestoreDatabaseId: tokenMeta?.firestoreDatabaseId,
+        }),
+      }).catch(() => undefined);
+    }
+
+    await sub.unsubscribe().catch(() => false);
+    return true;
   } catch {
     return false;
   }

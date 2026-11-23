@@ -30,28 +30,46 @@ export function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
+function asExamText(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+  return '';
+}
+
 /** السؤال صالح للاختبار: خيارات صالحة أو جدول به فراغات متوقعة. */
-export function isExamReady(q: QuizQuestion): boolean {
-  if (!q.text.trim()) return false;
-  if (q.questionType === 'table' || (q.table && q.choices.length === 0)) {
-    return tableQuestionProblem(q.table) === null;
+export function isExamReady(q: QuizQuestion | null | undefined): boolean {
+  if (!q || typeof q !== 'object') return false;
+  if (!asExamText((q as { text?: unknown }).text).trim()) return false;
+  const choices = Array.isArray(q.choices) ? q.choices : [];
+  if (q.questionType === 'table' || (q.table && choices.length === 0)) {
+    try {
+      return tableQuestionProblem(q.table) === null;
+    } catch {
+      return false;
+    }
   }
   return (
-    q.choices.length >= 2 &&
+    choices.length >= 2 &&
+    Number.isInteger(q.correctIndex) &&
     q.correctIndex >= 0 &&
-    q.correctIndex < q.choices.length &&
-    q.choices.every((c) => c.trim().length > 0)
+    q.correctIndex < choices.length &&
+    choices.every((c) => asExamText(c).trim().length > 0)
   );
 }
 
-export function validPool(quiz: MyQuiz): QuizQuestion[] {
-  return (quiz.questions || []).filter(isExamReady);
+export function validPool(quiz: MyQuiz | null | undefined): QuizQuestion[] {
+  return (quiz && Array.isArray(quiz.questions) ? quiz.questions : []).filter(isExamReady);
 }
 
 /** أقصى عدد أسئلة متاح حسب الإعدادات الحالية. */
-export function availableCount(quizzes: MyQuiz[], settings: Pick<ExamSettings, 'sourceMode' | 'mixMode' | 'quizIds'>): number {
-  const chosen = quizzes.filter((q) => settings.quizIds.includes(q.id));
-  if (settings.sourceMode === 'mix' && settings.mixMode === 'onePerQuiz') {
+export function availableCount(
+  quizzes: MyQuiz[],
+  settings: Pick<ExamSettings, 'sourceMode' | 'mixMode' | 'quizIds'>
+): number {
+  const safeQuizzes = Array.isArray(quizzes) ? quizzes : [];
+  const quizIds = Array.isArray(settings?.quizIds) ? settings.quizIds : [];
+  const chosen = safeQuizzes.filter((q) => q && quizIds.includes(q.id));
+  if (settings?.sourceMode === 'mix' && settings?.mixMode === 'onePerQuiz') {
     return Math.min(EXAM_MAX_QUESTIONS, chosen.filter((q) => validPool(q).length > 0).length);
   }
   return Math.min(EXAM_MAX_QUESTIONS, chosen.reduce((n, q) => n + validPool(q).length, 0));
@@ -127,14 +145,15 @@ function normalizeQuestionText(text: string): string {
  * يعمل مع أسئلة الاختيار من متعدد وأسئلة الجداول (حتى لو أُزيل tableAnswers عند الحفظ الاحتياطي).
  */
 export function isAttemptQuestionAnswered(
-  q: ExamQuestion,
+  q: ExamQuestion | null | undefined,
   idx: number,
-  attempt: Pick<QuizAttempt, 'answers' | 'tableAnswers'>
+  attempt: Pick<QuizAttempt, 'answers' | 'tableAnswers'> | null | undefined
 ): boolean {
+  if (!q || typeof q !== 'object' || !attempt || typeof attempt !== 'object') return false;
   const ans = Array.isArray(attempt.answers) ? attempt.answers[idx] : undefined;
   if (q.questionType === 'table' || q.table) {
     const rawTableAns = attempt.tableAnswers?.[String(idx)];
-    if (rawTableAns && Object.keys(rawTableAns).length > 0) {
+    if (rawTableAns && typeof rawTableAns === 'object' && Object.keys(rawTableAns).length > 0) {
       return gradeTableQuestion(q.table, rawTableAns).answeredBlanks > 0;
     }
     return typeof ans === 'number' && ans >= 0;
@@ -545,27 +564,29 @@ export function buildExam(quizzes: MyQuiz[], settings: ExamSettings): ExamQuesti
 }
 
 export function isQuestionAnswered(
-  q: ExamQuestion,
+  q: ExamQuestion | null | undefined,
   idx: number,
   answers: number[],
   tableAnswers?: Record<string, Record<string, string>>
 ): boolean {
+  if (!q || typeof q !== 'object') return false;
   if (q.questionType === 'table' || q.table) {
     return gradeTableQuestion(q.table, tableAnswers?.[String(idx)]).answeredBlanks > 0;
   }
-  return (answers[idx] ?? -1) >= 0;
+  return Array.isArray(answers) && (answers[idx] ?? -1) >= 0;
 }
 
 export function isQuestionCorrect(
-  q: ExamQuestion,
+  q: ExamQuestion | null | undefined,
   idx: number,
   answers: number[],
   tableAnswers?: Record<string, Record<string, string>>
 ): boolean {
+  if (!q || typeof q !== 'object') return false;
   if (q.questionType === 'table' || q.table) {
     return gradeTableQuestion(q.table, tableAnswers?.[String(idx)]).isAllCorrect;
   }
-  return answers[idx] === q.correctIndex;
+  return Array.isArray(answers) && answers[idx] === q.correctIndex;
 }
 
 export function scoreExam(
@@ -573,31 +594,37 @@ export function scoreExam(
   answers: number[],
   tableAnswers?: Record<string, Record<string, string>>
 ): number {
-  return questions.reduce((n, q, i) => n + (isQuestionCorrect(q, i, answers, tableAnswers) ? 1 : 0), 0);
+  const qs = Array.isArray(questions) ? questions : [];
+  return qs.reduce((n, q, i) => n + (isQuestionCorrect(q, i, answers, tableAnswers) ? 1 : 0), 0);
 }
 
 export function defaultExamTitle(settings: ExamSettings): string {
+  const titles = Array.isArray(settings?.quizTitles) ? settings.quizTitles : [];
   const base =
-    settings.sourceMode === 'single' || settings.quizTitles.length === 1
-      ? settings.quizTitles[0] || 'اختبار'
-      : `مزيج من ${settings.quizTitles.length} نماذج`;
-  if (settings.mistakeReviewMode && !base.startsWith('تصحيح أخطاء')) {
+    settings?.sourceMode === 'single' || titles.length === 1
+      ? titles[0] || 'اختبار'
+      : `مزيج من ${titles.length} نماذج`;
+  if (settings?.mistakeReviewMode && !base.startsWith('تصحيح أخطاء')) {
     return `تصحيح أخطاء: ${base}`;
   }
   return base;
 }
 
 export function formatDuration(totalSec: number): string {
-  const s = Math.max(0, Math.round(totalSec));
+  const raw = Number(totalSec);
+  const s = Math.max(0, Math.round(Number.isFinite(raw) ? raw : 0));
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
 }
 
-export function describeTiming(s: Pick<ExamSettings, 'timing' | 'seconds'>): string {
-  if (s.timing === 'none') return 'بدون وقت';
-  if (s.timing === 'perQuestion') return `${s.seconds} ثانية لكل سؤال`;
-  return `${Math.round(s.seconds / 60)} دقيقة للاختبار كاملاً`;
+export function describeTiming(
+  s: Partial<Pick<ExamSettings, 'timing' | 'seconds'>> | null | undefined
+): string {
+  if (!s || typeof s !== 'object' || !s.timing || s.timing === 'none') return 'بدون وقت';
+  const secs = Math.max(0, Number(s.seconds) || 0);
+  if (s.timing === 'perQuestion') return `${secs} ثانية لكل سؤال`;
+  return `${Math.max(1, Math.round(secs / 60))} دقيقة للاختبار كاملاً`;
 }
 
 /* ------------------------- Firestore ------------------------- */

@@ -1,7 +1,14 @@
 import type { ExamQuestion, MyQuiz, QuizAttempt, QuizQuestion } from './types';
+import { unwrapRowArray } from './quizTable';
 
-function normalizeText(raw: string | undefined | null): string {
-  return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+function asSafeText(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+  return '';
+}
+
+function normalizeText(raw: unknown): string {
+  return asSafeText(raw).replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 function fnv1aHex(input: string, seed = 0x811c9dc5): string {
@@ -18,26 +25,43 @@ function fnv1aHex(input: string, seed = 0x811c9dc5): string {
  * مما يتيح مطابقة السؤال نفسه في المحاولات اللاحقة واختبارات المساعد الذكي.
  */
 export function computeQuestionFingerprint(
-  q: Pick<ExamQuestion | QuizQuestion, 'text' | 'questionType' | 'choices' | 'table'>
+  q: Pick<ExamQuestion | QuizQuestion, 'text' | 'questionType' | 'choices' | 'table'> | null | undefined
 ): string {
-  const normText = normalizeText(q.text);
+  if (!q || typeof q !== 'object') {
+    return 'err_invalid';
+  }
+  const normText = normalizeText((q as { text?: unknown }).text);
   const isTable = q.questionType === 'table' || Boolean(q.table);
 
   let detail = '';
-  if (isTable && q.table) {
-    const headers = (q.table.headers || []).map(normalizeText).join('|');
-    const rows = (q.table.rows || [])
+  if (isTable && q.table && typeof q.table === 'object') {
+    const headers = (Array.isArray(q.table.headers) ? q.table.headers : []).map(normalizeText).join('|');
+    const rawRows = Array.isArray(q.table.rows) ? q.table.rows : [];
+    const rows = rawRows
       .map((r) =>
-        r
-          .map((c) =>
-            c.isBlank ? `_${normalizeText(c.expectedAnswer || c.cue || '')}` : normalizeText(c.value)
-          )
+        unwrapRowArray(r)
+          .map((c) => {
+            if (!c || typeof c !== 'object') return normalizeText(c);
+            const cell = c as {
+              isBlank?: unknown;
+              expectedAnswer?: unknown;
+              cue?: unknown;
+              value?: unknown;
+            };
+            return cell.isBlank
+              ? `_${normalizeText(cell.expectedAnswer || cell.cue || '')}`
+              : normalizeText(cell.value);
+          })
           .join(',')
       )
       .join(';');
     detail = `tbl::${headers}::${rows}`;
   } else {
-    const choices = (q.choices || []).map(normalizeText).filter(Boolean).sort().join('|');
+    const choices = (Array.isArray(q.choices) ? q.choices : [])
+      .map(normalizeText)
+      .filter(Boolean)
+      .sort()
+      .join('|');
     detail = `mcq::${choices}`;
   }
 
@@ -96,20 +120,22 @@ export interface MistakeLedgerSummary {
 }
 
 function examQuestionToQuizQuestion(eq: ExamQuestion, fp: string): QuizQuestion {
-  const isTable = eq.questionType === 'table' || Boolean(eq.table);
+  const safeChoices = Array.isArray(eq.choices) ? eq.choices.map((c) => asSafeText(c)) : [];
+  const safeCorrectIdx = Number.isInteger(eq.correctIndex) ? eq.correctIndex : -1;
+  const isTable = eq.questionType === 'table' || Boolean(eq.table && safeChoices.length === 0);
   const answer = isTable
     ? 'إكمال الجدول الصحيح'
-    : eq.correctIndex >= 0 && eq.choices?.[eq.correctIndex]
-    ? eq.choices[eq.correctIndex]
+    : safeCorrectIdx >= 0 && safeChoices[safeCorrectIdx]
+    ? safeChoices[safeCorrectIdx]
     : '';
   return {
     id: `m_${fp}_${Math.random().toString(36).slice(2, 6)}`.slice(0, 64),
     ...(isTable ? { questionType: 'table' as const } : { questionType: 'mcq' as const }),
-    text: eq.text,
-    choices: Array.isArray(eq.choices) ? eq.choices.slice() : [],
-    correctIndex: isTable ? -1 : eq.correctIndex,
+    text: asSafeText((eq as { text?: unknown }).text),
+    choices: isTable ? [] : safeChoices,
+    correctIndex: isTable ? -1 : safeCorrectIdx,
     answer,
-    explanation: eq.explanation || '',
+    explanation: asSafeText((eq as { explanation?: unknown }).explanation),
     ...(Array.isArray(eq.laws) && eq.laws.length > 0 ? { laws: eq.laws.slice() } : {}),
     ...(eq.table ? { table: eq.table } : {}),
     ...(eq.chart ? { chart: eq.chart } : {}),
@@ -131,30 +157,37 @@ export function computeMistakeLedger(
   attempts: QuizAttempt[],
   quizzes: MyQuiz[] = []
 ): MistakeLedgerSummary {
+  const safeQuizzes = (Array.isArray(quizzes) ? quizzes : []).filter(
+    (qz): qz is MyQuiz => Boolean(qz && typeof qz === 'object' && qz.id)
+  );
+  const safeAttempts = (Array.isArray(attempts) ? attempts : []).filter(
+    (a): a is QuizAttempt => Boolean(a && typeof a === 'object')
+  );
+
   const quizById = new Map<string, MyQuiz>();
-  for (const qz of quizzes) {
+  for (const qz of safeQuizzes) {
     quizById.set(qz.id, qz);
   }
 
   const resolveSection = (
     sourceQuizId: string,
-    fallbackTitle: string
+    fallbackTitle: unknown
   ): { key: string; title: string } => {
     const qz = quizById.get(sourceQuizId);
     if (qz) {
       if (qz.parentQuizId && quizById.has(qz.parentQuizId)) {
         const parent = quizById.get(qz.parentQuizId)!;
-        return { key: parent.id, title: parent.title };
+        return { key: parent.id, title: asSafeText(parent.title) || 'قسم عام' };
       }
       if (!qz.parentQuizId && qz.quizKind !== 'drill') {
-        return { key: qz.id, title: qz.title };
+        return { key: qz.id, title: asSafeText(qz.title) || 'قسم عام' };
       }
     }
-    const clean = (fallbackTitle || 'قسم عام').trim();
+    const clean = asSafeText(fallbackTitle).trim() || 'قسم عام';
     return { key: sourceQuizId || `title:${clean}`, title: clean };
   };
 
-  const sortedAsc = attempts
+  const sortedAsc = safeAttempts
     .slice()
     .sort((a, b) => (Number(a.finishedAt) || 0) - (Number(b.finishedAt) || 0));
 
@@ -198,14 +231,15 @@ export function computeMistakeLedger(
   for (const att of sortedAsc) {
     const attQuestions = Array.isArray(att.questions) ? att.questions : [];
     const isReview = isMistakeReviewAttempt(att);
+    const quizIds = Array.isArray(att.settings?.quizIds) ? att.settings.quizIds : [];
     const quizRowKey =
-      att.settings?.quizIds?.length === 1
-        ? `q:${att.settings.quizIds[0]}`
-        : `t:${(att.title || 'اختبار').trim()}`;
+      quizIds.length === 1
+        ? `q:${quizIds[0]}`
+        : `t:${(asSafeText(att.title) || 'اختبار').trim()}`;
 
     if (attQuestions.length === 0) {
-      const t = Math.max(0, att.total || 0);
-      const c = Math.max(0, Math.min(t, att.score || 0));
+      const t = Math.max(0, Number(att.total) || 0);
+      const c = Math.max(0, Math.min(t, Number(att.score) || 0));
       rawTotalQuestions += t;
       rawCorrectAnswers += c;
       totalQuestions += t;
@@ -216,15 +250,17 @@ export function computeMistakeLedger(
 
     for (let qi = 0; qi < attQuestions.length; qi++) {
       const eq = attQuestions[qi];
+      if (!eq || typeof eq !== 'object') continue;
       const ans = Array.isArray(att.answers) ? att.answers[qi] : -1;
-      const isTable = eq.questionType === 'table' || Boolean(eq.table);
-      const isSkipped = ans === -1;
+      const safeChoices = Array.isArray(eq.choices) ? eq.choices : [];
+      const isTable = eq.questionType === 'table' || Boolean(eq.table && safeChoices.length === 0);
+      const isSkipped = ans === -1 || ans === undefined || ans === null;
       const isCorrect = isTable
         ? ans === 1
-        : typeof ans === 'number' && ans >= 0 && ans === eq.correctIndex;
+        : typeof ans === 'number' && Number.isInteger(ans) && ans >= 0 && ans === eq.correctIndex;
 
       const naturalFp = computeQuestionFingerprint(eq);
-      const taggedFp = eq.redeemsFingerprint?.trim() || '';
+      const taggedFp = typeof eq.redeemsFingerprint === 'string' ? eq.redeemsFingerprint.trim() : '';
       const matchedOpenFp =
         taggedFp && openByFp.has(taggedFp)
           ? taggedFp
@@ -232,23 +268,27 @@ export function computeMistakeLedger(
           ? naturalFp
           : '';
 
-      const sec = resolveSection(eq.sourceQuizId, eq.sourceTitle || att.title);
+      const sec = resolveSection(asSafeText(eq.sourceQuizId), asSafeText(eq.sourceTitle) || asSafeText(att.title));
       const hasLaws = Array.isArray(eq.laws) && eq.laws.length > 0;
       const finishedAt = Number(att.finishedAt) || Date.now();
 
+      const rawChosen =
+        typeof ans === 'number' && Number.isInteger(ans) && ans >= 0 && ans < safeChoices.length
+          ? asSafeText(safeChoices[ans])
+          : '';
       const chosenAnswerText = isTable
         ? ans === -1
           ? 'لم يُكمل الجدول'
           : 'إجابة جدول غير صحيحة'
-        : typeof ans === 'number' && ans >= 0 && eq.choices?.[ans]
-        ? eq.choices[ans]
-        : 'تم تخطي السؤال';
+        : rawChosen || 'تم تخطي السؤال';
 
+      const rawCorrect =
+        Number.isInteger(eq.correctIndex) && eq.correctIndex >= 0 && eq.correctIndex < safeChoices.length
+          ? asSafeText(safeChoices[eq.correctIndex])
+          : '';
       const correctAnswerText = isTable
         ? 'إكمال الجدول الصحيح'
-        : eq.correctIndex >= 0 && eq.choices?.[eq.correctIndex]
-        ? eq.choices[eq.correctIndex]
-        : eq.explanation?.slice(0, 100) || '';
+        : rawCorrect || asSafeText((eq as { explanation?: unknown }).explanation).slice(0, 100);
 
       if (isReview) {
         if (matchedOpenFp) {
@@ -361,18 +401,21 @@ export function computeMistakeLedger(
 export const OTHER_MISTAKES_QUIZ_ID = '__other_mistakes__';
 
 export function matchUnresolvedMistakesForQuiz(
-  quiz: MyQuiz,
+  quiz: MyQuiz | null | undefined,
   unresolvedMistakes: UnresolvedMistakeItem[]
 ): UnresolvedMistakeItem[] {
-  if (unresolvedMistakes.length === 0) return [];
+  if (!quiz || typeof quiz !== 'object' || !Array.isArray(unresolvedMistakes) || unresolvedMistakes.length === 0) {
+    return [];
+  }
   const fpSet = new Set<string>();
-  for (const qq of quiz.questions || []) {
-    if (qq?.text?.trim()) {
+  const qs = Array.isArray(quiz.questions) ? quiz.questions : [];
+  for (const qq of qs) {
+    if (qq && typeof qq === 'object' && asSafeText((qq as { text?: unknown }).text).trim()) {
       fpSet.add(computeQuestionFingerprint(qq));
     }
   }
   return unresolvedMistakes.filter(
-    (m) => m.sourceQuizId === quiz.id || fpSet.has(m.fp)
+    (m) => m && (m.sourceQuizId === quiz.id || fpSet.has(m.fp))
   );
 }
 
@@ -385,15 +428,18 @@ export function groupUnresolvedMistakesByQuiz(
 } {
   const byQuizId: Record<string, UnresolvedMistakeItem[]> = {};
   const claimedFps = new Set<string>();
+  const safeQuizzes = Array.isArray(quizzes) ? quizzes : [];
+  const safeMistakes = Array.isArray(unresolvedMistakes) ? unresolvedMistakes : [];
 
-  for (const qz of quizzes) {
-    const matched = matchUnresolvedMistakesForQuiz(qz, unresolvedMistakes);
+  for (const qz of safeQuizzes) {
+    if (!qz || typeof qz !== 'object' || !qz.id) continue;
+    const matched = matchUnresolvedMistakesForQuiz(qz, safeMistakes);
     byQuizId[qz.id] = matched;
     for (const m of matched) {
       claimedFps.add(m.fp);
     }
   }
 
-  const otherMistakes = unresolvedMistakes.filter((m) => !claimedFps.has(m.fp));
+  const otherMistakes = safeMistakes.filter((m) => m && !claimedFps.has(m.fp));
   return { byQuizId, otherMistakes };
 }

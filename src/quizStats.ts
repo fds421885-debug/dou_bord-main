@@ -135,10 +135,11 @@ export function filterAttemptsByCriteria(
       ? nowMs - 30 * 24 * 60 * 60 * 1000
       : 0;
 
-  return attempts.filter((a) => {
-    if (cutoff > 0 && (a.finishedAt || 0) < cutoff) return false;
+  return (Array.isArray(attempts) ? attempts : []).filter((a) => {
+    if (!a || typeof a !== 'object') return false;
+    if (cutoff > 0 && (Number(a.finishedAt) || 0) < cutoff) return false;
     if (quizFilterId !== 'all') {
-      const ids = a.settings?.quizIds ?? [];
+      const ids = Array.isArray(a.settings?.quizIds) ? a.settings.quizIds : [];
       if (!ids.includes(quizFilterId)) return false;
     }
     return true;
@@ -146,9 +147,12 @@ export function filterAttemptsByCriteria(
 }
 
 export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
-  const sortedAsc = attempts
+  const safeAttempts = (Array.isArray(attempts) ? attempts : []).filter(
+    (a): a is QuizAttempt => Boolean(a && typeof a === 'object')
+  );
+  const sortedAsc = safeAttempts
     .slice()
-    .sort((a, b) => (a.finishedAt || 0) - (b.finishedAt || 0));
+    .sort((a, b) => (Number(a.finishedAt) || 0) - (Number(b.finishedAt) || 0));
   const ledger = computeMistakeLedger(sortedAsc);
 
   let totalDurationSec = 0;
@@ -205,6 +209,7 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
     if (!isReview && Array.isArray(a.questions) && Array.isArray(a.answers)) {
       for (let qi = 0; qi < a.questions.length; qi++) {
         const q = a.questions[qi];
+        if (!q || typeof q !== 'object') continue;
         const ans = a.answers[qi];
         const isTable = q.questionType === 'table' || Boolean(q.table);
         const isCorrectQ = isTable ? ans === 1 : ans === q.correctIndex;
@@ -222,7 +227,8 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
       }
     }
 
-    const dt = new Date(a.finishedAt || Date.now());
+    const rawDate = new Date(Number(a.finishedAt) || Date.now());
+    const dt = Number.isNaN(rawDate.getTime()) ? new Date() : rawDate;
     const hour = dt.getHours();
     const slotMeta = TIME_SLOTS.find((s) => s.match(hour)) ?? TIME_SLOTS[TIME_SLOTS.length - 1];
     const sa = slotAccum.get(slotMeta.id)!;
@@ -240,13 +246,16 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
       da.correct += correct;
     }
 
+    const safeTitle = String(a.title ?? 'اختبار').trim() || 'اختبار';
+
     if (!isReview) {
+      const quizIds = Array.isArray(a.settings?.quizIds) ? a.settings.quizIds : [];
       const qKey =
-        a.settings?.quizIds?.length === 1
-          ? `q:${a.settings.quizIds[0]}`
-          : `t:${(a.title || 'اختبار').trim()}`;
+        quizIds.length === 1
+          ? `q:${quizIds[0]}`
+          : `t:${safeTitle}`;
       const qa = quizAccum.get(qKey) ?? {
-        title: a.title || 'اختبار',
+        title: safeTitle,
         attempts: 0,
         questions: 0,
         correct: 0,
@@ -264,8 +273,8 @@ export function computeQuizStats(attempts: QuizAttempt[]): ComputedQuizStats {
     rawPoints.push({
       attempt: a,
       index: i + 1,
-      title: a.title || 'اختبار',
-      finishedAt: a.finishedAt || 0,
+      title: safeTitle,
+      finishedAt: Number(a.finishedAt) || 0,
       dateLabel: dt.toLocaleDateString('ar-EG', { month: 'short', day: 'numeric' }),
       timeLabel: dt.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       pct,

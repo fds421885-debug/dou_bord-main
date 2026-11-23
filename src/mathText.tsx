@@ -11,10 +11,17 @@ type Seg = { kind: 'text' | 'math'; value: string; display: boolean };
 
 const ESC = '\uE000';
 
+function coerceMathText(src: unknown): string {
+  if (typeof src === 'string') return src;
+  if (typeof src === 'number' || typeof src === 'boolean') return String(src);
+  return '';
+}
+
 /** يغلّف تعبيرات LaTeX الواضحة المكتوبة خارج $...$ دون كسر النص العادي أو الأقواس. */
 function normalizeBareMath(src: string): string {
-  if (!src || (!src.includes('\\frac') && !src.includes('\\sqrt'))) return src;
-  const parts = splitMath(src);
+  const safeSrc = coerceMathText(src);
+  if (!safeSrc || (!safeSrc.includes('\\frac') && !safeSrc.includes('\\sqrt'))) return safeSrc;
+  const parts = splitMath(safeSrc);
   return parts
     .map((seg) => {
       if (seg.kind === 'math') {
@@ -29,7 +36,7 @@ function normalizeBareMath(src: string): string {
 }
 
 export function splitMath(src: string): Seg[] {
-  const safe = (src || '').replace(/\\\$/g, ESC);
+  const safe = coerceMathText(src).replace(/\\\$/g, ESC);
   const re = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$([^$\n]+?)\$/g;
   const segs: Seg[] = [];
   let last = 0;

@@ -169,11 +169,29 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   };
 
   const refreshDraft = async () => {
-    const d = await loadSessionSnapshot<StoredMyQuizDraft>('my_quiz_draft');
-    const has = d && d.ownerId === profile.uid && (d.title.trim() || d.questions.some((q) => q.text.trim()));
-    setDraft(has ? d : null);
-    const sess = await loadSessionSnapshot<StoredExamSession>('exam_session');
-    setSession(sess && sess.ownerId === profile.uid && sess.questions?.length ? sess : null);
+    try {
+      const d = await loadSessionSnapshot<StoredMyQuizDraft>('my_quiz_draft');
+      const hasTitle = Boolean(d && typeof d.title === 'string' && d.title.trim());
+      const hasQText = Boolean(
+        d &&
+          Array.isArray(d.questions) &&
+          d.questions.some((q) => q && typeof q.text === 'string' && q.text.trim())
+      );
+      const has = Boolean(d && d.ownerId === profile.uid && (hasTitle || hasQText));
+      setDraft(has ? d : null);
+      const sess = await loadSessionSnapshot<StoredExamSession>('exam_session');
+      setSession(
+        sess &&
+          sess.ownerId === profile.uid &&
+          Array.isArray(sess.questions) &&
+          sess.questions.length > 0 &&
+          sess.settings
+          ? sess
+          : null
+      );
+    } catch (err) {
+      console.error('refreshDraft error', err);
+    }
   };
 
   useEffect(() => {
@@ -181,8 +199,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     void reloadMetaOverrides();
     // 1) نعرض النسخة المحلية فوراً (تعمل حتى لو الحصة منتهية)
     void loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').then((snap) => {
-      if (alive && snap && snap.ownerId === profile.uid) {
-        setQuizzes(snap.quizzes.map(decodeMyQuizFromFirestore));
+      if (alive && snap && snap.ownerId === profile.uid && Array.isArray(snap.quizzes)) {
+        setQuizzes(
+          snap.quizzes
+            .filter((x): x is MyQuiz => Boolean(x && typeof x === 'object'))
+            .map(decodeMyQuizFromFirestore)
+        );
         setLoading(false);
       }
     });
@@ -193,7 +215,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       query(collection(db, 'users', profile.uid, 'myQuizzes'), where('ownerId', '==', profile.uid)),
       (snap) => {
         const list: MyQuiz[] = [];
-        snap.forEach((d) => list.push(decodeMyQuizFromFirestore(d.data() as MyQuiz)));
+        snap.forEach((d) => {
+          const data = d.data() as MyQuiz;
+          if (data && typeof data === 'object') {
+            list.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
+          }
+        });
         list.sort((a, b) => getTimestampMillis(b.updatedAt) - getTimestampMillis(a.updatedAt));
         setQuizzes(list);
         setLoading(false);
@@ -214,16 +241,25 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       }
     );
     void loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts').then((snap) => {
-      if (alive && snap && snap.ownerId === profile.uid) {
-        setAttempts(snap.attempts.map(decodeExamAttemptFromFirestore));
+      if (alive && snap && snap.ownerId === profile.uid && Array.isArray(snap.attempts)) {
+        setAttempts(
+          snap.attempts
+            .filter((x): x is QuizAttempt => Boolean(x && typeof x === 'object'))
+            .map(decodeExamAttemptFromFirestore)
+        );
       }
     });
     const unsubAttempts = onSnapshot(
       query(collection(db, 'users', profile.uid, 'quizAttempts'), where('ownerId', '==', profile.uid)),
       (snap) => {
         const list: QuizAttempt[] = [];
-        snap.forEach((d) => list.push(decodeExamAttemptFromFirestore(d.data() as QuizAttempt)));
-        list.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+        snap.forEach((d) => {
+          const data = d.data() as QuizAttempt;
+          if (data && typeof data === 'object') {
+            list.push(decodeExamAttemptFromFirestore({ ...data, id: data.id || d.id }));
+          }
+        });
+        list.sort((a, b) => (Number(b.finishedAt) || 0) - (Number(a.finishedAt) || 0));
         setAttempts(list);
         void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, list).catch(() => undefined);
         void saveSessionSnapshot({
@@ -238,7 +274,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       }
     );
     const unsubStarred = subscribeStarredQuestions(profile.uid, (items) => {
-      if (alive) setStarredItems(items);
+      if (alive) setStarredItems(Array.isArray(items) ? items : []);
     });
     return () => {
       alive = false;
@@ -250,18 +286,30 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   }, [profile.uid]);
 
   const mergedQuizzes = useMemo<MyQuiz[]>(() => {
-    return quizzes.map((q) => {
-      const ov = metaOverrides[q.id];
-      if (!ov) return q;
-      return {
-        ...q,
-        parentQuizId: q.parentQuizId ?? ov.parentQuizId,
-        quizKind: q.quizKind ?? ov.quizKind,
-        drillStyle: q.drillStyle ?? ov.drillStyle,
-        sourceStarredId: q.sourceStarredId ?? ov.sourceStarredId,
-        ruleTitle: q.ruleTitle ?? ov.ruleTitle,
-      };
-    });
+    return (Array.isArray(quizzes) ? quizzes : [])
+      .filter((q): q is MyQuiz => Boolean(q && typeof q === 'object' && q.id))
+      .map((q) => {
+        const ov = metaOverrides[q.id];
+        const safeQuestions = Array.isArray(q.questions) ? q.questions : [];
+        const base: MyQuiz = {
+          ...q,
+          title: typeof q.title === 'string' ? q.title : String((q as { title?: unknown }).title ?? 'اختبار'),
+          questions: safeQuestions,
+          questionCount:
+            typeof q.questionCount === 'number' && Number.isFinite(q.questionCount)
+              ? q.questionCount
+              : safeQuestions.length,
+        };
+        if (!ov) return base;
+        return {
+          ...base,
+          parentQuizId: base.parentQuizId ?? ov.parentQuizId,
+          quizKind: base.quizKind ?? ov.quizKind,
+          drillStyle: base.drillStyle ?? ov.drillStyle,
+          sourceStarredId: base.sourceStarredId ?? ov.sourceStarredId,
+          ruleTitle: base.ruleTitle ?? ov.ruleTitle,
+        };
+      });
   }, [quizzes, metaOverrides]);
 
   const { mainQuizzes, childrenByParentId, standaloneDrills } = useMemo(() => {
@@ -286,7 +334,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const drillsByStarredId = useMemo<Record<string, MyQuiz[]>>(() => {
     const map: Record<string, MyQuiz[]> = {};
     for (const q of mergedQuizzes) {
-      const sid = q.sourceStarredId?.trim();
+      const sid = typeof q.sourceStarredId === 'string' ? q.sourceStarredId.trim() : '';
       if (!sid) continue;
       if (!map[sid]) map[sid] = [];
       map[sid].push(q);
@@ -294,31 +342,62 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     return map;
   }, [mergedQuizzes]);
 
-  const mistakeLedger = useMemo(
-    () => computeMistakeLedger(attempts, mergedQuizzes),
-    [attempts, mergedQuizzes]
-  );
+  const mistakeLedger = useMemo(() => {
+    try {
+      return computeMistakeLedger(attempts, mergedQuizzes);
+    } catch (err) {
+      console.error('computeMistakeLedger fallback triggered:', err);
+      return {
+        totalQuestions: 0,
+        correctAnswers: 0,
+        wrongAnswers: 0,
+        skippedAnswers: 0,
+        rawTotalQuestions: 0,
+        rawCorrectAnswers: 0,
+        correctedMistakesCount: 0,
+        unresolvedMistakes: [],
+        redeemedByQuizRowKey: {},
+        redeemedBySectionKey: {},
+        redeemedMcqCount: 0,
+        redeemedTableCount: 0,
+        redeemedWithLawsCount: 0,
+      };
+    }
+  }, [attempts, mergedQuizzes]);
 
-  const groupedMistakes = useMemo(
-    () => groupUnresolvedMistakesByQuiz(mergedQuizzes, mistakeLedger.unresolvedMistakes),
-    [mergedQuizzes, mistakeLedger.unresolvedMistakes]
-  );
+  const groupedMistakes = useMemo(() => {
+    try {
+      return groupUnresolvedMistakesByQuiz(mergedQuizzes, mistakeLedger.unresolvedMistakes);
+    } catch (err) {
+      console.error('groupUnresolvedMistakesByQuiz fallback triggered:', err);
+      return { byQuizId: {}, otherMistakes: [] };
+    }
+  }, [mergedQuizzes, mistakeLedger.unresolvedMistakes]);
 
   const readyMistakesCountByQuizId = useMemo(() => {
     const map: Record<string, number> = {};
-    for (const q of mergedQuizzes) {
-      const list = groupedMistakes.byQuizId[q.id] || [];
-      map[q.id] = list.filter((m) => isExamReady(m.question)).length;
+    try {
+      for (const q of mergedQuizzes) {
+        const list = groupedMistakes.byQuizId[q.id] || [];
+        map[q.id] = list.filter((m) => m && isExamReady(m.question)).length;
+      }
+    } catch (err) {
+      console.error('readyMistakesCountByQuizId fallback triggered:', err);
     }
     return map;
   }, [mergedQuizzes, groupedMistakes]);
 
   const totalPendingMistakes = useMemo(() => {
-    const seen = new Set<string>();
-    for (const m of mistakeLedger.unresolvedMistakes) {
-      if (isExamReady(m.question)) seen.add(m.fp);
+    try {
+      const seen = new Set<string>();
+      for (const m of mistakeLedger.unresolvedMistakes) {
+        if (m && isExamReady(m.question)) seen.add(m.fp);
+      }
+      return seen.size;
+    } catch (err) {
+      console.error('totalPendingMistakes fallback triggered:', err);
+      return 0;
     }
-    return seen.size;
   }, [mistakeLedger.unresolvedMistakes]);
 
   const finish = (msg: string) => {
@@ -336,13 +415,14 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${quiz.title.replace(/[^\w\u0600-\u06FF\- ]+/g, '').trim() || 'quiz'}.json`;
+    a.download = `${String(quiz.title || 'quiz').replace(/[^\w\u0600-\u06FF\- ]+/g, '').trim() || 'quiz'}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const startSingleQuizNow = (quiz: MyQuiz, showLawsOverride?: boolean) => {
-    const readyPool = quiz.questions.filter(isExamReady);
+    const safeQuestions = Array.isArray(quiz.questions) ? quiz.questions : [];
+    const readyPool = safeQuestions.filter(isExamReady);
     if (readyPool.length === 0) {
       setNotice('هذا الاختبار لا يحتوي أسئلة جاهزة للحل بعد.');
       return;
@@ -374,8 +454,10 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   const getLatestScoreForQuiz = (quizId: string): QuizAttempt | null => {
     for (const a of attempts) {
+      if (!a || typeof a !== 'object') continue;
       if (isMistakeReviewAttempt(a)) continue;
-      if (a.settings?.quizIds?.length === 1 && a.settings.quizIds[0] === quizId) {
+      const ids = Array.isArray(a.settings?.quizIds) ? a.settings.quizIds : [];
+      if (ids.length === 1 && ids[0] === quizId) {
         return a;
       }
     }
@@ -669,7 +751,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             {qq.figure && <FigureView figure={qq.figure} />}
             {qq.questionType === 'table' && qq.table ? (
               <QuestionTableView table={qq.table} mode="preview" />
-            ) : qq.choices.length > 0 ? (
+            ) : Array.isArray(qq.choices) && qq.choices.length > 0 ? (
               <div className="flex flex-col gap-1.5">
                 {qq.choices.map((c, ci) => (
                   <div key={ci} className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${ci === qq.correctIndex ? 'bg-[#D7FFB8] border-[#58CC02] text-[#46A302]' : 'bg-white border-[#E5E5E5] text-[#3C3C3C]'}`}>
@@ -1062,7 +1144,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
                   {isTable && qq.table ? (
                     <QuestionTableView table={qq.table} mode="preview" />
-                  ) : qq.choices.length > 0 ? (
+                  ) : Array.isArray(qq.choices) && qq.choices.length > 0 ? (
                     <div className="flex flex-col gap-1.5">
                       {qq.choices.map((c, ci) => (
                         <div
@@ -1194,14 +1276,19 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         </button>
       </div>
 
-      {session && (
+      {session && Array.isArray(session.questions) && session.questions.length > 0 && (
         <div className="rounded-2xl border-2 border-[#A560E8] bg-[#F5ECFF] p-3 flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-extrabold text-[#5C1A99]">
             {session.finished
               ? 'لديك نتيجة اختبار لم تُحفظ بعد.'
               : `لديك اختبار غير مكتمل (${
                   session.questions.filter((qq, i) =>
-                    isQuestionAnswered(qq, i, session.answers, session.tableAnswers)
+                    isQuestionAnswered(
+                      qq,
+                      i,
+                      Array.isArray(session.answers) ? session.answers : [],
+                      session.tableAnswers
+                    )
                   ).length
                 } من ${session.questions.length} مُجاب) — تابع من حيث توقفت.`}
           </span>
@@ -1718,13 +1805,18 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           {attempts.slice(0, 30).map((a) => {
             const pct = a.total > 0 ? Math.round((a.score / a.total) * 100) : 0;
             const tone = pct >= 85 ? 'text-[#46A302]' : pct >= 50 ? 'text-[#8A6500]' : 'text-[#EA2B2B]';
+            const finishedMs = Number(a.finishedAt);
+            const dateStr =
+              Number.isFinite(finishedMs) && finishedMs > 0
+                ? new Date(finishedMs).toLocaleString('ar')
+                : 'سابقاً';
             return (
               <div key={a.id} className={`${card} p-4 flex flex-col gap-2`}>
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <h4 className="text-sm font-black text-[#3C3C3C] truncate">{a.title}</h4>
+                    <h4 className="text-sm font-black text-[#3C3C3C] truncate">{a.title || 'اختبار سابق'}</h4>
                     <p className="text-[11px] font-extrabold text-[#777777]">
-                      {new Date(a.finishedAt).toLocaleString('ar')} · {describeTiming(a.settings)} · {formatDuration(a.durationSec)}
+                      {dateStr} · {describeTiming(a.settings)} · {formatDuration(a.durationSec)}
                     </p>
                   </div>
                   <div dir="ltr" className={`text-lg font-black font-latin shrink-0 ${tone}`}>

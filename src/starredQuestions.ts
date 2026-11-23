@@ -57,10 +57,13 @@ function fnv1aHex(input: string): string {
   return (hash >>> 0).toString(36);
 }
 
-export function computeStarredQuestionId(q: Pick<QuizQuestion | ExamQuestion, 'text' | 'choices' | 'table'>): string {
+export function computeStarredQuestionId(
+  q: Pick<QuizQuestion | ExamQuestion, 'text' | 'choices' | 'table'> | null | undefined
+): string {
+  if (!q || typeof q !== 'object') return `star_empty`;
   const signature = JSON.stringify({
-    t: (q.text || '').trim().slice(0, 300),
-    c: Array.isArray(q.choices) ? q.choices.slice(0, 4).map((x) => x.trim().slice(0, 80)) : [],
+    t: String((q as { text?: unknown }).text ?? '').trim().slice(0, 300),
+    c: Array.isArray(q.choices) ? q.choices.slice(0, 4).map((x) => String(x ?? '').trim().slice(0, 80)) : [],
     tb: q.table?.rows ? q.table.rows.length : 0,
   });
   return `star_${fnv1aHex(signature)}`;
@@ -214,7 +217,9 @@ export function subscribeStarredQuestions(
 
   void loadLocalStarredQuestions(ownerId).then((items) => {
     if (!alive) return;
-    const decoded = items.map(decodeStarredQuestionFromFirestore);
+    const decoded = (Array.isArray(items) ? items : [])
+      .filter((x): x is StarredQuestion => Boolean(x && typeof x === 'object' && x.question))
+      .map(decodeStarredQuestionFromFirestore);
     localCache = decoded;
     if (decoded.length > 0) onItems(decoded);
   });
@@ -225,8 +230,13 @@ export function subscribeStarredQuestions(
     (snap) => {
       if (!alive) return;
       const remote: StarredQuestion[] = [];
-      snap.forEach((d) => remote.push(decodeStarredQuestionFromFirestore(d.data() as StarredQuestion)));
-      remote.sort((a, b) => (b.starredAt || 0) - (a.starredAt || 0));
+      snap.forEach((d) => {
+        const data = d.data() as StarredQuestion;
+        if (data && typeof data === 'object' && data.question) {
+          remote.push(decodeStarredQuestionFromFirestore(data));
+        }
+      });
+      remote.sort((a, b) => (Number(b.starredAt) || 0) - (Number(a.starredAt) || 0));
 
       onItems(remote);
       void saveLocalStarredQuestions(ownerId, remote);

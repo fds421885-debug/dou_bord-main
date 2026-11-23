@@ -170,6 +170,9 @@ interface ErrorBoundaryState {
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
+  resetKey?: string;
+  onResetToHome?: () => void;
+  compact?: boolean;
 }
 
 class AppErrorBoundary extends Component<
@@ -182,17 +185,31 @@ class AppErrorBoundary extends Component<
     return { hasError: true };
   }
 
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    console.error('AppErrorBoundary caught error:', error, info.componentStack);
+  }
+
+  componentDidUpdate(prevProps: ErrorBoundaryProps): void {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
+  }
+
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center p-6 bg-white">
+        <div
+          className={`${
+            this.props.compact ? 'py-12' : 'min-h-screen'
+          } flex items-center justify-center p-6 bg-white`}
+        >
           <div className="duo-card max-w-md w-full p-8 text-center flex flex-col items-center gap-4">
             <DuoOwlEmblem className="w-16 h-16" />
             <h1 className="text-xl font-black text-[#3C3C3C]">
               حدث خطأ غير متوقع
             </h1>
             <p className="text-sm font-bold text-[#777777]">
-              يرجى تحديث الصفحة لإعادة الاتصال واستكمال العمل.
+              يرجى تحديث الصفحة أو العودة للرئيسية لاستكمال العمل.
             </p>
             <div className="flex flex-wrap items-center justify-center gap-3 w-full">
               <button
@@ -202,6 +219,18 @@ class AppErrorBoundary extends Component<
               >
                 تحديث الصفحة
               </button>
+              {this.props.onResetToHome && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    this.setState({ hasError: false });
+                    this.props.onResetToHome?.();
+                  }}
+                  className="duo-btn px-5 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] font-black cursor-pointer"
+                >
+                  العودة للرئيسية
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2822,7 +2851,13 @@ export default function App() {
               />
             </div>
           ) : tab === 'quizzes' ? (
-            <MyQuizzesView profile={profile} />
+            <AppErrorBoundary
+              compact
+              resetKey={`${tab}:${profile.uid}`}
+              onResetToHome={() => setTab('home')}
+            >
+              <MyQuizzesView profile={profile} />
+            </AppErrorBoundary>
           ) : tab === 'leaderboard' ? (
             <LeaderboardView
               profile={profile}

@@ -660,33 +660,50 @@ export async function compressImageToDataUrl(file: File): Promise<string> {
 
 export function formatTimestamp(ts: unknown): string {
   if (!ts) return 'الآن';
-  if (
-    typeof ts === 'object' &&
-    ts !== null &&
-    'toDate' in ts &&
-    typeof (ts as { toDate: () => Date }).toDate === 'function'
-  ) {
-    const d = (ts as { toDate: () => Date }).toDate();
-    return d.toLocaleDateString('ar-SA', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  try {
+    let d: Date | null = null;
+    if (ts instanceof Date) {
+      d = ts;
+    } else if (typeof ts === 'number' && Number.isFinite(ts) && ts > 0) {
+      d = new Date(ts);
+    } else if (typeof ts === 'object' && ts !== null) {
+      if ('toDate' in ts && typeof (ts as { toDate: () => Date }).toDate === 'function') {
+        d = (ts as { toDate: () => Date }).toDate();
+      } else if ('seconds' in ts && Number.isFinite(Number((ts as { seconds: unknown }).seconds))) {
+        d = new Date(Number((ts as { seconds: unknown }).seconds) * 1000);
+      }
+    }
+    if (d && !Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString('ar-SA', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+  } catch {
+    // Fallback below
   }
   return 'الآن';
 }
 
 export function getTimestampMillis(ts: unknown): number {
   if (!ts) return 0;
-  if (
-    typeof ts === 'object' &&
-    ts !== null &&
-    'toMillis' in ts &&
-    typeof (ts as { toMillis: () => number }).toMillis === 'function'
-  ) {
-    return (ts as { toMillis: () => number }).toMillis();
+  try {
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (ts instanceof Date) return Number.isNaN(ts.getTime()) ? 0 : ts.getTime();
+    if (typeof ts === 'object' && ts !== null) {
+      if ('toMillis' in ts && typeof (ts as { toMillis: () => number }).toMillis === 'function') {
+        const ms = (ts as { toMillis: () => number }).toMillis();
+        return Number.isFinite(ms) ? ms : 0;
+      }
+      if ('seconds' in ts && Number.isFinite(Number((ts as { seconds: unknown }).seconds))) {
+        return Number((ts as { seconds: unknown }).seconds) * 1000;
+      }
+    }
+  } catch {
+    return 0;
   }
   return 0;
 }

@@ -283,17 +283,21 @@ export function parseTableQuestion(raw: unknown): {
 }
 
 export function tableQuestionProblem(table: QuizTableQuestion | undefined): string | null {
-  if (!table || !Array.isArray(table.rows) || table.rows.length === 0) {
+  if (!table || typeof table !== 'object' || !Array.isArray(table.rows) || table.rows.length === 0) {
     return 'أضف صفاً واحداً على الأقل في الجدول.';
   }
-  const blanks = table.rows.flat().filter((c) => c.isBlank);
+  const normalizedRows = table.rows.map((r) => unwrapRowArray(r));
+  const blanks = normalizedRows
+    .flat()
+    .filter((c): c is TableCellConfig => Boolean(c && typeof c === 'object' && (c as TableCellConfig).isBlank));
   if (blanks.length === 0) {
     return 'حدد خلية واحدة على الأقل كـ «فراغ للطالب» داخل الجدول.';
   }
-  for (let r = 0; r < table.rows.length; r++) {
-    for (let c = 0; c < table.rows[r].length; c++) {
-      const cell = table.rows[r][c];
-      if (cell.isBlank && !String(cell.expectedAnswer ?? '').trim()) {
+  for (let r = 0; r < normalizedRows.length; r++) {
+    const row = normalizedRows[r];
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c] as TableCellConfig | undefined;
+      if (cell?.isBlank && !String(cell.expectedAnswer ?? '').trim()) {
         return `الفراغ في الصف ${r + 1} العمود ${c + 1} بدون إجابة صحيحة متوقعة.`;
       }
     }
@@ -417,10 +421,40 @@ export function sanitizeQuestionLaws(raw: unknown): string[] | null {
   return out.length > 0 ? out : null;
 }
 
+function coerceFieldString(v: unknown, fallback = ''): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return fallback;
+}
+
 export function decodeQuizQuestionFromFirestore<T extends Record<string, unknown>>(q: T): T {
   if (!q || typeof q !== 'object') return q;
   let changed = false;
   const out: Record<string, unknown> = { ...q };
+
+  if (typeof out.text !== 'string') {
+    out.text = coerceFieldString(out.text, '');
+    changed = true;
+  }
+  if ('explanation' in out && typeof out.explanation !== 'string') {
+    out.explanation = coerceFieldString(out.explanation, '');
+    changed = true;
+  }
+  if ('answer' in out && typeof out.answer !== 'string') {
+    out.answer = coerceFieldString(out.answer, '');
+    changed = true;
+  }
+  if (Array.isArray(out.choices)) {
+    const needsChoiceCoercion = out.choices.some((c) => typeof c !== 'string');
+    if (needsChoiceCoercion) {
+      out.choices = out.choices.map((c) => coerceFieldString(c, ''));
+      changed = true;
+    }
+  } else {
+    out.choices = [];
+    changed = true;
+  }
+
   if ('laws' in out) {
     const cleanLaws = sanitizeQuestionLaws(out.laws);
     if (cleanLaws) {
@@ -455,37 +489,60 @@ export function decodeQuizQuestionFromFirestore<T extends Record<string, unknown
 }
 
 export function decodeMyQuizFromFirestore(quiz: MyQuiz): MyQuiz {
-  if (!quiz || !Array.isArray(quiz.questions)) return quiz;
+  if (!quiz || typeof quiz !== 'object') return quiz;
+  const rawQuestions = Array.isArray(quiz.questions) ? quiz.questions : [];
+  const decodedQuestions = rawQuestions
+    .filter((q): q is MyQuiz['questions'][number] => Boolean(q && typeof q === 'object'))
+    .map((q) =>
+      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as MyQuiz['questions'][number]
+    );
   return {
     ...quiz,
-    questions: quiz.questions.map((q) =>
-      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as MyQuiz['questions'][number]
-    ),
+    title: coerceFieldString((quiz as { title?: unknown }).title, 'اختبار'),
+    questions: decodedQuestions,
+    questionCount:
+      typeof quiz.questionCount === 'number' && Number.isFinite(quiz.questionCount)
+        ? quiz.questionCount
+        : decodedQuestions.length,
   };
 }
 
 export function decodeSharedQuizFromFirestore(quiz: SharedQuiz): SharedQuiz {
-  if (!quiz || !Array.isArray(quiz.questions)) return quiz;
+  if (!quiz || typeof quiz !== 'object') return quiz;
+  const rawQuestions = Array.isArray(quiz.questions) ? quiz.questions : [];
   return {
     ...quiz,
-    questions: quiz.questions.map((q) =>
-      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as SharedQuiz['questions'][number]
-    ),
+    title: coerceFieldString((quiz as { title?: unknown }).title, 'اختبار'),
+    questions: rawQuestions
+      .filter((q): q is SharedQuiz['questions'][number] => Boolean(q && typeof q === 'object'))
+      .map((q) =>
+        decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as SharedQuiz['questions'][number]
+      ),
   };
 }
 
 export function decodeExamAttemptFromFirestore(attempt: QuizAttempt): QuizAttempt {
-  if (!attempt || !Array.isArray(attempt.questions)) return attempt;
+  if (!attempt || typeof attempt !== 'object') return attempt;
+  const rawQuestions = Array.isArray(attempt.questions) ? attempt.questions : [];
+  const decodedQuestions = rawQuestions
+    .filter((q): q is QuizAttempt['questions'][number] => Boolean(q && typeof q === 'object'))
+    .map((q) =>
+      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as QuizAttempt['questions'][number]
+    );
   return {
     ...attempt,
-    questions: attempt.questions.map((q) =>
-      decodeQuizQuestionFromFirestore(q as unknown as Record<string, unknown>) as unknown as QuizAttempt['questions'][number]
-    ),
+    title: coerceFieldString((attempt as { title?: unknown }).title, 'اختبار سابق'),
+    questions: decodedQuestions,
+    answers: Array.isArray(attempt.answers) ? attempt.answers : [],
+    score: Number.isFinite(Number(attempt.score)) ? Number(attempt.score) : 0,
+    total: Number.isFinite(Number(attempt.total)) ? Number(attempt.total) : decodedQuestions.length,
+    durationSec: Number.isFinite(Number(attempt.durationSec)) ? Number(attempt.durationSec) : 0,
+    finishedAt: Number.isFinite(Number(attempt.finishedAt)) ? Number(attempt.finishedAt) : 0,
   };
 }
 
 export function decodeStarredQuestionFromFirestore(item: StarredQuestion): StarredQuestion {
-  if (!item || !item.question) return item;
+  if (!item || typeof item !== 'object' || !item.question || typeof item.question !== 'object') return item;
   return {
     ...item,
     question: decodeQuizQuestionFromFirestore(

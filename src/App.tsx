@@ -125,7 +125,12 @@ import { NotificationCenterToast } from './components/NotificationCenterToast';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
-import { initPWA, triggerSystemNotification } from './pwa';
+import {
+  initPWA,
+  requestNotificationPermissionSafe,
+  subscribeBrowserToWebPush,
+  triggerSystemNotification,
+} from './pwa';
 import {
   ensureLeaderboardPresence,
   getCachedLeaderboardEpoch,
@@ -912,6 +917,25 @@ export default function App() {
       }
     };
 
+    const syncPushSubscription = () => {
+      if (!alive) return;
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      const user = auth.currentUser;
+      if (!user || user.uid !== uid) return;
+      void user
+        .getIdToken()
+        .then((idToken) => {
+          if (!alive || !idToken) return;
+          return subscribeBrowserToWebPush(idToken, {
+            projectId: activeFirebaseConfig.projectId,
+            apiKey: activeFirebaseConfig.apiKey,
+            firestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId,
+          });
+        })
+        .catch(() => undefined);
+    };
+    syncPushSubscription();
+
     const unsubMeta = subscribeLeaderboardMeta((epoch) => {
       if (!alive) return;
       setLeaderboardEpoch(epoch);
@@ -942,6 +966,7 @@ export default function App() {
     const unsubIncoming = subscribeIncomingFriendRequests(uid, (items) => {
       if (!alive) return;
       setIncomingFriendRequests(items);
+      let maxReqMs = lastNotifyMs;
       for (const req of items) {
         if (req.status !== 'pending') continue;
         const key = `req:${req.id}:${req.createdAtMs}`;
@@ -949,7 +974,7 @@ export default function App() {
         if (req.createdAtMs > lastNotifyMs || tabRef.current !== 'friends') {
           notifiedKeysRef.current.add(key);
           if (req.createdAtMs > lastNotifyMs) {
-            markSeenTime(req.createdAtMs);
+            if (req.createdAtMs > maxReqMs) maxReqMs = req.createdAtMs;
             const toast: InAppNotificationToast = {
               id: key,
               kind: 'friend_request',
@@ -973,11 +998,15 @@ export default function App() {
           }
         }
       }
+      if (maxReqMs > lastNotifyMs) {
+        markSeenTime(maxReqMs);
+      }
     });
 
     const unsubChats = subscribeDirectChats(uid, (chats) => {
       if (!alive) return;
       setDirectChats(chats);
+      let maxChatMs = lastNotifyMs;
       for (const chat of chats) {
         const myReadAt = Number(chat.readAtMsByUid?.[uid] || 0);
         const lastMsgAt = Number(chat.lastMessageAtMs || 0);
@@ -1001,7 +1030,7 @@ export default function App() {
           document.visibilityState === 'visible';
 
         if (!currentlyViewingThisChat && lastMsgAt > lastNotifyMs) {
-          markSeenTime(lastMsgAt);
+          if (lastMsgAt > maxChatMs) maxChatMs = lastMsgAt;
           const kind = chat.lastMessageType === 'quiz_share' ? 'quiz_share' : 'message';
           const senderName = chat.lastSenderName || 'صديق';
           const body = chat.lastMessageText || 'رسالة جديدة';
@@ -1029,12 +1058,17 @@ export default function App() {
           });
         }
       }
+      if (maxChatMs > lastNotifyMs) {
+        markSeenTime(maxChatMs);
+      }
     });
 
     const handleOnlineReconnect = () => {
       void ensureLeaderboardPresence(uid, fullName).catch(() => undefined);
+      syncPushSubscription();
     };
     window.addEventListener('online', handleOnlineReconnect);
+    window.addEventListener('duoboard:notifications-granted', syncPushSubscription);
 
     return () => {
       alive = false;
@@ -1045,6 +1079,7 @@ export default function App() {
       unsubIncoming();
       unsubChats();
       window.removeEventListener('online', handleOnlineReconnect);
+      window.removeEventListener('duoboard:notifications-granted', syncPushSubscription);
     };
   }, [profile?.uid, profile?.fullNameQuad, pushInAppToast]);
 
@@ -2357,7 +2392,13 @@ export default function App() {
                 {typeof Notification !== 'undefined' && Notification.permission === 'default' && (
                   <button
                     type="button"
-                    onClick={() => void Notification.requestPermission()}
+                    onClick={() => {
+                      void requestNotificationPermissionSafe().then((perm) => {
+                        if (perm === 'granted' && typeof window !== 'undefined') {
+                          window.dispatchEvent(new CustomEvent('duoboard:notifications-granted'));
+                        }
+                      });
+                    }}
                     className="duo-btn px-3 py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[#3C3C3C] text-xs font-black cursor-pointer"
                   >
                     تفعيل إشعارات المتصفح

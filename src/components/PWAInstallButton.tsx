@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Bell, BellOff, Check, Download, Share, Smartphone, X } from 'lucide-react';
 import {
   getNotificationPermission,
@@ -14,6 +14,12 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
   const [perm, setPerm] = useState<NotificationPermState>(() => getNotificationPermission());
   const [guideModal, setGuideModal] = useState<'ios' | 'desktop' | null>(null);
 
+  useEffect(() => {
+    const syncPerm = () => setPerm(getNotificationPermission());
+    window.addEventListener('duoboard:notifications-granted', syncPerm);
+    return () => window.removeEventListener('duoboard:notifications-granted', syncPerm);
+  }, []);
+
   const handleInstallClick = async () => {
     const result = await promptInstall();
     if (result === 'ios') {
@@ -26,6 +32,9 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
   const handleEnableNotifications = async () => {
     const next = await requestNotificationPermissionSafe();
     setPerm(next);
+    if (next === 'granted' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('duoboard:notifications-granted'));
+    }
   };
 
   return (

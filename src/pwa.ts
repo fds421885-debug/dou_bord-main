@@ -182,3 +182,74 @@ export async function triggerSystemNotification(opts: {
     // Ignore blocked OS notification
   }
 }
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+let cachedVapidPublicKey: string | null = null;
+
+export async function subscribeBrowserToWebPush(
+  idToken: string,
+  tokenMeta?: { projectId?: string; apiKey?: string; firestoreDatabaseId?: string }
+): Promise<boolean> {
+  if (
+    !idToken ||
+    typeof window === 'undefined' ||
+    typeof Notification === 'undefined' ||
+    Notification.permission !== 'granted' ||
+    !('serviceWorker' in navigator) ||
+    !('PushManager' in window)
+  ) {
+    return false;
+  }
+
+  try {
+    if (!cachedVapidPublicKey) {
+      const keyRes = await fetch('/api/push/vapid-public-key', { cache: 'no-store' });
+      if (!keyRes.ok) return false;
+      const keyJson = (await keyRes.json()) as { enabled?: boolean; publicKey?: string };
+      if (!keyJson.enabled || !keyJson.publicKey) return false;
+      cachedVapidPublicKey = keyJson.publicKey;
+    }
+
+    const reg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<null>((r) => window.setTimeout(() => r(null), 2500)),
+    ]);
+    if (!reg || !reg.pushManager) return false;
+
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      const appServerKey = urlBase64ToUint8Array(cachedVapidPublicKey);
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey as unknown as BufferSource,
+      });
+    }
+
+    const res = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        subscription: sub.toJSON(),
+        tokenProjectId: tokenMeta?.projectId,
+        tokenApiKey: tokenMeta?.apiKey,
+        tokenFirestoreDatabaseId: tokenMeta?.firestoreDatabaseId,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

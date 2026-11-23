@@ -46,7 +46,19 @@ self.addEventListener('push', function (event) {
       renotify: true,
       data: payload.data || {},
     };
-    event.waitUntil(self.registration.showNotification(title, options));
+    event.waitUntil(
+      self.clients
+        .matchAll({ type: 'window', includeUncontrolled: true })
+        .then(function (clientList) {
+          for (var i = 0; i < clientList.length; i++) {
+            var client = clientList[i];
+            if (client && client.focused && client.visibilityState === 'visible') {
+              return;
+            }
+          }
+          return self.registration.showNotification(title, options);
+        })
+    );
   } catch (e) {
     // Ignore malformed push payload
   }

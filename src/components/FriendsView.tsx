@@ -269,14 +269,28 @@ export const FriendsView: React.FC<Props> = ({
     const msgText = textInput;
     setTextInput('');
     setSendingMsg(true);
-    try {
-      await sendDirectTextMessage({
-        myUid: profile.uid,
-        myName: profile.fullNameQuad,
-        friendUid: activeFriend.friendUid,
-        friendName: activeFriend.friendName,
-        text: msgText,
+    const sendPromise = sendDirectTextMessage({
+      myUid: profile.uid,
+      myName: profile.fullNameQuad,
+      friendUid: activeFriend.friendUid,
+      friendName: activeFriend.friendName,
+      text: msgText,
+    });
+
+    const isOfflineNow = typeof navigator !== 'undefined' && !navigator.onLine;
+    if (isOfflineNow) {
+      sendPromise.catch((err) => {
+        console.error('queued offline message error', err);
       });
+      setChatError(null);
+      playDuoSound('pop');
+      showNotice('تم حفظ الرسالة محلياً — ستُرسل تلقائياً عند عودة الاتصال حتى لو أُغلق المتصفح.');
+      setSendingMsg(false);
+      return;
+    }
+
+    try {
+      await sendPromise;
       setChatError(null);
       playDuoSound('pop');
     } catch (err) {

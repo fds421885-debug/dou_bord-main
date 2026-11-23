@@ -10,7 +10,7 @@ import {
   setDoc,
   where,
 } from './firestoreTracked';
-import { db } from './firebase';
+import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
 import { computeQuizStats } from './quizStats';
 import { decodeMyQuizFromFirestore } from './quizTable';
@@ -436,6 +436,46 @@ export function subscribeLeaderboardUsers(
   );
 }
 
+/* ===================== إشعارات الدفع الخلفية (Web Push) ===================== */
+
+async function notifyRecipientViaServerPush(params: {
+  recipientUid: string;
+  title: string;
+  body: string;
+  tag: string;
+  chatId?: string;
+  actionTab?: 'friends' | 'leaderboard';
+}): Promise<void> {
+  try {
+    const user = auth.currentUser;
+    if (!user || !params.recipientUid || params.recipientUid === user.uid) return;
+    const idToken = await user.getIdToken();
+    if (!idToken) return;
+
+    await fetch('/api/push/notify', {
+      method: 'POST',
+      keepalive: true,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        recipientUid: params.recipientUid,
+        title: params.title,
+        body: params.body,
+        tag: params.tag,
+        chatId: params.chatId || '',
+        actionTab: params.actionTab || 'friends',
+        tokenProjectId: activeFirebaseConfig.projectId,
+        tokenApiKey: activeFirebaseConfig.apiKey,
+        tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId,
+      }),
+    });
+  } catch {
+    // Non-fatal: Firestore realtime listener + offline cache still delivers on reconnect
+  }
+}
+
 /* ===================== طلبات الصداقة وقائمة الأصدقاء ===================== */
 
 export async function sendFriendRequest(params: {
@@ -447,15 +487,24 @@ export async function sendFriendRequest(params: {
   const { fromUid, fromName, toUid, toName } = params;
   if (!fromUid || !toUid || fromUid === toUid) return;
   const reqId = makeFriendRequestId(fromUid, toUid);
+  const safeFromName = fromName.trim().slice(0, 120);
   await setDoc(doc(db, 'friendRequests', reqId), {
     id: reqId,
     fromUid,
-    fromName: fromName.trim().slice(0, 120),
+    fromName: safeFromName,
     toUid,
     toName: toName.trim().slice(0, 120),
     status: 'pending',
     createdAtMs: Date.now(),
     updatedAt: serverTimestamp(),
+  });
+
+  void notifyRecipientViaServerPush({
+    recipientUid: toUid,
+    title: `طلب صداقة جديد — ${safeFromName}`,
+    body: 'أرسل لك طلب صداقة، اضغط لفتح قائمة الأصدقاء والرد عليه',
+    tag: `req-${reqId}`,
+    actionTab: 'friends',
   });
 }
 
@@ -523,6 +572,16 @@ export async function respondToFriendRequest(params: {
         updatedAt: serverTimestamp(),
       });
     }
+
+    const acceptorName = (myName.trim() || request.toName || 'صديقك').slice(0, 120);
+    void notifyRecipientViaServerPush({
+      recipientUid: request.fromUid,
+      title: `تم قبول صداقتك — ${acceptorName}`,
+      body: 'أصبحتما صديقين الآن، اضغط لفتح المحادثة ومشاركة الاختبارات!',
+      tag: `accept-${pairId}`,
+      chatId: pairId,
+      actionTab: 'friends',
+    });
   }
 }
 
@@ -701,6 +760,15 @@ export async function sendDirectTextMessage(params: {
     },
     updatedAt: serverTimestamp(),
   });
+
+  void notifyRecipientViaServerPush({
+    recipientUid: params.friendUid,
+    title: `رسالة جديدة من ${safeMyName}`,
+    body: cleanText.slice(0, 220),
+    tag: `chat-${chatId}`,
+    chatId,
+    actionTab: 'friends',
+  });
 }
 
 function estimatePayloadBytes(obj: unknown): number {
@@ -838,6 +906,15 @@ export async function sendQuizToFriend(params: {
       [myUid]: lastNowMs,
     },
     updatedAt: serverTimestamp(),
+  });
+
+  void notifyRecipientViaServerPush({
+    recipientUid: friendUid,
+    title: `${safeMyName} أرسل لك اختباراً`,
+    body: `${lastPart.title} — اضغط لإضافته إلى قائمة اختباراتي`,
+    tag: `chat-${chatId}`,
+    chatId,
+    actionTab: 'friends',
   });
 
   return parts.length;

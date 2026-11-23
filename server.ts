@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import * as webpush from 'web-push';
 
 type DatabaseRole = 'player' | 'backup';
 
@@ -91,6 +92,8 @@ interface PublicPlatformPointer {
 const PORT = Number(process.env.PORT || 3000);
 const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.json');
 const QUOTA_STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-quota-state.json');
+const VAPID_FILE_PATH = path.resolve(process.cwd(), '.duoboard-vapid.json');
+const PUSH_SUBS_FILE_PATH = path.resolve(process.cwd(), '.duoboard-push-subs.json');
 const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
@@ -314,6 +317,76 @@ function saveQuotaStateFile(): void {
     fs.writeFileSync(QUOTA_STATE_FILE_PATH, JSON.stringify(quotaStateMap, null, 2), 'utf8');
   } catch (err) {
     console.error('Failed to persist quota state:', err);
+  }
+}
+
+interface VapidKeysRecord {
+  publicKey: string;
+  privateKey: string;
+}
+
+interface StoredPushSubscriptionRecord {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+  updatedAt: number;
+}
+
+function loadOrCreateVapidKeys(): VapidKeysRecord {
+  const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  if (envPub && envPriv) {
+    return { publicKey: envPub, privateKey: envPriv };
+  }
+  try {
+    if (fs.existsSync(VAPID_FILE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(VAPID_FILE_PATH, 'utf8')) as Partial<VapidKeysRecord>;
+      if (
+        typeof parsed.publicKey === 'string' &&
+        parsed.publicKey.length > 20 &&
+        typeof parsed.privateKey === 'string' &&
+        parsed.privateKey.length > 20
+      ) {
+        return { publicKey: parsed.publicKey, privateKey: parsed.privateKey };
+      }
+    }
+  } catch {
+    // Regenerate below
+  }
+  const generated = webpush.generateVAPIDKeys();
+  try {
+    fs.writeFileSync(VAPID_FILE_PATH, JSON.stringify(generated, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist VAPID keys:', err);
+  }
+  return generated;
+}
+
+const vapidKeys = loadOrCreateVapidKeys();
+webpush.setVapidDetails('mailto:notifications@duoboard.app', vapidKeys.publicKey, vapidKeys.privateKey);
+
+let pushSubsByUid: Record<string, StoredPushSubscriptionRecord[]> = {};
+try {
+  if (fs.existsSync(PUSH_SUBS_FILE_PATH)) {
+    const parsedSubs = JSON.parse(fs.readFileSync(PUSH_SUBS_FILE_PATH, 'utf8')) as Record<
+      string,
+      StoredPushSubscriptionRecord[]
+    >;
+    if (parsedSubs && typeof parsedSubs === 'object') {
+      pushSubsByUid = parsedSubs;
+    }
+  }
+} catch {
+  pushSubsByUid = {};
+}
+
+function savePushSubsFile(): void {
+  try {
+    fs.writeFileSync(PUSH_SUBS_FILE_PATH, JSON.stringify(pushSubsByUid, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist push subscriptions:', err);
   }
 }
 
@@ -1205,6 +1278,158 @@ async function startServer(): Promise<void> {
   app.get('/api/platform-db', (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(buildPublicPayload(platformState));
+  });
+
+  // Web Push notifications (deliver OS notifications even when browser/site is closed)
+  app.get('/api/push/vapid-public-key', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({ enabled: true, publicKey: vapidKeys.publicKey });
+  });
+
+  app.post('/api/push/subscribe', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+
+    const sub = body.subscription as
+      | { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } }
+      | undefined;
+    const endpoint = typeof sub?.endpoint === 'string' ? sub.endpoint.trim() : '';
+    const p256dh = typeof sub?.keys?.p256dh === 'string' ? sub.keys.p256dh.trim() : '';
+    const authKey = typeof sub?.keys?.auth === 'string' ? sub.keys.auth.trim() : '';
+
+    if (
+      !endpoint ||
+      !/^https:\/\//i.test(endpoint) ||
+      endpoint.length > 2000 ||
+      !p256dh ||
+      !authKey
+    ) {
+      res.status(400).json({ error: 'بيانات اشتراك الإشعارات غير صالحة.' });
+      return;
+    }
+
+    // Ensure one device endpoint is bound only to the currently signed-in account
+    for (const [uidKey, subs] of Object.entries(pushSubsByUid)) {
+      if (uidKey === authRes.uid) continue;
+      const filtered = subs.filter((s) => s.endpoint !== endpoint);
+      if (filtered.length !== subs.length) {
+        if (filtered.length === 0) delete pushSubsByUid[uidKey];
+        else pushSubsByUid[uidKey] = filtered;
+      }
+    }
+
+    const existing = (pushSubsByUid[authRes.uid] || []).filter((s) => s.endpoint !== endpoint);
+    existing.push({
+      endpoint,
+      keys: { p256dh, auth: authKey },
+      updatedAt: Date.now(),
+    });
+    pushSubsByUid[authRes.uid] = existing.slice(-8);
+    savePushSubsFile();
+
+    res.json({ ok: true, count: pushSubsByUid[authRes.uid].length });
+  });
+
+  app.post('/api/push/unsubscribe', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+    const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
+    if (endpoint && pushSubsByUid[authRes.uid]) {
+      pushSubsByUid[authRes.uid] = pushSubsByUid[authRes.uid].filter((s) => s.endpoint !== endpoint);
+      if (pushSubsByUid[authRes.uid].length === 0) delete pushSubsByUid[authRes.uid];
+      savePushSubsFile();
+    }
+    res.json({ ok: true });
+  });
+
+  app.post('/api/push/notify', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+
+    const recipientUid = typeof body.recipientUid === 'string' ? body.recipientUid.trim() : '';
+    if (!recipientUid || recipientUid === authRes.uid) {
+      res.json({ ok: true, sent: 0 });
+      return;
+    }
+
+    const subs = pushSubsByUid[recipientUid] || [];
+    if (subs.length === 0) {
+      res.json({ ok: true, sent: 0 });
+      return;
+    }
+
+    const title = (typeof body.title === 'string' ? body.title : 'DuoBoard — رسالة جديدة')
+      .trim()
+      .slice(0, 120);
+    const msgBody = (typeof body.body === 'string' ? body.body : '')
+      .trim()
+      .slice(0, 300);
+    const tag = (typeof body.tag === 'string' ? body.tag : `duoboard-${authRes.uid}`)
+      .trim()
+      .slice(0, 100);
+    const chatId = typeof body.chatId === 'string' ? body.chatId.trim().slice(0, 140) : '';
+    const actionTab = body.actionTab === 'leaderboard' ? 'leaderboard' : 'friends';
+
+    const payload = JSON.stringify({
+      title,
+      body: msgBody,
+      tag,
+      data: {
+        senderUid: authRes.uid,
+        chatId,
+        actionTab,
+      },
+    });
+
+    let sent = 0;
+    const expiredEndpoints = new Set<string>();
+
+    await Promise.all(
+      subs.map(async (sub) => {
+        try {
+          await webpush.sendNotification(
+            {
+              endpoint: sub.endpoint,
+              keys: sub.keys,
+            },
+            payload,
+            {
+              TTL: 86400,
+              urgency: 'high',
+            }
+          );
+          sent++;
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number })?.statusCode;
+          if (statusCode === 404 || statusCode === 410) {
+            expiredEndpoints.add(sub.endpoint);
+          }
+        }
+      })
+    );
+
+    if (expiredEndpoints.size > 0) {
+      const remaining = (pushSubsByUid[recipientUid] || []).filter(
+        (s) => !expiredEndpoints.has(s.endpoint)
+      );
+      if (remaining.length === 0) delete pushSubsByUid[recipientUid];
+      else pushSubsByUid[recipientUid] = remaining;
+      savePushSubsFile();
+    }
+
+    res.json({ ok: true, sent });
   });
 
   app.get('/api/platform-db/stream', (req: Request, res: Response) => {

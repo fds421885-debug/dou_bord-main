@@ -2,6 +2,9 @@ import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   type Firestore,
 } from 'firebase/firestore';
 import {
@@ -299,10 +302,22 @@ export function createFirestoreInstance(
   config: FirebaseAppConfig
 ): Firestore {
   const dbId = (config.firestoreDatabaseId || '').trim();
-  if (!dbId || dbId === '(default)') {
-    return getFirestore(firebaseApp);
+  const normalizedDbId = dbId && dbId !== '(default)' ? dbId : undefined;
+  try {
+    return initializeFirestore(
+      firebaseApp,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      normalizedDbId
+    );
+  } catch {
+    return normalizedDbId
+      ? getFirestore(firebaseApp, normalizedDbId)
+      : getFirestore(firebaseApp);
   }
-  return getFirestore(firebaseApp, dbId);
 }
 
 const resolved = resolveInitialConfig();

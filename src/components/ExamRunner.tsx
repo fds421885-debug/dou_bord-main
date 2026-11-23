@@ -79,6 +79,15 @@ export const ExamRunner: React.FC<Props> = ({
     });
   }, [ownerId]);
 
+  useEffect(() => {
+    if (!confirm) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirm(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [confirm]);
+
   const remainingMsNow = () =>
     timing === 'none' ? 0 : Math.max(0, deadlineRef.current - Date.now());
 
@@ -256,41 +265,6 @@ export const ExamRunner: React.FC<Props> = ({
         )}
       </div>
 
-      {confirm && (
-        <div className="rounded-2xl border-2 border-[#FFC800] bg-[#FFF4CC] p-3 flex flex-col gap-2">
-          <p className="text-xs font-extrabold text-[#8A6500]">
-            {confirm === 'finish'
-              ? answeredCount < n
-                ? `باقي ${n - answeredCount} سؤال بلا إجابة. هل تريد إنهاء الاختبار وعرض النتيجة؟`
-                : 'هل تريد إنهاء الاختبار وعرض النتيجة؟'
-              : 'سيُحفظ تقدمك على جهازك وتستطيع المتابعة لاحقاً من اختباراتي. الخروج الآن؟'}
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm === 'finish') finish();
-                else {
-                  persist(false);
-                  doneRef.current = true;
-                  onExit();
-                }
-              }}
-              className="px-4 py-1.5 rounded-xl bg-[#FFC800] border-2 border-[#E5A400] border-b-4 text-xs font-black text-white cursor-pointer"
-            >
-              نعم
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirm(null)}
-              className="px-4 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
-            >
-              لا، أكمل
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* السؤال */}
       <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
         <div className="flex items-center justify-between gap-2 pb-1 border-b border-[#F2F2F2]">
@@ -421,6 +395,74 @@ export const ExamRunner: React.FC<Props> = ({
               </button>
             );
           })}
+        </div>
+      )}
+      {confirm && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setConfirm(null)}
+        >
+          <div
+            className="duo-card max-w-md w-full bg-white p-6 flex flex-col gap-4 text-center shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className={`w-14 h-14 mx-auto rounded-2xl border-2 flex items-center justify-center ${
+                confirm === 'finish'
+                  ? 'bg-[#FFF4CC] border-[#FFC800] text-[#E5A400]'
+                  : 'bg-[#F5ECFF] border-[#CE82FF] text-[#8938D6]'
+              }`}
+            >
+              {confirm === 'finish' ? (
+                <Flag className="w-7 h-7" />
+              ) : (
+                <LogOut className="w-7 h-7" />
+              )}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <h3 className="text-lg font-black text-[#3C3C3C]">
+                {confirm === 'finish'
+                  ? 'هل أنت متأكد من إنهاء الاختبار؟'
+                  : 'هل تريد الخروج من الاختبار؟'}
+              </h3>
+              <p className="text-xs sm:text-sm font-bold text-[#777777] leading-relaxed">
+                {confirm === 'finish'
+                  ? answeredCount < n
+                    ? `باقي ${n - answeredCount} سؤال بلا إجابة. سيتم احتساب نتيجتك الحالية وعرض التصحيح الكامل.`
+                    : 'تمت الإجابة على جميع الأسئلة. سيتم إنهاء الاختبار وعرض النتيجة والتصحيح.'
+                  : 'سيُحفظ تقدمك على جهازك وتستطيع المتابعة لاحقاً من قسم اختباراتي.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setConfirm(null)}
+                className="duo-btn flex-1 py-3 rounded-2xl bg-white border-2 border-b-4 border-[#E5E5E5] text-sm font-black text-[#3C3C3C] hover:bg-[#F7F7F7] cursor-pointer"
+              >
+                لا، أكمل
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirm === 'finish') finish();
+                  else {
+                    persist(false);
+                    doneRef.current = true;
+                    onExit();
+                  }
+                }}
+                className={`duo-btn flex-1 py-3 rounded-2xl border-2 border-b-4 text-sm font-black text-white cursor-pointer ${
+                  confirm === 'finish'
+                    ? 'bg-[#FFC800] hover:bg-[#FFD426] border-[#E5A400]'
+                    : 'bg-[#A560E8] hover:bg-[#B477EE] border-[#8938D6]'
+                }`}
+              >
+                {confirm === 'finish' ? 'نعم، إنهاء الاختبار' : 'نعم، خروج'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

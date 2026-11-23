@@ -579,3 +579,189 @@ export interface PlatformProgrammerState {
   updatedByEmail?: string;
   updatedAt: number;
 }
+
+/* ===================== لوحة الشرف والأصدقاء والمحادثات ===================== */
+
+export interface LeaderboardTimeSlotSnapshot {
+  id: string;
+  label: string;
+  rangeLabel: string;
+  attempts: number;
+  questions: number;
+  correct: number;
+  wrong: number;
+  avgPct: number;
+  avgSecPerQ: number;
+  isBest: boolean;
+}
+
+export interface LeaderboardWeekdaySnapshot {
+  dayIndex: number;
+  label: string;
+  attempts: number;
+  questions: number;
+  correct: number;
+  avgPct: number;
+  isBest: boolean;
+}
+
+export interface LeaderboardPointSnapshot {
+  index: number;
+  title: string;
+  finishedAt: number;
+  dateLabel: string;
+  timeLabel: string;
+  pct: number;
+  movingAvgPct: number;
+  correct: number;
+  wrong: number;
+  total: number;
+  durationSec: number;
+  secPerQ: number;
+}
+
+export interface LeaderboardQuizRowSnapshot {
+  key: string;
+  title: string;
+  attempts: number;
+  questions: number;
+  correct: number;
+  wrong: number;
+  avgPct: number;
+  bestPct: number;
+  latestPct: number;
+  deltaPct: number;
+  avgSecPerQ: number;
+}
+
+export interface LeaderboardStatsSnapshot {
+  accuracyPct: number;
+  skippedAnswers: number;
+  bestPct: number;
+  worstPct: number;
+  latestPct: number;
+  volatilityStdDev: number;
+  rangePct: number;
+  stabilityLabel: 'مستقر جداً' | 'تذبذب متوسط' | 'تذبذب مرتفع' | 'غير كافٍ للقياس';
+  trendDirection: 'up' | 'down' | 'flat';
+  trendDeltaPct: number;
+  avgSecPerQuestion: number;
+  totalDurationSec: number;
+  currentHighStreak: number;
+  bestHighStreak: number;
+  bestTimeSlotLabel: string | null;
+  bestWeekdayLabel: string | null;
+  timeSlots: LeaderboardTimeSlotSnapshot[];
+  weekdays: LeaderboardWeekdaySnapshot[];
+  recentPoints: LeaderboardPointSnapshot[];
+  quizRows: LeaderboardQuizRowSnapshot[];
+  typeBreakdown: {
+    mcqTotal: number;
+    mcqCorrect: number;
+    tableTotal: number;
+    tableCorrect: number;
+    withLawsTotal: number;
+    withLawsCorrect: number;
+  };
+}
+
+export interface LeaderboardUserEntry {
+  uid: string;
+  fullNameQuad: string;
+  epoch: number;
+  correctCount: number;
+  wrongCount: number;
+  totalQuestions: number;
+  attemptsCount: number;
+  statsSnapshot: LeaderboardStatsSnapshot;
+  joinedAt: number;
+  updatedAt?: unknown;
+}
+
+export interface LeaderboardMetaDoc {
+  id: 'leaderboardMeta';
+  resetEpoch: number;
+  updatedBy: string;
+  updatedByName: string;
+  updatedAt?: unknown;
+}
+
+export type FriendRequestStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface FriendRequestDoc {
+  id: string;
+  fromUid: string;
+  fromName: string;
+  toUid: string;
+  toName: string;
+  status: FriendRequestStatus;
+  createdAtMs: number;
+  updatedAt?: unknown;
+}
+
+export interface FriendshipDoc {
+  id: string;
+  uids: string[];
+  names: Record<string, string>;
+  createdBy: string;
+  createdAtMs: number;
+  updatedAt?: unknown;
+}
+
+export interface SharedQuizSummaryMeta {
+  sharedQuizDocId: string;
+  quizTitle: string;
+  questionCount: number;
+  senderName: string;
+}
+
+export interface DirectChatDoc {
+  id: string;
+  participantIds: string[];
+  participantNames: Record<string, string>;
+  lastMessageText: string;
+  lastMessageType: 'text' | 'quiz_share' | 'init';
+  lastSenderId: string;
+  lastSenderName: string;
+  lastMessageAtMs: number;
+  readAtMsByUid: Record<string, number>;
+  updatedAt?: unknown;
+}
+
+export interface DirectMessageDoc {
+  id: string;
+  chatId: string;
+  senderId: string;
+  senderName: string;
+  recipientId: string;
+  type: 'text' | 'quiz_share';
+  text: string;
+  quizShare?: SharedQuizSummaryMeta;
+  createdAtMs: number;
+  createdAt?: unknown;
+}
+
+export interface SharedFriendQuizDoc {
+  id: string;
+  chatId: string;
+  senderId: string;
+  senderName: string;
+  recipientId: string;
+  title: string;
+  questions: QuizQuestion[];
+  questionCount: number;
+  createdAtMs: number;
+  createdAt?: unknown;
+}
+
+export interface InAppNotificationToast {
+  id: string;
+  kind: 'message' | 'quiz_share' | 'friend_request';
+  senderUid: string;
+  senderName: string;
+  title: string;
+  body: string;
+  createdAtMs: number;
+  chatId?: string;
+}
+

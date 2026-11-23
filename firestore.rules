@@ -488,8 +488,146 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidLeaderboardMeta(data) {
+      return data.keys().hasAll([
+          'id', 'resetEpoch', 'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'resetEpoch', 'updatedBy', 'updatedByName', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.resetEpoch is int && data.resetEpoch >= 0
+        && isValidId(data.updatedBy)
+        && data.updatedBy == request.auth.uid
+        && data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardUser(data) {
+      return data.keys().hasAll([
+          'uid', 'fullNameQuad', 'epoch', 'correctCount', 'wrongCount',
+          'totalQuestions', 'attemptsCount', 'statsSnapshot', 'joinedAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'fullNameQuad', 'epoch', 'correctCount', 'wrongCount',
+          'totalQuestions', 'attemptsCount', 'statsSnapshot', 'joinedAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.fullNameQuad is string && data.fullNameQuad.size() >= 3 && data.fullNameQuad.size() <= 120
+        && data.epoch is int && data.epoch >= 0
+        && data.correctCount is int && data.correctCount >= 0 && data.correctCount <= 1000000
+        && data.wrongCount is int && data.wrongCount >= 0 && data.wrongCount <= 1000000
+        && data.totalQuestions is int && data.totalQuestions >= 0 && data.totalQuestions <= 1000000
+        && data.attemptsCount is int && data.attemptsCount >= 0 && data.attemptsCount <= 100000
+        && data.statsSnapshot is map
+        && data.joinedAt is int && data.joinedAt >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendRequest(data) {
+      return data.keys().hasAll([
+          'id', 'fromUid', 'fromName', 'toUid', 'toName', 'status', 'createdAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'fromUid', 'fromName', 'toUid', 'toName', 'status', 'createdAtMs', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.fromUid)
+        && isValidId(data.toUid)
+        && data.fromUid != data.toUid
+        && data.fromName is string && data.fromName.size() >= 2 && data.fromName.size() <= 120
+        && data.toName is string && data.toName.size() >= 2 && data.toName.size() <= 120
+        && data.status in ['pending', 'accepted', 'rejected']
+        && data.createdAtMs is int && data.createdAtMs > 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendship(data) {
+      return data.keys().hasAll([
+          'id', 'uids', 'names', 'createdBy', 'createdAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'uids', 'names', 'createdBy', 'createdAtMs', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.uids is list && data.uids.size() == 2
+        && isValidId(data.uids[0]) && isValidId(data.uids[1])
+        && data.uids[0] != data.uids[1]
+        && data.names is map
+        && isValidId(data.createdBy)
+        && data.createdAtMs is int && data.createdAtMs > 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectChat(data) {
+      return data.keys().hasAll([
+          'id', 'participantIds', 'participantNames', 'lastMessageText', 'lastMessageType',
+          'lastSenderId', 'lastSenderName', 'lastMessageAtMs', 'readAtMsByUid', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'participantIds', 'participantNames', 'lastMessageText', 'lastMessageType',
+          'lastSenderId', 'lastSenderName', 'lastMessageAtMs', 'readAtMsByUid', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.participantIds is list && data.participantIds.size() == 2
+        && isValidId(data.participantIds[0]) && isValidId(data.participantIds[1])
+        && data.participantIds[0] != data.participantIds[1]
+        && data.participantNames is map
+        && data.lastMessageText is string && data.lastMessageText.size() <= 500
+        && data.lastMessageType in ['text', 'quiz_share', 'init']
+        && data.lastSenderId is string && data.lastSenderId.size() <= 128
+        && data.lastSenderName is string && data.lastSenderName.size() <= 120
+        && data.lastMessageAtMs is int && data.lastMessageAtMs >= 0
+        && data.readAtMsByUid is map
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectMessage(data) {
+      return data.keys().hasAll([
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'type', 'text', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'type', 'text', 'quizShare', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.chatId)
+        && isValidId(data.senderId)
+        && data.senderId == request.auth.uid
+        && isValidId(data.recipientId)
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && data.type in ['text', 'quiz_share']
+        && data.text is string && data.text.size() <= 4000
+        && (!('quizShare' in data) || data.quizShare is map)
+        && data.createdAtMs is int && data.createdAtMs > 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSharedFriendQuiz(data) {
+      return data.keys().hasAll([
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'title',
+          'questions', 'questionCount', 'createdAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'chatId', 'senderId', 'senderName', 'recipientId', 'title',
+          'questions', 'questionCount', 'createdAtMs', 'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.chatId)
+        && isValidId(data.senderId)
+        && data.senderId == request.auth.uid
+        && isValidId(data.recipientId)
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 10000
+        && data.questions[0] is map
+        && data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 10000
+        && data.createdAtMs is int && data.createdAtMs > 0
+        && data.createdAt is timestamp;
+    }
+
     match /platform/{docId} {
-      allow get: if isValidId(docId) && (docId == 'migration' || (docId == 'registry' && isVerified()));
+      allow get: if isValidId(docId) && (docId == 'migration' || ((docId == 'registry' || docId == 'leaderboardMeta') && isVerified()));
       allow list: if false;
       allow create: if isValidId(docId) && (
         (docId == 'migration' && isVerified()
@@ -499,6 +637,11 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (docId == 'registry' && isMasterProgrammerAuth()
           && isValidPlatformRegistry(incoming())
+          && incoming().id == docId
+          && incoming().updatedBy == request.auth.uid
+          && incoming().updatedAt == request.time)
+        || (docId == 'leaderboardMeta' && isMasterProgrammerAuth()
+          && isValidLeaderboardMeta(incoming())
           && incoming().id == docId
           && incoming().updatedBy == request.auth.uid
           && incoming().updatedAt == request.time)
@@ -519,8 +662,124 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().updatedBy == request.auth.uid
           && incoming().updatedAt == request.time)
+        || (docId == 'leaderboardMeta' && isMasterProgrammerAuth()
+          && isValidLeaderboardMeta(incoming())
+          && incoming().id == existing().id
+          && incoming().updatedBy == request.auth.uid
+          && incoming().updatedAt == request.time)
       );
       allow delete: if false;
+    }
+
+    match /leaderboardUsers/{userId} {
+      allow get: if isValidId(userId) && isVerified();
+      allow list: if isVerified();
+      allow create: if isValidId(userId) && isOwner(userId)
+        && isValidLeaderboardUser(incoming())
+        && incoming().uid == userId
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isOwner(userId)
+        && isValidLeaderboardUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    match /friendRequests/{requestId} {
+      allow get: if isValidId(requestId) && isVerified()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow list: if isVerified()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow create: if isValidId(requestId) && isVerified()
+        && isValidFriendRequest(incoming())
+        && incoming().id == requestId
+        && incoming().fromUid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId) && isVerified()
+        && isValidFriendRequest(incoming())
+        && incoming().id == existing().id
+        && incoming().fromUid == existing().fromUid
+        && incoming().toUid == existing().toUid
+        && incoming().updatedAt == request.time
+        && (
+          (existing().toUid == request.auth.uid && existing().status == 'pending' && incoming().status in ['accepted', 'rejected'])
+          || (existing().fromUid == request.auth.uid && incoming().status == 'pending')
+          || (existing().toUid == request.auth.uid && incoming().status == 'pending')
+        );
+      allow delete: if isValidId(requestId) && isVerified()
+        && (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+    }
+
+    match /friendships/{pairId} {
+      allow get: if isValidId(pairId) && isVerified()
+        && (request.auth.uid in resource.data.uids);
+      allow list: if isVerified()
+        && (request.auth.uid in resource.data.uids);
+      allow create: if isValidId(pairId) && isVerified()
+        && isValidFriendship(incoming())
+        && incoming().id == pairId
+        && incoming().createdBy == request.auth.uid
+        && (request.auth.uid in incoming().uids)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(pairId) && isVerified()
+        && isValidFriendship(incoming())
+        && (request.auth.uid in existing().uids)
+        && incoming().uids == existing().uids
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(pairId) && isVerified()
+        && (request.auth.uid in existing().uids);
+    }
+
+    match /directChats/{chatId} {
+      allow get: if isValidId(chatId) && isVerified()
+        && (request.auth.uid in resource.data.participantIds);
+      allow list: if isVerified()
+        && (request.auth.uid in resource.data.participantIds);
+      allow create: if isValidId(chatId) && isVerified()
+        && isValidDirectChat(incoming())
+        && incoming().id == chatId
+        && (request.auth.uid in incoming().participantIds)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(chatId) && isVerified()
+        && isValidDirectChat(incoming())
+        && (request.auth.uid in existing().participantIds)
+        && incoming().id == existing().id
+        && incoming().participantIds == existing().participantIds
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(chatId) && isVerified()
+        && (request.auth.uid in existing().participantIds);
+
+      match /messages/{msgId} {
+        allow get: if isValidId(chatId) && isValidId(msgId) && isVerified()
+          && (request.auth.uid in get(/databases/$(database)/documents/directChats/$(chatId)).data.participantIds);
+        allow list: if isValidId(chatId) && isVerified()
+          && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+        allow create: if isValidId(chatId) && isValidId(msgId) && isVerified()
+          && isValidDirectMessage(incoming())
+          && incoming().id == msgId
+          && incoming().chatId == chatId
+          && incoming().createdAt == request.time
+          && (request.auth.uid in get(/databases/$(database)/documents/directChats/$(chatId)).data.participantIds);
+        allow update: if false;
+        allow delete: if isValidId(chatId) && isValidId(msgId) && isVerified()
+          && existing().senderId == request.auth.uid;
+      }
+    }
+
+    match /sharedFriendQuizzes/{sharedId} {
+      allow get: if isValidId(sharedId) && isVerified()
+        && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow list: if isVerified()
+        && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow create: if isValidId(sharedId) && isVerified()
+        && isValidSharedFriendQuiz(incoming())
+        && incoming().id == sharedId
+        && incoming().senderId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(sharedId) && isVerified()
+        && (existing().senderId == request.auth.uid || existing().recipientId == request.auth.uid);
     }
 
     match /users/{userId}/private/{docId} {

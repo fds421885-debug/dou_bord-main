@@ -23,6 +23,8 @@ import {
   LogOut,
   Power,
   RefreshCw,
+  Trophy,
+  Users,
   X,
 } from 'lucide-react';
 import {
@@ -86,6 +88,11 @@ import {
 } from './localDraftStore';
 import { closeRoomInDatabase, handleRoomListenerError } from './roomLifecycle';
 import type {
+  DirectChatDoc,
+  FriendRequestDoc,
+  FriendshipDoc,
+  InAppNotificationToast,
+  LeaderboardUserEntry,
   Participant,
   PlatformProgrammerState,
   Room,
@@ -108,12 +115,28 @@ import { InteractiveArena } from './components/InteractiveArena';
 import { TestResultsView } from './components/TestResultsView';
 import { SavedTestsView } from './components/SavedTestsView';
 import { MyQuizzesView } from './components/MyQuizzesView';
+import { LeaderboardView } from './components/LeaderboardView';
+import { FriendsView } from './components/FriendsView';
 import { ProgrammerDashboard } from './components/ProgrammerDashboard';
 import { QuickMigrateModal } from './components/QuickMigrateModal';
 import { QuotaFullDbSelectorModal } from './components/QuotaFullDbSelectorModal';
 import { RulesCheckModal } from './components/RulesCheckModal';
+import { NotificationCenterToast } from './components/NotificationCenterToast';
+import { PWAInstallButton } from './components/PWAInstallButton';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
+import { initPWA, triggerSystemNotification } from './pwa';
+import {
+  ensureLeaderboardPresence,
+  getCachedLeaderboardEpoch,
+  INITIAL_LEADERBOARD_EPOCH,
+  subscribeDirectChats,
+  subscribeFriendships,
+  subscribeIncomingFriendRequests,
+  subscribeLeaderboardMeta,
+  subscribeLeaderboardUsers,
+  subscribeOutgoingFriendRequests,
+} from './social';
 
 async function withAppTimeout<T>(promise: Promise<T>, ms = 4500): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
@@ -219,7 +242,21 @@ export default function App() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<'home' | 'saved' | 'quizzes' | 'programmer'>('home');
+  const [tab, setTab] = useState<'home' | 'saved' | 'quizzes' | 'leaderboard' | 'friends' | 'programmer'>('home');
+  const [leaderboardEpoch, setLeaderboardEpoch] = useState<number>(() => getCachedLeaderboardEpoch());
+  const [leaderboardUsers, setLeaderboardUsers] = useState<LeaderboardUserEntry[]>([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState<boolean>(true);
+  const [friendships, setFriendships] = useState<FriendshipDoc[]>([]);
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState<FriendRequestDoc[]>([]);
+  const [outgoingFriendRequests, setOutgoingFriendRequests] = useState<FriendRequestDoc[]>([]);
+  const [directChats, setDirectChats] = useState<DirectChatDoc[]>([]);
+  const [selectedFriendUid, setSelectedFriendUid] = useState<string | null>(null);
+  const [inAppToasts, setInAppToasts] = useState<InAppNotificationToast[]>([]);
+  const notifiedKeysRef = useRef<Set<string>>(new Set());
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const selectedFriendUidRef = useRef(selectedFriendUid);
+  selectedFriendUidRef.current = selectedFriendUid;
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [room, setRoom] = useState<Room | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -776,6 +813,240 @@ export default function App() {
       // Ignore sessionStorage errors
     }
   }, []);
+
+  // Initialize PWA service worker + URL / SW deep-link navigation to friend chat
+  useEffect(() => {
+    initPWA();
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const openChatUid = params.get('openChat');
+      const openTab = params.get('openTab');
+      if (openChatUid) {
+        setSelectedFriendUid(openChatUid);
+        setTab('friends');
+        params.delete('openChat');
+        const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, '', nextUrl);
+      } else if (openTab === 'friends' || openTab === 'leaderboard') {
+        setTab(openTab);
+        params.delete('openTab');
+        const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, '', nextUrl);
+      }
+    } catch {
+      // Ignore URL errors
+    }
+
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      const onSwMessage = (event: MessageEvent) => {
+        const d = event.data as {
+          type?: string;
+          senderUid?: string;
+          actionTab?: string;
+        } | null;
+        if (!d || d.type !== 'DUOBOARD_NOTIFICATION_CLICK') return;
+        setActiveRoomId(null);
+        if (d.senderUid) {
+          setSelectedFriendUid(d.senderUid);
+          setTab('friends');
+        } else if (d.actionTab === 'leaderboard') {
+          setTab('leaderboard');
+        } else {
+          setTab('friends');
+        }
+      };
+      navigator.serviceWorker.addEventListener('message', onSwMessage);
+      return () => navigator.serviceWorker.removeEventListener('message', onSwMessage);
+    }
+    return undefined;
+  }, []);
+
+  const pushInAppToast = useCallback(
+    (toast: InAppNotificationToast) => {
+      setInAppToasts((prev) => {
+        if (prev.some((t) => t.id === toast.id)) return prev;
+        return [toast, ...prev].slice(0, 4);
+      });
+      playDuoSound('pop');
+      window.setTimeout(() => {
+        setInAppToasts((prev) => prev.filter((t) => t.id !== toast.id));
+      }, 7500);
+    },
+    []
+  );
+
+  // Global real-time listeners for Leaderboard, Friend Requests, Friendships, Direct Chats & Offline Catch-up Notifications
+  useEffect(() => {
+    const uid = profile?.uid;
+    const fullName = profile?.fullNameQuad;
+    if (!uid || !fullName) {
+      setLeaderboardUsers([]);
+      setFriendships([]);
+      setIncomingFriendRequests([]);
+      setOutgoingFriendRequests([]);
+      setDirectChats([]);
+      return;
+    }
+
+    setLeaderboardLoading(true);
+    let alive = true;
+    const notifyTsStorageKey = `duoboard_last_notify_${uid}`;
+    let lastNotifyMs = INITIAL_LEADERBOARD_EPOCH;
+    try {
+      const stored = Number(localStorage.getItem(notifyTsStorageKey) || 0);
+      if (Number.isFinite(stored) && stored > INITIAL_LEADERBOARD_EPOCH) {
+        lastNotifyMs = stored;
+      }
+    } catch {
+      // Ignore storage restriction
+    }
+
+    const markSeenTime = (ms: number) => {
+      if (ms > lastNotifyMs) {
+        lastNotifyMs = ms;
+        try {
+          localStorage.setItem(notifyTsStorageKey, String(ms));
+        } catch {
+          // Ignore storage error
+        }
+      }
+    };
+
+    const unsubMeta = subscribeLeaderboardMeta((epoch) => {
+      if (!alive) return;
+      setLeaderboardEpoch(epoch);
+      void ensureLeaderboardPresence(uid, fullName, epoch).catch(() => undefined);
+    });
+
+    void ensureLeaderboardPresence(uid, fullName).catch(() => undefined);
+
+    const unsubLb = subscribeLeaderboardUsers(
+      (users) => {
+        if (!alive) return;
+        setLeaderboardUsers(users);
+        setLeaderboardLoading(false);
+      },
+      () => {
+        if (alive) setLeaderboardLoading(false);
+      }
+    );
+
+    const unsubFriendships = subscribeFriendships(uid, (items) => {
+      if (alive) setFriendships(items);
+    });
+
+    const unsubOutgoing = subscribeOutgoingFriendRequests(uid, (items) => {
+      if (alive) setOutgoingFriendRequests(items);
+    });
+
+    const unsubIncoming = subscribeIncomingFriendRequests(uid, (items) => {
+      if (!alive) return;
+      setIncomingFriendRequests(items);
+      for (const req of items) {
+        if (req.status !== 'pending') continue;
+        const key = `req:${req.id}:${req.createdAtMs}`;
+        if (notifiedKeysRef.current.has(key)) continue;
+        if (req.createdAtMs > lastNotifyMs || tabRef.current !== 'friends') {
+          notifiedKeysRef.current.add(key);
+          if (req.createdAtMs > lastNotifyMs) {
+            markSeenTime(req.createdAtMs);
+            const toast: InAppNotificationToast = {
+              id: key,
+              kind: 'friend_request',
+              senderUid: req.fromUid,
+              senderName: req.fromName,
+              title: `طلب صداقة من ${req.fromName}`,
+              body: 'أرسل لك طلب صداقة — اضغط للقبول أو الرفض',
+              createdAtMs: req.createdAtMs,
+            };
+            pushInAppToast(toast);
+            void triggerSystemNotification({
+              title: `طلب صداقة جديد — ${req.fromName}`,
+              body: 'اضغط لفتح قائمة الأصدقاء والرد على الطلب',
+              tag: key,
+              actionTab: 'friends',
+              onInAppClick: () => {
+                setActiveRoomId(null);
+                setTab('friends');
+              },
+            });
+          }
+        }
+      }
+    });
+
+    const unsubChats = subscribeDirectChats(uid, (chats) => {
+      if (!alive) return;
+      setDirectChats(chats);
+      for (const chat of chats) {
+        const myReadAt = Number(chat.readAtMsByUid?.[uid] || 0);
+        const lastMsgAt = Number(chat.lastMessageAtMs || 0);
+        if (
+          !chat.lastSenderId ||
+          chat.lastSenderId === uid ||
+          lastMsgAt === 0 ||
+          lastMsgAt <= myReadAt
+        ) {
+          continue;
+        }
+        const key = `msg:${chat.id}:${lastMsgAt}`;
+        if (notifiedKeysRef.current.has(key)) continue;
+        notifiedKeysRef.current.add(key);
+
+        const currentlyViewingThisChat =
+          !activeRoomIdRef.current &&
+          tabRef.current === 'friends' &&
+          selectedFriendUidRef.current === chat.lastSenderId &&
+          typeof document !== 'undefined' &&
+          document.visibilityState === 'visible';
+
+        if (!currentlyViewingThisChat && lastMsgAt > lastNotifyMs) {
+          markSeenTime(lastMsgAt);
+          const kind = chat.lastMessageType === 'quiz_share' ? 'quiz_share' : 'message';
+          const senderName = chat.lastSenderName || 'صديق';
+          const body = chat.lastMessageText || 'رسالة جديدة';
+          pushInAppToast({
+            id: key,
+            kind,
+            senderUid: chat.lastSenderId,
+            senderName,
+            title: senderName,
+            body,
+            createdAtMs: lastMsgAt,
+            chatId: chat.id,
+          });
+          void triggerSystemNotification({
+            title: kind === 'quiz_share' ? `${senderName} أرسل لك اختباراً` : `رسالة جديدة من ${senderName}`,
+            body,
+            tag: `chat-${chat.id}`,
+            senderUid: chat.lastSenderId,
+            chatId: chat.id,
+            onInAppClick: () => {
+              setActiveRoomId(null);
+              setSelectedFriendUid(chat.lastSenderId);
+              setTab('friends');
+            },
+          });
+        }
+      }
+    });
+
+    const handleOnlineReconnect = () => {
+      void ensureLeaderboardPresence(uid, fullName).catch(() => undefined);
+    };
+    window.addEventListener('online', handleOnlineReconnect);
+
+    return () => {
+      alive = false;
+      unsubMeta();
+      unsubLb();
+      unsubFriendships();
+      unsubOutgoing();
+      unsubIncoming();
+      unsubChats();
+      window.removeEventListener('online', handleOnlineReconnect);
+    };
+  }, [profile?.uid, profile?.fullNameQuad, pushInAppToast]);
 
   // Watch real-time server SSE stream + static Backup DB fallback so ALL connected devices switch immediately when a migration completes
   useEffect(() => {
@@ -1911,6 +2182,51 @@ export default function App() {
                   <ListChecks className="w-4 h-4" />
                   <span>اختباراتي</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setTab('leaderboard')}
+                  className={`flex items-center gap-1 sm:gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    tab === 'leaderboard'
+                      ? 'border-[#FFC800] text-[#9A6B00]'
+                      : 'border-transparent text-[#777777] hover:text-[#3C3C3C]'
+                  }`}
+                >
+                  <Trophy className="w-4 h-4" />
+                  <span>لوحة الشرف</span>
+                </button>
+                {(() => {
+                  const pendingReqCount = incomingFriendRequests.filter(
+                    (r) => r.status === 'pending'
+                  ).length;
+                  const unreadChatCount = directChats.filter((c) => {
+                    const readMs = Number(c.readAtMsByUid?.[profile.uid] || 0);
+                    return (
+                      Boolean(c.lastSenderId) &&
+                      c.lastSenderId !== profile.uid &&
+                      Number(c.lastMessageAtMs || 0) > readMs
+                    );
+                  }).length;
+                  const totalSocialBadge = pendingReqCount + unreadChatCount;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => setTab('friends')}
+                      className={`flex items-center gap-1 sm:gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        tab === 'friends'
+                          ? 'border-[#1CB0F6] text-[#1899D6]'
+                          : 'border-transparent text-[#777777] hover:text-[#3C3C3C]'
+                      }`}
+                    >
+                      <Users className="w-4 h-4" />
+                      <span>الأصدقاء</span>
+                      {totalSocialBadge > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-[#FF4B4B] text-white text-[10px] font-black font-latin leading-none">
+                          {totalSocialBadge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })()}
 
                 {effectiveIsProgrammer && (
                   <button
@@ -1978,15 +2294,20 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => void signOut(auth)}
-                  className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] sm:text-xs font-black text-[#777777] hover:text-[#EA2B2B] whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                  <span className="sm:hidden">خروج</span>
-                  <span className="hidden sm:inline">تسجيل الخروج</span>
-                </button>
+                <>
+                  <div className="hidden md:flex items-center">
+                    <PWAInstallButton compact />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void signOut(auth)}
+                    className="duo-btn flex items-center gap-1.5 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl bg-white border-2 border-b-4 border-[#E5E5E5] text-[11px] sm:text-xs font-black text-[#777777] hover:text-[#EA2B2B] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                    <span className="sm:hidden">خروج</span>
+                    <span className="hidden sm:inline">تسجيل الخروج</span>
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -2414,13 +2735,47 @@ export default function App() {
               </div>
             )
           ) : tab === 'home' ? (
-            <RoleHub
-              profile={profile}
-              onProfileUpdated={(next) => setProfile(next)}
-              onEnterRoom={(roomId) => handleEnterRoom(roomId)}
-            />
+            <div className="flex flex-col">
+              <div className="md:hidden px-3 pt-3 flex justify-end">
+                <PWAInstallButton compact />
+              </div>
+              <RoleHub
+                profile={profile}
+                onProfileUpdated={(next) => setProfile(next)}
+                onEnterRoom={(roomId) => handleEnterRoom(roomId)}
+              />
+            </div>
           ) : tab === 'quizzes' ? (
             <MyQuizzesView profile={profile} />
+          ) : tab === 'leaderboard' ? (
+            <LeaderboardView
+              profile={profile}
+              isProgrammer={effectiveIsProgrammer}
+              resetEpoch={leaderboardEpoch}
+              rawUsers={leaderboardUsers}
+              loading={leaderboardLoading}
+              friendships={friendships}
+              incomingRequests={incomingFriendRequests}
+              outgoingRequests={outgoingFriendRequests}
+              onOpenFriendChat={(friendUid) => {
+                setSelectedFriendUid(friendUid);
+                setTab('friends');
+              }}
+            />
+          ) : tab === 'friends' ? (
+            <FriendsView
+              profile={profile}
+              resetEpoch={leaderboardEpoch}
+              leaderboardUsers={leaderboardUsers}
+              friendships={friendships}
+              incomingRequests={incomingFriendRequests}
+              outgoingRequests={outgoingFriendRequests}
+              directChats={directChats}
+              selectedFriendUid={selectedFriendUid}
+              onSelectFriendUid={(uid) => setSelectedFriendUid(uid)}
+              onGoToLeaderboard={() => setTab('leaderboard')}
+              onGoToMyQuizzes={() => setTab('quizzes')}
+            />
           ) : (
             <SavedTestsView profile={profile} />
           )}
@@ -2592,6 +2947,20 @@ export default function App() {
           accent="purple"
         />
       )}
+      <NotificationCenterToast
+        toasts={inAppToasts}
+        onDismissToast={(id) =>
+          setInAppToasts((prev) => prev.filter((t) => t.id !== id))
+        }
+        onOpenToast={(toast) => {
+          setInAppToasts((prev) => prev.filter((t) => t.id !== toast.id));
+          setActiveRoomId(null);
+          if (toast.senderUid && toast.kind !== 'friend_request') {
+            setSelectedFriendUid(toast.senderUid);
+          }
+          setTab('friends');
+        }}
+      />
     </AppErrorBoundary>
   );
 }

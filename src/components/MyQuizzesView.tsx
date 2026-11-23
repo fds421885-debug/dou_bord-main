@@ -86,6 +86,7 @@ import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
 import { DuoLoading } from './DuoLoading';
 import { MyQuizStatsView } from './MyQuizStatsView';
+import { syncUserStatsToLeaderboard } from '../social';
 
 type Mode =
   | { kind: 'list' }
@@ -209,6 +210,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         snap.forEach((d) => list.push(decodeExamAttemptFromFirestore(d.data() as QuizAttempt)));
         list.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
         setAttempts(list);
+        void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, list).catch(() => undefined);
         void saveSessionSnapshot({
           key: 'quiz_attempts',
           ownerId: profile.uid,
@@ -398,6 +400,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         <ExamResult
           key={mode.attemptId}
           ownerId={profile.uid}
+          ownerName={profile.fullNameQuad}
           attemptId={mode.attemptId}
           settings={mode.settings}
           questions={mode.questions}

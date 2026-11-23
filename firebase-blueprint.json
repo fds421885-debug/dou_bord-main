@@ -998,11 +998,150 @@
         "updatedAt"
       ]
     }
+    "LeaderboardMeta": {
+      "title": "LeaderboardMeta",
+      "description": "Programmer-controlled epoch marker for resetting leaderboard scores",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "resetEpoch": { "type": "integer" },
+        "updatedBy": { "type": "string" },
+        "updatedByName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "resetEpoch", "updatedBy", "updatedByName", "updatedAt"]
+    },
+    "LeaderboardUser": {
+      "title": "LeaderboardUser",
+      "description": "Public leaderboard progress and full precomputed quiz statistics without PII",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "fullNameQuad": { "type": "string" },
+        "epoch": { "type": "integer" },
+        "correctCount": { "type": "integer" },
+        "wrongCount": { "type": "integer" },
+        "totalQuestions": { "type": "integer" },
+        "attemptsCount": { "type": "integer" },
+        "statsSnapshot": { "type": "object" },
+        "joinedAt": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullNameQuad", "epoch", "correctCount", "wrongCount", "totalQuestions", "attemptsCount", "statsSnapshot", "joinedAt", "updatedAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Friend request between two verified users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "fromName": { "type": "string" },
+        "toUid": { "type": "string" },
+        "toName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected"] },
+        "createdAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fromUid", "fromName", "toUid", "toName", "status", "createdAtMs", "updatedAt"]
+    },
+    "Friendship": {
+      "title": "Friendship",
+      "description": "Mutual friendship record between two users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uids": { "type": "array" },
+        "names": { "type": "object" },
+        "createdBy": { "type": "string" },
+        "createdAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uids", "names", "createdBy", "createdAtMs", "updatedAt"]
+    },
+    "DirectChat": {
+      "title": "DirectChat",
+      "description": "1-to-1 chat thread metadata between friends",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "participantIds": { "type": "array" },
+        "participantNames": { "type": "object" },
+        "lastMessageText": { "type": "string" },
+        "lastMessageType": { "type": "string", "enum": ["text", "quiz_share", "init"] },
+        "lastSenderId": { "type": "string" },
+        "lastSenderName": { "type": "string" },
+        "lastMessageAtMs": { "type": "integer" },
+        "readAtMsByUid": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "participantIds", "participantNames", "lastMessageText", "lastMessageType", "lastSenderId", "lastSenderName", "lastMessageAtMs", "readAtMsByUid", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Message or shared quiz card inside a direct chat",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "chatId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "quiz_share"] },
+        "text": { "type": "string" },
+        "quizShare": { "type": "object" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "chatId", "senderId", "senderName", "recipientId", "type", "text", "createdAtMs", "createdAt"]
+    },
+    "SharedFriendQuiz": {
+      "title": "SharedFriendQuiz",
+      "description": "Quiz payload gifted between friends so recipients can import into myQuizzes",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "chatId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "recipientId": { "type": "string" },
+        "title": { "type": "string" },
+        "questions": { "type": "array" },
+        "questionCount": { "type": "integer" },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "chatId", "senderId", "senderName", "recipientId", "title", "questions", "questionCount", "createdAtMs", "createdAt"]
+    }
   },
   "firestore": {
     "/platform/{docId}": {
       "schema": { "$ref": "#/entities/PlatformPointer" },
-      "description": "Platform-wide migration announcement pointer and split database registry"
+      "description": "Platform-wide migration announcement pointer, split database registry, and leaderboardMeta epoch"
+    },
+    "/leaderboardUsers/{userId}": {
+      "schema": { "$ref": "#/entities/LeaderboardUser" },
+      "description": "Public leaderboard progress and quiz analytics for verified users"
+    },
+    "/friendRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Pending/accepted/rejected friend requests between users"
+    },
+    "/friendships/{pairId}": {
+      "schema": { "$ref": "#/entities/Friendship" },
+      "description": "Accepted friendships linking pairs of users"
+    },
+    "/directChats/{chatId}": {
+      "schema": { "$ref": "#/entities/DirectChat" },
+      "description": "Direct 1-on-1 chat metadata and unread indicators"
+    },
+    "/directChats/{chatId}/messages/{msgId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Direct messages and shared quiz cards inside a chat"
+    },
+    "/sharedFriendQuizzes/{sharedId}": {
+      "schema": { "$ref": "#/entities/SharedFriendQuiz" },
+      "description": "Full quiz payloads shared between friends"
     },
     "/users/{userId}/private/{docId}": {
       "schema": { "$ref": "#/entities/UserProfile" },

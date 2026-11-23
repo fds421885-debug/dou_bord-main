@@ -109,14 +109,13 @@ import type {
   UserProfile,
 } from './types';
 
-export const REQUIRED_RULES_VERSION = 'v7_unlimited_questions_2026_11_21';
+export const REQUIRED_RULES_VERSION = 'v8_social_leaderboard_2026_11_22';
 
 export const RULES_UPDATE_CHANGES_AR: string[] = [
-  'رفع حد الأسئلة داخل الاختبار الواحد ونتائج المحاولات والنماذج المشتركة (myQuizzes, quizAttempts, sharedQuizzes) من 100 إلى 10,000 سؤال بدلاً من تقييدها بمئة سؤال فقط.',
-  'دعم حفظ واسترجاع صيغة «الأسئلة التفاعلية بالجداول» (table) وحقول الشرح المتقدم (explanationTable, explanationComparison).',
-  'إضافة صلاحية حفظ إجابات الطالب في الجداول (tableAnswers) داخل سجل محاولات الاختبار (quizAttempts).',
-  'إضافة مسار «الأسئلة المميزة ⭐» الخاص بكل طالب (/users/{uid}/starredQuestions/{starredId}) للقراءة والكتابة والحذف بأمان.',
-  'دعم ربط «اختبارات التقوية والتدريب على القواعد» تحت الاختبار الأساسي (parentQuizId, quizKind, drillStyle, sourceStarredId, ruleTitle) في اختباراتي (myQuizzes).',
+  'رفع حد الأسئلة داخل الاختبار الواحد ونتائج المحاولات والنماذج المشتركة (myQuizzes, quizAttempts, sharedQuizzes) من 100 إلى 10,000 سؤال.',
+  'دعم لوحة الشرف العالمية وتصفيرها من المبرمج (leaderboardUsers, platform/leaderboardMeta).',
+  'دعم طلبات الصداقة وقائمة الأصدقاء والمحادثات الفورية وإرسال الاختبارات بين الأصدقاء (friendRequests, friendships, directChats, sharedFriendQuizzes).',
+  'دعم «الأسئلة المميزة ⭐» و«اختبارات التقوية» وحقول القوانين والجداول التفاعلية.',
 ];
 
 export const RULES_UPDATE_STEPS_AR: string[] = [
@@ -126,10 +125,10 @@ export const RULES_UPDATE_STEPS_AR: string[] = [
   '4. انتظر ثانيتين بعد النشر ثم عد هنا واضغط «إعادة فحص القواعد الآن» للتأكد من تفعيلها 100%.',
 ];
 
-const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v7_ok_';
+const RULES_COMPLIANCE_SESSION_PREFIX = 'duoboard_rules_v8_ok_';
 
 export interface RulesProbeCheckItem {
-  id: 'anti_test_mode' | 'starred' | 'my_quizzes_v7' | 'attempts_v7';
+  id: 'anti_test_mode' | 'starred' | 'my_quizzes_v7' | 'attempts_v7' | 'social_v8';
   label: string;
   passed: boolean;
   detail?: string;
@@ -155,6 +154,7 @@ function makeAllPassedChecks(): RulesProbeCheckItem[] {
     { id: 'starred', label: 'صلاحية «الأسئلة المميزة ⭐» (starredQuestions)', passed: true },
     { id: 'my_quizzes_v7', label: 'اختبارات التقوية وحد الـ 10,000 سؤال (myQuizzes)', passed: true },
     { id: 'attempts_v7', label: 'سجل المحاولات وإجابات الجداول (quizAttempts)', passed: true },
+    { id: 'social_v8', label: 'لوحة الشرف والأصدقاء والمحادثات (leaderboardUsers, friendRequests)', passed: true },
   ];
 }
 
@@ -237,7 +237,7 @@ export async function checkActiveDatabaseRulesCompliance(
       integerValue: '-1',
     }));
 
-    const [rogueResp, starredResp, quizCommitResp, attemptCommitResp] = await Promise.all([
+    const [rogueResp, starredResp, quizCommitResp, attemptCommitResp, socialResp] = await Promise.all([
       fetchProbe('/platform/rules_probe_check', {
         method: 'PATCH',
         body: JSON.stringify({ fields: { id: { stringValue: 'rules_probe_check' } } }),
@@ -300,6 +300,9 @@ export async function checkActiveDatabaseRulesCompliance(
           ],
         }),
       }),
+      fetchProbe(`/leaderboardUsers/${encodedUid}`, {
+        method: 'GET',
+      }),
     ]);
 
     // Immediate cleanup of any created probe documents (even if another probe failed)
@@ -330,7 +333,8 @@ export async function checkActiveDatabaseRulesCompliance(
       rogueResp.status === 429 ||
       starredResp.status === 429 ||
       quizCommitResp.status === 429 ||
-      attemptCommitResp.status === 429
+      attemptCommitResp.status === 429 ||
+      socialResp.status === 429
     ) {
       return {
         compliant: true,
@@ -344,6 +348,7 @@ export async function checkActiveDatabaseRulesCompliance(
     const starredOk = starredResp.ok || starredResp.status === 404;
     const myQuizzesOk = quizCommitResp.ok;
     const attemptsOk = attemptCommitResp.ok;
+    const socialOk = socialResp.ok || socialResp.status === 404;
 
     const checks: RulesProbeCheckItem[] = [
       {
@@ -378,16 +383,24 @@ export async function checkActiveDatabaseRulesCompliance(
           ? 'تقبل إجابات الجداول وأكثر من 100 سؤال'
           : `فشل الاختبار الفعلي (${attemptCommitResp.status}) — القواعد ترفض tableAnswers أو +100 سؤال`,
       },
+      {
+        id: 'social_v8',
+        label: 'لوحة الشرف والأصدقاء والمحادثات (leaderboardUsers, friendRequests)',
+        passed: socialOk,
+        detail: socialOk
+          ? 'صلاحيات لوحة الشرف والأصدقاء والرسائل مفعّلة'
+          : `مرفوضة (${socialResp.status}) — القواعد قديمة ولا تدعم لوحة الشرف والأصدقاء`,
+      },
     ];
 
     recordFirestoreOperations(projectId, {
-      reads: 1,
+      reads: 2,
       writes:
         (rogueResp.ok ? 1 : 0) + (quizCommitResp.ok ? 1 : 0) + (attemptCommitResp.ok ? 1 : 0),
       deletes: cleanupPromises.length,
     });
 
-    if (antiTestModeOk && starredOk && myQuizzesOk && attemptsOk) {
+    if (antiTestModeOk && starredOk && myQuizzesOk && attemptsOk && socialOk) {
       return { compliant: true, status: 'ok', checks };
     }
 
@@ -396,6 +409,7 @@ export async function checkActiveDatabaseRulesCompliance(
     if (!starredOk) failedLabels.push('الأسئلة المميزة ⭐');
     if (!myQuizzesOk) failedLabels.push('حفظ +100 سؤال واختبارات التقوية');
     if (!attemptsOk) failedLabels.push('محاولات الاختبار وإجابات الجداول');
+    if (!socialOk) failedLabels.push('لوحة الشرف والأصدقاء');
 
     return {
       compliant: false,

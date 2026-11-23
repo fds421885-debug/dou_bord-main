@@ -4,11 +4,13 @@ import type { ExamQuestion, ExamSettings } from '../types';
 import { buildAttempt, saveAttempt, scoreExam } from '../exam';
 import { isFirestorePermissionError, isQuotaError } from '../firebase';
 import { deleteSessionSnapshot } from '../localDraftStore';
+import { fetchUserAttemptsAndSyncLeaderboard } from '../social';
 import { ExamReview } from './ExamReview';
 import { DuoLoading } from './DuoLoading';
 
 interface Props {
   ownerId: string;
+  ownerName?: string;
   attemptId: string;
   settings: ExamSettings;
   questions: ExamQuestion[];
@@ -23,6 +25,7 @@ interface Props {
 
 export const ExamResult: React.FC<Props> = ({
   ownerId,
+  ownerName,
   attemptId,
   settings,
   questions,
@@ -44,9 +47,20 @@ export const ExamResult: React.FC<Props> = ({
     setState('saving');
     setErr(null);
     try {
-      await saveAttempt(
-        buildAttempt(ownerId, attemptId, settings, questions, answers, durationSec, finishedAt, tableAnswers)
+      const attempt = buildAttempt(
+        ownerId,
+        attemptId,
+        settings,
+        questions,
+        answers,
+        durationSec,
+        finishedAt,
+        tableAnswers
       );
+      await saveAttempt(attempt);
+      if (ownerName?.trim()) {
+        void fetchUserAttemptsAndSyncLeaderboard(ownerId, ownerName, attempt).catch(() => undefined);
+      }
       await deleteSessionSnapshot('exam_session');
       setState('saved');
     } catch (e) {

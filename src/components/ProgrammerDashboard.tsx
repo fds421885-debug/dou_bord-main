@@ -16,14 +16,17 @@ import {
   Plus,
   Radio,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Trophy,
   UserPlus,
   Users,
   XCircle,
 } from 'lucide-react';
 import firestoreRulesRaw from '../../firestore.rules?raw';
+import { resetLeaderboardEpoch } from '../social';
 import {
   activeFirebaseConfig,
   activeProjectId,
@@ -151,6 +154,8 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
   }));
   const [justAddedDbId, setJustAddedDbId] = useState<string | null>(null);
   const [calibratingQuota, setCalibratingQuota] = useState(false);
+  const [confirmLeaderboardReset, setConfirmLeaderboardReset] = useState(false);
+  const [resettingLeaderboard, setResettingLeaderboard] = useState(false);
 
   const recheckActiveRules = async (bypassCache = true) => {
     if (onRecheckAllRules && bypassCache) {
@@ -764,6 +769,76 @@ export const ProgrammerDashboard: React.FC<ProgrammerDashboardProps> = ({
             </span>
           </div>
         )}
+
+        {/* Leaderboard Programmer Reset Control */}
+        <div className="p-3.5 rounded-2xl bg-[#FFFDF2] border-2 border-[#FFC800]/60 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-[#FFC800] text-[#3C3C3C] flex items-center justify-center shrink-0">
+              <Trophy className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-xs sm:text-sm font-black text-[#3C3C3C]">
+                إدارة لوحة الشرف والمنافسة
+              </h3>
+              <p className="text-[11px] font-bold text-[#777777]">
+                تصفير نقاط لوحة الشرف للجميع لبدء جولة منافسة جديدة من الصفر
+              </p>
+            </div>
+          </div>
+
+          {confirmLeaderboardReset ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={resettingLeaderboard}
+                onClick={async () => {
+                  setResettingLeaderboard(true);
+                  setErrorNotice(null);
+                  try {
+                    await resetLeaderboardEpoch(
+                      firebaseUser.uid,
+                      fullNameQuad || 'المبرمج'
+                    );
+                    playDuoSound('correct');
+                    setConfirmLeaderboardReset(false);
+                    setStatusNotice(
+                      'تم تصفير لوحة الشرف للجميع بنجاح وبدء حساب الدورة الجديدة من الصفر!'
+                    );
+                  } catch {
+                    setErrorNotice('تعذر تصفير لوحة الشرف — تأكد من نشر قواعد firestore.rules المحدّثة.');
+                  } finally {
+                    setResettingLeaderboard(false);
+                  }
+                }}
+                className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FF4B4B] border-2 border-b-4 border-[#EA2B2B] text-white text-xs font-black cursor-pointer disabled:opacity-60"
+              >
+                {resettingLeaderboard ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="w-3.5 h-3.5" />
+                )}
+                <span>تأكيد التصفير</span>
+              </button>
+              <button
+                type="button"
+                disabled={resettingLeaderboard}
+                onClick={() => setConfirmLeaderboardReset(false)}
+                className="px-3 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#777777] cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmLeaderboardReset(true)}
+              className="duo-btn flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-[#FFDFE0] border-2 border-b-4 border-[#FFC800] text-[#9A6B00] hover:text-[#EA2B2B] text-xs font-black cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>تصفير لوحة الشرف الآن</span>
+            </button>
+          )}
+        </div>
 
         {/* Live Spark Free Quota Monitor + <= 5% (-0.5% Step) Supervisor Alert Control */}
         <div

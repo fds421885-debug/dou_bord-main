@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#58CC02" />
+  <rect x="32" y="32" width="448" height="448" rx="92" fill="#61E002" opacity="0.35" />
+  <!-- Board card -->
+  <rect x="96" y="128" width="320" height="236" rx="44" fill="#FFFFFF" stroke="#46A302" stroke-width="14" />
+  <!-- Top board bar accents -->
+  <circle cx="152" cy="176" r="14" fill="#FF4B4B" />
+  <circle cx="196" cy="176" r="14" fill="#FFC800" />
+  <circle cx="240" cy="176" r="14" fill="#1CB0F6" />
+  <!-- Check / Spark lines on board -->
+  <path d="M154 258 L206 306 L342 206" stroke="#58CC02" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- Stand / Footer bar -->
+  <rect x="196" y="384" width="120" height="26" rx="13" fill="#FFFFFF" />
+  <!-- Golden badge star -->
+  <circle cx="388" cy="126" r="44" fill="#FFC800" stroke="#FFFFFF" stroke-width="10" />
+  <path d="M388 99 L396 116 L414 119 L401 131 L404 149 L388 140 L372 149 L375 131 L362 119 L380 116 Z" fill="#FFFFFF" />
+</svg>

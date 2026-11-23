@@ -251,15 +251,16 @@ export const QuotaFullDbSelectorModal: React.FC<QuotaFullDbSelectorModalProps> =
 
       const resp = isBackendServerDetected()
         ? await fetch(resolveApiUrl('/api/platform/quota-failover'), {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          targetProjectId: candidate.config.projectId,
-          targetFirestoreDatabaseId: candidate.config.firestoreDatabaseId || '',
-          quotaExceededReported: true,
-          requesterEmail: firebaseUser?.email || '',
-        }),
-      });
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              targetProjectId: candidate.config.projectId,
+              targetFirestoreDatabaseId: candidate.config.firestoreDatabaseId || '',
+              quotaExceededReported: true,
+              requesterEmail: firebaseUser?.email || '',
+            }),
+          })
+        : null;
 
       if (resp && !resp.ok) {
         const errData = (await resp.json().catch(() => null)) as { error?: string } | null;

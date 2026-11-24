@@ -5,6 +5,8 @@ import {
   BarChart3,
   Calendar,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   ClipboardCopy,
   Eye,
@@ -17,8 +19,12 @@ import type { MyQuiz, QuizAttempt } from '../types';
 import { formatDuration } from '../exam';
 import {
   computeQuizStats,
+  extractActiveAttemptDays,
   filterAttemptsByCriteria,
   formatAchievementSummaryText,
+  formatStatsPeriodLabel,
+  shiftLocalDateKey,
+  toLocalDateKey,
   type StatsTimeRange,
 } from '../quizStats';
 import { MathText } from '../mathText';
@@ -59,7 +65,11 @@ export const MyQuizStatsView: React.FC<Props> = ({
   onStartExamSetup,
   onOpenAttempt,
 }) => {
+  const todayKey = toLocalDateKey(Date.now());
   const [range, setRange] = useState<StatsTimeRange>('all');
+  const [dayDate, setDayDate] = useState<string>(() => todayKey);
+  const [fromDate, setFromDate] = useState<string>(() => shiftLocalDateKey(todayKey, -6));
+  const [toDate, setToDate] = useState<string>(() => todayKey);
   const [quizFilterId, setQuizFilterId] = useState<string>('all');
   const [copied, setCopied] = useState(false);
   const [showCopyFallback, setShowCopyFallback] = useState(false);
@@ -82,13 +92,28 @@ export const MyQuizStatsView: React.FC<Props> = ({
     return Array.from(map.entries()).map(([id, title]) => ({ id, title }));
   }, [quizzes, attempts]);
 
+  const activeDays = useMemo(() => extractActiveAttemptDays(attempts), [attempts]);
+
+  const dateBounds = useMemo(
+    () => ({ dayDate, fromDate, toDate }),
+    [dayDate, fromDate, toDate]
+  );
+
   const filteredAttempts = useMemo(
-    () => filterAttemptsByCriteria(attempts, range, quizFilterId),
-    [attempts, range, quizFilterId]
+    () => filterAttemptsByCriteria(attempts, range, quizFilterId, Date.now(), dateBounds),
+    [attempts, range, quizFilterId, dateBounds]
+  );
+
+  const periodLabel = useMemo(
+    () => formatStatsPeriodLabel(range, dateBounds),
+    [range, dateBounds]
   );
 
   const stats = useMemo(() => computeQuizStats(filteredAttempts), [filteredAttempts]);
-  const copySummaryText = useMemo(() => formatAchievementSummaryText(stats), [stats]);
+  const copySummaryText = useMemo(
+    () => formatAchievementSummaryText(stats, range === 'all' ? undefined : periodLabel),
+    [stats, range, periodLabel]
+  );
 
   const handleCopySummary = async () => {
     try {
@@ -196,54 +221,264 @@ export const MyQuizStatsView: React.FC<Props> = ({
         </div>
 
         {/* فلاتر الفترة والاختبار */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#F0F0F0]">
-          <div className="inline-flex rounded-xl border border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black">
-            {(
-              [
-                { id: 'all', label: 'كل المحاولات' },
-                { id: '30d', label: 'آخر 30 يوماً' },
-                { id: '7d', label: 'آخر 7 أيام' },
-              ] as const
-            ).map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => {
-                  setRange(opt.id);
+        <div className="flex flex-col gap-2.5 pt-2 border-t border-[#F0F0F0]">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="inline-flex flex-wrap gap-1 rounded-xl border border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black">
+              {(
+                [
+                  { id: 'all', label: 'كل المحاولات' },
+                  { id: 'today', label: 'اليوم فقط' },
+                  { id: '7d', label: 'آخر 7 أيام' },
+                  { id: '30d', label: 'آخر 30 يوماً' },
+                  { id: 'day', label: 'يوم محدد' },
+                  { id: 'custom', label: 'فترة محددة' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => {
+                    setRange(opt.id);
+                    if (opt.id === 'day' && !dayDate) {
+                      setDayDate(activeDays[0]?.dateKey || todayKey);
+                    }
+                    setSelectedPointIdx(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+                    range === opt.id
+                      ? 'bg-white text-[#7C3AED] shadow-xs'
+                      : 'text-[#666666] hover:text-[#3C3C3C]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label htmlFor="stats-quiz-filter" className="text-xs font-black text-[#666666] whitespace-nowrap">
+                تصفية حسب الاختبار:
+              </label>
+              <select
+                id="stats-quiz-filter"
+                value={quizFilterId}
+                onChange={(e) => {
+                  setQuizFilterId(e.target.value);
                   setSelectedPointIdx(null);
                 }}
-                className={`px-3 py-1.5 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
-                  range === opt.id
-                    ? 'bg-white text-[#7C3AED] shadow-xs'
-                    : 'text-[#666666] hover:text-[#3C3C3C]'
-                }`}
+                className="max-w-xs rounded-xl border border-[#E5E5E5] bg-white px-3 py-1.5 text-xs font-black text-[#3C3C3C] outline-none focus:border-[#7C3AED]"
               >
-                {opt.label}
-              </button>
-            ))}
+                <option value="all">جميع الاختبارات ({attempts.length})</option>
+                {quizFilterOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.title}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <label htmlFor="stats-quiz-filter" className="text-xs font-black text-[#666666] whitespace-nowrap">
-              تصفية حسب الاختبار:
-            </label>
-            <select
-              id="stats-quiz-filter"
-              value={quizFilterId}
-              onChange={(e) => {
-                setQuizFilterId(e.target.value);
-                setSelectedPointIdx(null);
-              }}
-              className="max-w-xs rounded-xl border border-[#E5E5E5] bg-white px-3 py-1.5 text-xs font-black text-[#3C3C3C] outline-none focus:border-[#7C3AED]"
-            >
-              <option value="all">جميع الاختبارات ({attempts.length})</option>
-              {quizFilterOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.title}
-                </option>
-              ))}
-            </select>
-          </div>
+          {range === 'day' && (
+            <div className="rounded-2xl border border-[#E2D4F8] bg-[#FAF7FF] p-3 flex flex-col gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label htmlFor="stats-single-day" className="text-xs font-black text-[#5B21B6] inline-flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span>اختر اليوم:</span>
+                  </label>
+                  <input
+                    id="stats-single-day"
+                    type="date"
+                    dir="ltr"
+                    value={dayDate}
+                    onChange={(e) => {
+                      if (e.target.value) setDayDate(e.target.value);
+                      setSelectedPointIdx(null);
+                    }}
+                    className="rounded-xl border border-[#D8B4FE] bg-white px-2.5 py-1.5 text-xs font-black font-latin text-[#3C3C3C] outline-none focus:border-[#7C3AED]"
+                  />
+                  <div className="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDayDate(shiftLocalDateKey(dayDate || todayKey, -1));
+                        setSelectedPointIdx(null);
+                      }}
+                      title="اليوم السابق"
+                      className="inline-flex items-center gap-0.5 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#7C3AED] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                      <span>السابق</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDayDate(shiftLocalDateKey(dayDate || todayKey, 1));
+                        setSelectedPointIdx(null);
+                      }}
+                      title="اليوم التالي"
+                      className="inline-flex items-center gap-0.5 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#7C3AED] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                    >
+                      <span>التالي</span>
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDayDate(todayKey);
+                      setSelectedPointIdx(null);
+                    }}
+                    className={`px-2.5 py-1 rounded-xl border text-[11px] font-black cursor-pointer ${
+                      dayDate === todayKey
+                        ? 'bg-[#7C3AED] border-[#6D28D9] text-white'
+                        : 'bg-white border-[#E5E5E5] text-[#5B21B6]'
+                    }`}
+                  >
+                    اليوم
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDayDate(shiftLocalDateKey(todayKey, -1));
+                      setSelectedPointIdx(null);
+                    }}
+                    className={`px-2.5 py-1 rounded-xl border text-[11px] font-black cursor-pointer ${
+                      dayDate === shiftLocalDateKey(todayKey, -1)
+                        ? 'bg-[#7C3AED] border-[#6D28D9] text-white'
+                        : 'bg-white border-[#E5E5E5] text-[#5B21B6]'
+                    }`}
+                  >
+                    أمس
+                  </button>
+                </div>
+              </div>
+
+              {activeDays.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-[#EDE9FE]">
+                  <span className="text-[11px] font-extrabold text-[#6B7280] ml-1">
+                    أيام فيها محاولات:
+                  </span>
+                  {activeDays.slice(0, 8).map((d) => (
+                    <button
+                      key={d.dateKey}
+                      type="button"
+                      onClick={() => {
+                        setDayDate(d.dateKey);
+                        setSelectedPointIdx(null);
+                      }}
+                      className={`px-2.5 py-1 rounded-lg border text-[11px] font-black cursor-pointer transition-colors ${
+                        dayDate === d.dateKey
+                          ? 'bg-[#7C3AED] border-[#6D28D9] text-white'
+                          : 'bg-white border-[#E5E5E5] hover:border-[#A560E8] text-[#3C3C3C]'
+                      }`}
+                    >
+                      {d.label} ({d.attemptsCount})
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {range === 'custom' && (
+            <div className="rounded-2xl border border-[#E2D4F8] bg-[#FAF7FF] p-3 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <div className="flex items-center gap-1.5">
+                  <label htmlFor="stats-from-date" className="text-xs font-black text-[#5B21B6]">
+                    من تاريخ:
+                  </label>
+                  <input
+                    id="stats-from-date"
+                    type="date"
+                    dir="ltr"
+                    value={fromDate}
+                    onChange={(e) => {
+                      setFromDate(e.target.value);
+                      setSelectedPointIdx(null);
+                    }}
+                    className="rounded-xl border border-[#D8B4FE] bg-white px-2.5 py-1.5 text-xs font-black font-latin text-[#3C3C3C] outline-none focus:border-[#7C3AED]"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <label htmlFor="stats-to-date" className="text-xs font-black text-[#5B21B6]">
+                    إلى تاريخ:
+                  </label>
+                  <input
+                    id="stats-to-date"
+                    type="date"
+                    dir="ltr"
+                    value={toDate}
+                    onChange={(e) => {
+                      setToDate(e.target.value);
+                      setSelectedPointIdx(null);
+                    }}
+                    className="rounded-xl border border-[#D8B4FE] bg-white px-2.5 py-1.5 text-xs font-black font-latin text-[#3C3C3C] outline-none focus:border-[#7C3AED]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFromDate(shiftLocalDateKey(todayKey, -6));
+                    setToDate(todayKey);
+                    setSelectedPointIdx(null);
+                  }}
+                  className="px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#7C3AED] text-[11px] font-black text-[#5B21B6] cursor-pointer"
+                >
+                  آخر 7 أيام
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const monthStart = `${todayKey.slice(0, 7)}-01`;
+                    setFromDate(monthStart);
+                    setToDate(todayKey);
+                    setSelectedPointIdx(null);
+                  }}
+                  className="px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#7C3AED] text-[11px] font-black text-[#5B21B6] cursor-pointer"
+                >
+                  من بداية الشهر
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFromDate(todayKey);
+                    setToDate(todayKey);
+                    setSelectedPointIdx(null);
+                  }}
+                  className="px-2.5 py-1 rounded-xl bg-white border border-[#E5E5E5] hover:border-[#7C3AED] text-[11px] font-black text-[#5B21B6] cursor-pointer"
+                >
+                  اليوم فقط
+                </button>
+              </div>
+            </div>
+          )}
+
+          {range !== 'all' && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-extrabold text-[#5B21B6] px-1">
+              <span>
+                الفترة المعروضة: <strong className="font-black">{periodLabel}</strong> ·{' '}
+                {filteredAttempts.length}{' '}
+                {filteredAttempts.length === 1 ? 'محاولة' : 'محاولات'}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setRange('all');
+                  setSelectedPointIdx(null);
+                }}
+                className="text-[#7C3AED] hover:underline cursor-pointer"
+              >
+                العودة لكل المحاولات
+              </button>
+            </div>
+          )}
         </div>
 
         {showCopyFallback && (
@@ -270,8 +505,12 @@ export const MyQuizStatsView: React.FC<Props> = ({
 
       {filteredAttempts.length === 0 ? (
         <div className={`${surface} p-8 text-center flex flex-col items-center gap-2`}>
-          <p className="text-sm font-black text-[#3C3C3C]">لا توجد محاولات مطابقة لهذا الفلتر</p>
-          <p className="text-xs font-bold text-[#777777]">جرّب اختيار «كل المحاولات» أو اختبار آخر.</p>
+          <p className="text-sm font-black text-[#3C3C3C]">
+            لا توجد محاولات مسجّلة في {range === 'all' ? 'هذا الفلتر' : periodLabel}
+          </p>
+          <p className="text-xs font-bold text-[#777777]">
+            جرّب اختيار يوم آخر من «أيام فيها محاولات»، أو توسيع الفترة، أو العودة إلى «كل المحاولات».
+          </p>
           <button
             type="button"
             onClick={() => {

@@ -1,7 +1,22 @@
 import type { QuizAttempt } from './types';
 import { computeMistakeLedger, isMistakeReviewAttempt } from './mistakeLedger';
 
-export type StatsTimeRange = 'all' | '30d' | '7d';
+export type StatsTimeRange = 'all' | 'today' | '7d' | '30d' | 'day' | 'custom';
+
+export interface StatsDateBounds {
+  /** YYYY-MM-DD (توقيت الجهاز المحلي) عند اختيار يوم محدد */
+  dayDate?: string;
+  /** YYYY-MM-DD (توقيت الجهاز المحلي) لبداية الفترة المحددة */
+  fromDate?: string;
+  /** YYYY-MM-DD (توقيت الجهاز المحلي) لنهاية الفترة المحددة */
+  toDate?: string;
+}
+
+export interface StatsActiveDayInfo {
+  dateKey: string;
+  label: string;
+  attemptsCount: number;
+}
 
 export interface TimeSlotStat {
   id: 'dawn' | 'morning' | 'afternoon' | 'evening' | 'night';
@@ -122,22 +137,148 @@ const ARABIC_WEEKDAYS: Array<{ dayIndex: number; label: string }> = [
   { dayIndex: 5, label: 'الجمعة' },
 ];
 
+/** تحويل طابع زمني (ms) إلى مفتاح يوم محلي بصيغة YYYY-MM-DD */
+export function toLocalDateKey(ms: number): string {
+  const dt = new Date(ms);
+  if (Number.isNaN(dt.getTime())) return '';
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function shiftLocalDateKey(dateKey: string, deltaDays: number): string {
+  const start = parseLocalDayBoundaryMs(dateKey, 'start');
+  if (start === null) return toLocalDateKey(Date.now() + deltaDays * 86400000);
+  const dt = new Date(start);
+  dt.setDate(dt.getDate() + deltaDays);
+  return toLocalDateKey(dt.getTime());
+}
+
+function parseLocalDayBoundaryMs(dateStr: string | undefined, edge: 'start' | 'end'): number | null {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(dateStr.trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!Number.isInteger(y) || !Number.isInteger(mo) || !Number.isInteger(d)) return null;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  const dt =
+    edge === 'start'
+      ? new Date(y, mo - 1, d, 0, 0, 0, 0)
+      : new Date(y, mo - 1, d, 23, 59, 59, 999);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return dt.getTime();
+}
+
+export function formatLocalDateArabic(dateKey: string): string {
+  const ms = parseLocalDayBoundaryMs(dateKey, 'start');
+  if (ms === null) return dateKey;
+  return new Date(ms).toLocaleDateString('ar-EG', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+export function formatStatsPeriodLabel(
+  range: StatsTimeRange,
+  bounds?: StatsDateBounds,
+  nowMs = Date.now()
+): string {
+  if (range === 'today') {
+    return `اليوم (${formatLocalDateArabic(toLocalDateKey(nowMs))})`;
+  }
+  if (range === '7d') return 'آخر 7 أيام';
+  if (range === '30d') return 'آخر 30 يوماً';
+  if (range === 'day') {
+    const key = bounds?.dayDate || toLocalDateKey(nowMs);
+    return `يوم ${formatLocalDateArabic(key)}`;
+  }
+  if (range === 'custom') {
+    const f = bounds?.fromDate?.trim() || '';
+    const t = bounds?.toDate?.trim() || '';
+    if (f && t) {
+      const fMs = parseLocalDayBoundaryMs(f, 'start');
+      const tMs = parseLocalDayBoundaryMs(t, 'start');
+      const [first, second] = fMs !== null && tMs !== null && fMs > tMs ? [t, f] : [f, t];
+      if (first === second) return `يوم ${formatLocalDateArabic(first)}`;
+      return `من ${formatLocalDateArabic(first)} إلى ${formatLocalDateArabic(second)}`;
+    }
+    if (f) return `من ${formatLocalDateArabic(f)}`;
+    if (t) return `حتى ${formatLocalDateArabic(t)}`;
+    return 'فترة مخصصة';
+  }
+  return 'كل المحاولات';
+}
+
+export function extractActiveAttemptDays(attempts: QuizAttempt[]): StatsActiveDayInfo[] {
+  const counts = new Map<string, number>();
+  for (const a of Array.isArray(attempts) ? attempts : []) {
+    if (!a || typeof a !== 'object') continue;
+    const ms = Number(a.finishedAt);
+    if (!Number.isFinite(ms) || ms <= 0) continue;
+    const key = toLocalDateKey(ms);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([dateKey, attemptsCount]) => ({
+      dateKey,
+      label: formatLocalDateArabic(dateKey),
+      attemptsCount,
+    }));
+}
+
 export function filterAttemptsByCriteria(
   attempts: QuizAttempt[],
   range: StatsTimeRange,
   quizFilterId: string,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  bounds?: StatsDateBounds
 ): QuizAttempt[] {
-  const cutoff =
-    range === '7d'
-      ? nowMs - 7 * 24 * 60 * 60 * 1000
-      : range === '30d'
-      ? nowMs - 30 * 24 * 60 * 60 * 1000
-      : 0;
+  let minFinishedAt: number | null = null;
+  let maxFinishedAt: number | null = null;
+
+  if (range === 'today') {
+    const todayKey = toLocalDateKey(nowMs);
+    minFinishedAt = parseLocalDayBoundaryMs(todayKey, 'start');
+    maxFinishedAt = parseLocalDayBoundaryMs(todayKey, 'end');
+  } else if (range === '7d') {
+    minFinishedAt = nowMs - 7 * 24 * 60 * 60 * 1000;
+  } else if (range === '30d') {
+    minFinishedAt = nowMs - 30 * 24 * 60 * 60 * 1000;
+  } else if (range === 'day') {
+    const dayKey = bounds?.dayDate || toLocalDateKey(nowMs);
+    minFinishedAt = parseLocalDayBoundaryMs(dayKey, 'start');
+    maxFinishedAt = parseLocalDayBoundaryMs(dayKey, 'end');
+  } else if (range === 'custom') {
+    const startMs = parseLocalDayBoundaryMs(bounds?.fromDate, 'start');
+    const endMs = parseLocalDayBoundaryMs(bounds?.toDate, 'end');
+    if (startMs !== null && endMs !== null) {
+      if (startMs > endMs) {
+        // إذا عكس المستخدم التاريخين نبدل الحدود تلقائياً بناءً على اليوم الكامل
+        const swappedStart = parseLocalDayBoundaryMs(bounds?.toDate, 'start');
+        const swappedEnd = parseLocalDayBoundaryMs(bounds?.fromDate, 'end');
+        minFinishedAt = swappedStart;
+        maxFinishedAt = swappedEnd;
+      } else {
+        minFinishedAt = startMs;
+        maxFinishedAt = endMs;
+      }
+    } else {
+      minFinishedAt = startMs;
+      maxFinishedAt = endMs;
+    }
+  }
 
   return (Array.isArray(attempts) ? attempts : []).filter((a) => {
     if (!a || typeof a !== 'object') return false;
-    if (cutoff > 0 && (Number(a.finishedAt) || 0) < cutoff) return false;
+    const finishedAt = Number(a.finishedAt) || 0;
+    if (minFinishedAt !== null && finishedAt < minFinishedAt) return false;
+    if (maxFinishedAt !== null && finishedAt > maxFinishedAt) return false;
     if (quizFilterId !== 'all') {
       const ids = Array.isArray(a.settings?.quizIds) ? a.settings.quizIds : [];
       if (!ids.includes(quizFilterId)) return false;
@@ -479,10 +620,12 @@ export function formatAchievementSummaryText(
   stats: Pick<
     ComputedQuizStats,
     'totalQuestions' | 'correctAnswers' | 'wrongAnswers' | 'attemptsCount'
-  >
+  >,
+  periodLabel?: string
 ): string {
   return [
     'إحصائيات إنجازك',
+    ...(periodLabel ? [`الفترة: ${periodLabel}`] : []),
     'إجمالي الأسئلة',
     String(stats.totalQuestions),
     'سؤالًا',

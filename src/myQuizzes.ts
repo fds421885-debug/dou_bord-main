@@ -25,6 +25,7 @@ import {
   sanitizeTableQuestion,
   tableQuestionProblem,
 } from './quizTable';
+import { isExamReady } from './exam';
 
 export const LIMITS = {
   maxQuestions: 10000,
@@ -1374,6 +1375,28 @@ export function formatQuizSaveError(err: unknown): string {
   return shortDetail
     ? `تعذر حفظ الاختبار (${shortDetail}). مسودتك محفوظة على جهازك، حاول مرة أخرى.`
     : 'تعذر حفظ الاختبار. تحقق من الاتصال وحاول مرة أخرى. مسودتك محفوظة على جهازك.';
+}
+
+export function isEmptyMyQuiz(
+  quiz: Pick<MyQuiz, 'questions' | 'questionCount'> | null | undefined
+): boolean {
+  if (!quiz || !Array.isArray(quiz.questions) || quiz.questions.length === 0) {
+    return true;
+  }
+  const cleaned = cleanQuestions(quiz.questions);
+  if (cleaned.length === 0) return true;
+  const hasUsableQuestion = cleaned.some((q) => {
+    if (isExamReady(q)) return true;
+    const isTable = q.questionType === 'table' || Boolean(q.table && q.choices.length === 0);
+    if (isTable) return tableQuestionProblem(q.table) === null;
+    return (
+      q.choices.length >= 2 &&
+      Number.isInteger(q.correctIndex) &&
+      q.correctIndex >= 0 &&
+      q.correctIndex < q.choices.length
+    );
+  });
+  return !hasUsableQuestion;
 }
 
 export async function deleteMyQuiz(uid: string, id: string): Promise<void> {

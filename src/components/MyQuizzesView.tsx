@@ -7,6 +7,8 @@ import {
   BookOpen,
   Brain,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardCopy,
   Download,
   Dumbbell,
@@ -27,7 +29,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { db, formatTimestamp, getTimestampMillis } from '../firebase';
+import { auth, db, formatTimestamp, getTimestampMillis } from '../firebase';
 import type {
   CoachQuickQuiz,
   DrillStyle,
@@ -57,6 +59,7 @@ import {
   deleteMyQuiz,
   EXAMPLE_JSON,
   formatQuizSaveError,
+  isEmptyMyQuiz,
   parseQuizBundleJson,
   quizToExportJson,
   type ParsedQuizBundle,
@@ -141,6 +144,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [starredItems, setStarredItems] = useState<StarredQuestion[]>([]);
   const [revealedStarExplanations, setRevealedStarExplanations] = useState<Record<string, boolean>>({});
   const [expandedStarDrills, setExpandedStarDrills] = useState<Record<string, boolean>>({});
+  const [expandedParentDrills, setExpandedParentDrills] = useState<Record<string, boolean>>({});
+  const autoDeletedEmptyIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -204,6 +209,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           snap.quizzes
             .filter((x): x is MyQuiz => Boolean(x && typeof x === 'object'))
             .map(decodeMyQuizFromFirestore)
+            .filter((item) => !isEmptyMyQuiz(item))
         );
         setLoading(false);
       }
@@ -214,18 +220,41 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     const unsub = onSnapshot(
       query(collection(db, 'users', profile.uid, 'myQuizzes'), where('ownerId', '==', profile.uid)),
       (snap) => {
-        const list: MyQuiz[] = [];
+        const allDecoded: MyQuiz[] = [];
         snap.forEach((d) => {
           const data = d.data() as MyQuiz;
           if (data && typeof data === 'object') {
-            list.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
+            allDecoded.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
           }
         });
+        const emptyQuizzes = allDecoded.filter((item) => isEmptyMyQuiz(item));
+        const list = allDecoded.filter((item) => !isEmptyMyQuiz(item));
         list.sort((a, b) => getTimestampMillis(b.updatedAt) - getTimestampMillis(a.updatedAt));
         setQuizzes(list);
         setLoading(false);
         setLoadError(null);
         void saveMyQuizzesSnapshot(profile.uid, list);
+
+        if (!snap.metadata.fromCache && auth.currentUser?.uid === profile.uid && emptyQuizzes.length > 0) {
+          const toDelete = emptyQuizzes.filter(
+            (item) => item.id && !autoDeletedEmptyIdsRef.current.has(item.id)
+          );
+          if (toDelete.length > 0) {
+            toDelete.forEach((item) => autoDeletedEmptyIdsRef.current.add(item.id));
+            void Promise.allSettled(toDelete.map((item) => deleteMyQuiz(profile.uid, item.id))).then(
+              (results) => {
+                const deletedCount = results.filter((r) => r.status === 'fulfilled').length;
+                if (alive && deletedCount > 0) {
+                  setNotice(
+                    deletedCount === 1
+                      ? 'تم حذف اختبار أو تقوية فارغة بدون أسئلة تلقائياً.'
+                      : `تم حذف ${deletedCount} اختبارات/تقويات فارغة بدون أسئلة تلقائياً.`
+                  );
+                }
+              }
+            );
+          }
+        }
       },
       (err) => {
         console.error('myQuizzes listener error', err);
@@ -309,7 +338,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           sourceStarredId: base.sourceStarredId ?? ov.sourceStarredId,
           ruleTitle: base.ruleTitle ?? ov.ruleTitle,
         };
-      });
+      })
+      .filter((q) => !isEmptyMyQuiz(q));
   }, [quizzes, metaOverrides]);
 
   const { mainQuizzes, childrenByParentId, standaloneDrills } = useMemo(() => {
@@ -1395,8 +1425,48 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         </div>
       ) : (
         <div className="flex flex-col gap-4">
+          {mainQuizzes.some((mq) => (childrenByParentId[mq.id]?.length ?? 0) > 0) && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+              <span className="text-xs font-extrabold text-[#777777]">
+                اضغط على شارة «تقوية / قاعدة» لفتح أو طيّ التمارين التابعة لكل اختبار.
+              </span>
+              {(() => {
+                const parentIdsWithChildren = mainQuizzes
+                  .filter((mq) => (childrenByParentId[mq.id]?.length ?? 0) > 0)
+                  .map((mq) => mq.id);
+                const allExpanded = parentIdsWithChildren.every((pid) => expandedParentDrills[pid]);
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next: Record<string, boolean> = {};
+                      parentIdsWithChildren.forEach((pid) => {
+                        next[pid] = !allExpanded;
+                      });
+                      setExpandedParentDrills((prev) => ({ ...prev, ...next }));
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-[#F5ECFF] hover:bg-[#EDE0FF] border border-[#A560E8]/60 text-[11px] font-black text-[#7C3AED] cursor-pointer"
+                  >
+                    {allExpanded ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        <span>طيّ جميع التقويات</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        <span>توسيع جميع التقويات</span>
+                      </>
+                    )}
+                  </button>
+                );
+              })()}
+            </div>
+          )}
+
           {mainQuizzes.map((q) => {
             const children = childrenByParentId[q.id] ?? [];
+            const isChildrenExpanded = Boolean(expandedParentDrills[q.id]);
             const lastAttempt = getLatestScoreForQuiz(q.id);
             const lastPct =
               lastAttempt && lastAttempt.total > 0
@@ -1414,10 +1484,34 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                           <MathText text={q.title} inline />
                         </h3>
                         {children.length > 0 && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#F5ECFF] border border-[#A560E8]/60 text-[10px] font-black text-[#8938D6]">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedParentDrills((prev) => ({
+                                ...prev,
+                                [q.id]: !prev[q.id],
+                              }))
+                            }
+                            aria-expanded={isChildrenExpanded}
+                            title={
+                              isChildrenExpanded
+                                ? 'طيّ اختبارات التقوية التابعة'
+                                : 'عرض اختبارات التقوية التابعة'
+                            }
+                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg border text-[11px] font-black cursor-pointer transition-colors ${
+                              isChildrenExpanded
+                                ? 'bg-[#8938D6] border-[#6B21A8] text-white'
+                                : 'bg-[#F5ECFF] hover:bg-[#EDE0FF] border-[#A560E8]/70 text-[#8938D6]'
+                            }`}
+                          >
                             <Layers className="w-3 h-3" />
                             <span>{children.length} تقوية / قاعدة</span>
-                          </span>
+                            {isChildrenExpanded ? (
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </button>
                         )}
                       </div>
                       <p className="text-[11px] font-extrabold text-[#777777] mt-0.5">
@@ -1524,12 +1618,27 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                   </div>
                 </div>
 
-                {/* Nested Duolingo-style Reinforcement & Rule-Training Skill Tree */}
-                {children.length > 0 && (
+                {/* Nested Duolingo-style Reinforcement & Rule-Training Skill Tree (collapsible) */}
+                {children.length > 0 && isChildrenExpanded && (
                   <div className="mr-3 sm:mr-5 pr-3 sm:pr-4 border-r-4 border-[#A560E8]/45 flex flex-col gap-2">
-                    <div className="flex items-center gap-1.5 text-[11px] font-black text-[#8938D6]">
-                      <Dumbbell className="w-3.5 h-3.5" />
-                      <span>تمارين التقوية وتدريبات القواعد التابعة ({children.length})</span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-black text-[#8938D6]">
+                      <div className="flex items-center gap-1.5">
+                        <Dumbbell className="w-3.5 h-3.5" />
+                        <span>تمارين التقوية وتدريبات القواعد التابعة ({children.length})</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedParentDrills((prev) => ({
+                            ...prev,
+                            [q.id]: false,
+                          }))
+                        }
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#F5ECFF] hover:bg-[#EDE0FF] border border-[#A560E8]/50 text-[10px] font-black text-[#7C3AED] cursor-pointer"
+                      >
+                        <ChevronUp className="w-3 h-3" />
+                        <span>طيّ القائمة</span>
+                      </button>
                     </div>
                     {children.map((child, cIdx) => {
                       const cAttempt = getLatestScoreForQuiz(child.id);

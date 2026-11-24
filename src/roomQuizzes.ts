@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   collection,
   deleteDoc,
@@ -9,14 +9,20 @@ import {
   setDoc,
   where,
 } from './firestoreTracked';
-import { db, getTimestampMillis, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, getTimestampMillis, handleFirestoreError, OperationType } from './firebase';
 import { handleRoomListenerError } from './roomLifecycle';
 import {
   loadSessionSnapshot,
   saveMyQuizzesSnapshot,
   type StoredMyQuizzesSnapshot,
 } from './localDraftStore';
-import { cleanQuestions, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
+import {
+  cleanQuestions,
+  deleteMyQuiz,
+  isEmptyMyQuiz,
+  LIMITS,
+  prepareQuestionsForFirestore,
+} from './myQuizzes';
 import { decodeMyQuizFromFirestore, decodeSharedQuizFromFirestore } from './quizTable';
 import type { MyQuiz, SharedQuiz } from './types';
 
@@ -40,6 +46,7 @@ export interface RoomQuizEntry {
 export function useMyQuizzes(uid: string) {
   const [myQuizzes, setMyQuizzes] = useState<MyQuiz[]>([]);
   const [loading, setLoading] = useState(true);
+  const autoCleanedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!uid) {
@@ -52,7 +59,9 @@ export function useMyQuizzes(uid: string) {
     void loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').then((snap) => {
       if (cancelled || !snap || snap.ownerId !== uid) return;
       if (snap.quizzes.length > 0) {
-        setMyQuizzes(snap.quizzes.map(decodeMyQuizFromFirestore));
+        setMyQuizzes(
+          snap.quizzes.map(decodeMyQuizFromFirestore).filter((item) => !isEmptyMyQuiz(item))
+        );
       }
     });
 
@@ -61,8 +70,15 @@ export function useMyQuizzes(uid: string) {
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const list: MyQuiz[] = [];
-        snap.forEach((d) => list.push(decodeMyQuizFromFirestore(d.data() as MyQuiz)));
+        const allDecoded: MyQuiz[] = [];
+        snap.forEach((d) => {
+          const data = d.data() as MyQuiz;
+          if (data && typeof data === 'object') {
+            allDecoded.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
+          }
+        });
+        const emptyQuizzes = allDecoded.filter((item) => isEmptyMyQuiz(item));
+        const list = allDecoded.filter((item) => !isEmptyMyQuiz(item));
         list.sort(
           (a, b) =>
             getTimestampMillis(b.updatedAt || b.createdAt) -
@@ -71,6 +87,14 @@ export function useMyQuizzes(uid: string) {
         setMyQuizzes(list);
         setLoading(false);
         void saveMyQuizzesSnapshot(uid, list);
+
+        if (!snap.metadata.fromCache && auth.currentUser?.uid === uid && emptyQuizzes.length > 0) {
+          for (const emptyItem of emptyQuizzes) {
+            if (!emptyItem.id || autoCleanedIdsRef.current.has(emptyItem.id)) continue;
+            autoCleanedIdsRef.current.add(emptyItem.id);
+            void deleteMyQuiz(uid, emptyItem.id).catch(() => undefined);
+          }
+        }
       },
       (err) => {
         setLoading(false);

@@ -4,6 +4,9 @@ import {
   ArrowRight,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Layers,
   Lock,
   Play,
   RotateCcw,
@@ -67,7 +70,7 @@ export const ExamSetup: React.FC<Props> = ({
   onBack,
   onStart,
 }) => {
-  const orderedQuizzes = useMemo(() => {
+  const mainQuizGroups = useMemo(() => {
     const idSet = new Set(quizzes.map((q) => q.id));
     const mains = quizzes.filter((q) => !q.parentQuizId || !idSet.has(q.parentQuizId));
     const childrenByParent = new Map<string, MyQuiz[]>();
@@ -78,14 +81,10 @@ export const ExamSetup: React.FC<Props> = ({
         childrenByParent.set(q.parentQuizId, list);
       }
     }
-    const out: Array<{ quiz: MyQuiz; isNested: boolean }> = [];
-    for (const m of mains) {
-      out.push({ quiz: m, isNested: false });
-      for (const c of childrenByParent.get(m.id) ?? []) {
-        out.push({ quiz: c, isNested: true });
-      }
-    }
-    return out;
+    return mains.map((m) => ({
+      parent: m,
+      children: childrenByParent.get(m.id) ?? [],
+    }));
   }, [quizzes]);
 
   const ready = useMemo(() => quizzes.filter((q) => validPool(q).length > 0), [quizzes]);
@@ -113,23 +112,43 @@ export const ExamSetup: React.FC<Props> = ({
     return map;
   }, [quizzes, groupedMistakes]);
 
-  const mistakeCapableQuizzes = useMemo(() => {
+  const { mistakeCapableQuizzes, mistakeGroups } = useMemo(() => {
     const list: Array<{ id: string; title: string; items: UnresolvedMistakeItem[]; isNested: boolean }> = [];
-    for (const { quiz, isNested } of orderedQuizzes) {
-      const items = readyMistakesByQuizId.get(quiz.id) || [];
-      list.push({ id: quiz.id, title: quiz.title, items, isNested });
+    const groups: Array<{
+      parent: { id: string; title: string; items: UnresolvedMistakeItem[]; isNested: boolean };
+      children: Array<{ id: string; title: string; items: UnresolvedMistakeItem[]; isNested: boolean }>;
+    }> = [];
+
+    for (const { parent, children } of mainQuizGroups) {
+      const parentEntry = {
+        id: parent.id,
+        title: parent.title,
+        items: readyMistakesByQuizId.get(parent.id) || [],
+        isNested: false,
+      };
+      const childEntries = children.map((c) => ({
+        id: c.id,
+        title: c.title,
+        items: readyMistakesByQuizId.get(c.id) || [],
+        isNested: true,
+      }));
+      list.push(parentEntry, ...childEntries);
+      groups.push({ parent: parentEntry, children: childEntries });
     }
+
     const other = readyMistakesByQuizId.get(OTHER_MISTAKES_QUIZ_ID) || [];
     if (other.length > 0) {
-      list.push({
+      const otherEntry = {
         id: OTHER_MISTAKES_QUIZ_ID,
         title: 'أخطاء من اختبارات أخرى / المساعد الذكي',
         items: other,
         isNested: false,
-      });
+      };
+      list.push(otherEntry);
+      groups.push({ parent: otherEntry, children: [] });
     }
-    return list;
-  }, [orderedQuizzes, readyMistakesByQuizId]);
+    return { mistakeCapableQuizzes: list, mistakeGroups: groups };
+  }, [mainQuizGroups, readyMistakesByQuizId]);
 
   const quizzesWithMistakes = useMemo(
     () => mistakeCapableQuizzes.filter((x) => x.items.length > 0),
@@ -145,6 +164,18 @@ export const ExamSetup: React.FC<Props> = ({
   }, [mistakeLedger.unresolvedMistakes]);
 
   const isMistakeBankEmpty = totalUniqueMistakes === 0;
+
+  const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>(() => {
+    if (!initialQuizId) return {};
+    const target = quizzes.find((q) => q.id === initialQuizId);
+    if (target?.parentQuizId) {
+      return { [target.parentQuizId]: true };
+    }
+    return {};
+  });
+  const toggleParentExpand = (parentId: string) => {
+    setExpandedParents((prev) => ({ ...prev, [parentId]: !prev[parentId] }));
+  };
 
   const [examMode, setExamMode] = useState<'normal' | 'mistakes'>(initialExamMode);
   const [sourceMode, setSourceMode] = useState<'single' | 'mix'>(() => {
@@ -526,37 +557,113 @@ export const ExamSetup: React.FC<Props> = ({
             {examMode === 'mistakes' ? (
               sourceMode === 'single' ? (
                 <div className="flex flex-col gap-1.5">
-                  {mistakeCapableQuizzes.map((item) => {
-                    const n = item.items.length;
+                  {mistakeGroups.map(({ parent, children }) => {
+                    const pn = parent.items.length;
+                    const isExpanded = Boolean(expandedParents[parent.id]);
+                    const childHasSelection = children.some((c) => singleId === c.id);
+                    const childMistakesSum = children.reduce((acc, c) => acc + c.items.length, 0);
                     return (
-                      <label
-                        key={item.id}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
-                          item.isNested ? 'mr-5 bg-[#FAF7FF]' : ''
-                        } ${n === 0 ? 'opacity-55 cursor-not-allowed bg-[#FAFAFA]' : 'cursor-pointer'} ${
-                          singleId === item.id && n > 0
-                            ? 'border-[#FF9600] bg-[#FFF7ED]'
-                            : 'border-[#E5E5E5]'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="single"
-                          disabled={n === 0}
-                          checked={singleId === item.id}
-                          onChange={() => setSingleId(item.id)}
-                        />
-                        <span className="flex-1 min-w-0 break-words leading-relaxed">
-                          <MathText text={item.title} inline />
-                        </span>
-                        <span
-                          className={`text-[11px] font-black ${
-                            n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
-                          }`}
-                        >
-                          {n > 0 ? `${n} خطأ بانتظار التصحيح` : 'بلا أخطاء ✓'}
-                        </span>
-                      </label>
+                      <div key={parent.id} className="flex flex-col gap-1.5">
+                        <div className="flex items-stretch gap-1.5">
+                          <label
+                            className={`flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                              pn === 0 ? 'opacity-55 cursor-not-allowed bg-[#FAFAFA]' : 'cursor-pointer'
+                            } ${
+                              singleId === parent.id && pn > 0
+                                ? 'border-[#FF9600] bg-[#FFF7ED]'
+                                : 'border-[#E5E5E5]'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="single"
+                              disabled={pn === 0}
+                              checked={singleId === parent.id}
+                              onChange={() => setSingleId(parent.id)}
+                            />
+                            <span className="flex-1 min-w-0 break-words leading-relaxed">
+                              <MathText text={parent.title} inline />
+                            </span>
+                            <span
+                              className={`text-[11px] font-black shrink-0 ${
+                                pn > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
+                              }`}
+                            >
+                              {pn > 0 ? `${pn} خطأ بانتظار التصحيح` : 'بلا أخطاء ✓'}
+                            </span>
+                          </label>
+                          {children.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => toggleParentExpand(parent.id)}
+                              aria-expanded={isExpanded}
+                              title={isExpanded ? 'طيّ اختبارات التقوية' : 'عرض اختبارات التقوية التابعة'}
+                              className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-2 rounded-2xl border-2 text-[11px] font-black cursor-pointer transition-colors ${
+                                isExpanded
+                                  ? 'bg-[#8938D6] border-[#6B21A8] text-white'
+                                  : childHasSelection
+                                  ? 'bg-[#F3E8FF] border-[#A560E8] text-[#6B21A8]'
+                                  : 'bg-[#FAF7FF] hover:bg-[#F3E8FF] border-[#E2D4F8] text-[#7C3AED]'
+                              }`}
+                            >
+                              <Layers className="w-3.5 h-3.5" />
+                              <span>{children.length} تقوية</span>
+                              {!isExpanded && childMistakesSum > 0 && (
+                                <span className="px-1.5 py-0.5 rounded-md bg-[#FFEDD5] text-[#C2410C] text-[10px]">
+                                  {childMistakesSum} خطأ
+                                </span>
+                              )}
+                              {isExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
+                        </div>
+                        {children.length > 0 && isExpanded && (
+                          <div className="mr-4 pr-3 border-r-2 border-[#E2D4F8] flex flex-col gap-1.5">
+                            {children.map((item) => {
+                              const n = item.items.length;
+                              return (
+                                <label
+                                  key={item.id}
+                                  className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold bg-[#FAF7FF] ${
+                                    n === 0
+                                      ? 'opacity-55 cursor-not-allowed'
+                                      : 'cursor-pointer'
+                                  } ${
+                                    singleId === item.id && n > 0
+                                      ? 'border-[#FF9600] bg-[#FFF7ED]'
+                                      : 'border-[#E5E5E5]'
+                                  }`}
+                                >
+                                  <input
+                                    type="radio"
+                                    name="single"
+                                    disabled={n === 0}
+                                    checked={singleId === item.id}
+                                    onChange={() => setSingleId(item.id)}
+                                  />
+                                  <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                                    تقوية
+                                  </span>
+                                  <span className="flex-1 min-w-0 break-words leading-relaxed">
+                                    <MathText text={item.title} inline />
+                                  </span>
+                                  <span
+                                    className={`text-[11px] font-black shrink-0 ${
+                                      n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
+                                    }`}
+                                  >
+                                    {n > 0 ? `${n} خطأ بانتظار التصحيح` : 'بلا أخطاء ✓'}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -579,36 +686,117 @@ export const ExamSetup: React.FC<Props> = ({
                         إلغاء التحديد
                       </button>
                     </div>
-                    {mistakeCapableQuizzes.map((item) => {
-                      const n = item.items.length;
+                    {mistakeGroups.map(({ parent, children }) => {
+                      const pn = parent.items.length;
+                      const isExpanded = Boolean(expandedParents[parent.id]);
+                      const selectedChildCount = children.filter(
+                        (c) => c.items.length > 0 && mixIds.includes(c.id)
+                      ).length;
+                      const childMistakesSum = children.reduce((acc, c) => acc + c.items.length, 0);
                       return (
-                        <label
-                          key={item.id}
-                          className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
-                            item.isNested ? 'mr-5 bg-[#FAF7FF]' : ''
-                          } ${n === 0 ? 'opacity-55 cursor-not-allowed bg-[#FAFAFA]' : 'cursor-pointer'} ${
-                            mixIds.includes(item.id) && n > 0
-                              ? 'border-[#FF9600] bg-[#FFF7ED]'
-                              : 'border-[#E5E5E5]'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            disabled={n === 0}
-                            checked={mixIds.includes(item.id)}
-                            onChange={() => toggleMix(item.id)}
-                          />
-                          <span className="flex-1 min-w-0 break-words leading-relaxed">
-                            <MathText text={item.title} inline />
-                          </span>
-                          <span
-                            className={`text-[11px] font-black ${
-                              n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
-                            }`}
-                          >
-                            {n > 0 ? `${n} خطأ` : 'بلا أخطاء ✓'}
-                          </span>
-                        </label>
+                        <div key={parent.id} className="flex flex-col gap-1.5">
+                          <div className="flex items-stretch gap-1.5">
+                            <label
+                              className={`flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                                pn === 0 ? 'opacity-55 cursor-not-allowed bg-[#FAFAFA]' : 'cursor-pointer'
+                              } ${
+                                mixIds.includes(parent.id) && pn > 0
+                                  ? 'border-[#FF9600] bg-[#FFF7ED]'
+                                  : 'border-[#E5E5E5]'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                disabled={pn === 0}
+                                checked={mixIds.includes(parent.id)}
+                                onChange={() => toggleMix(parent.id)}
+                              />
+                              <span className="flex-1 min-w-0 break-words leading-relaxed">
+                                <MathText text={parent.title} inline />
+                              </span>
+                              <span
+                                className={`text-[11px] font-black shrink-0 ${
+                                  pn > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
+                                }`}
+                              >
+                                {pn > 0 ? `${pn} خطأ` : 'بلا أخطاء ✓'}
+                              </span>
+                            </label>
+                            {children.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleParentExpand(parent.id)}
+                                aria-expanded={isExpanded}
+                                title={isExpanded ? 'طيّ اختبارات التقوية' : 'عرض اختبارات التقوية التابعة'}
+                                className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-2 rounded-2xl border-2 text-[11px] font-black cursor-pointer transition-colors ${
+                                  isExpanded
+                                    ? 'bg-[#8938D6] border-[#6B21A8] text-white'
+                                    : selectedChildCount > 0
+                                    ? 'bg-[#F3E8FF] border-[#A560E8] text-[#6B21A8]'
+                                    : 'bg-[#FAF7FF] hover:bg-[#F3E8FF] border-[#E2D4F8] text-[#7C3AED]'
+                                }`}
+                              >
+                                <Layers className="w-3.5 h-3.5" />
+                                <span>
+                                  {selectedChildCount > 0
+                                    ? `${selectedChildCount}/${children.length} تقوية`
+                                    : `${children.length} تقوية`}
+                                </span>
+                                {!isExpanded && childMistakesSum > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded-md bg-[#FFEDD5] text-[#C2410C] text-[10px]">
+                                    {childMistakesSum} خطأ
+                                  </span>
+                                )}
+                                {isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            )}
+                          </div>
+                          {children.length > 0 && isExpanded && (
+                            <div className="mr-4 pr-3 border-r-2 border-[#E2D4F8] flex flex-col gap-1.5">
+                              {children.map((item) => {
+                                const n = item.items.length;
+                                return (
+                                  <label
+                                    key={item.id}
+                                    className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold bg-[#FAF7FF] ${
+                                      n === 0
+                                        ? 'opacity-55 cursor-not-allowed'
+                                        : 'cursor-pointer'
+                                    } ${
+                                      mixIds.includes(item.id) && n > 0
+                                        ? 'border-[#FF9600] bg-[#FFF7ED]'
+                                        : 'border-[#E5E5E5]'
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      disabled={n === 0}
+                                      checked={mixIds.includes(item.id)}
+                                      onChange={() => toggleMix(item.id)}
+                                    />
+                                    <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                                      تقوية
+                                    </span>
+                                    <span className="flex-1 min-w-0 break-words leading-relaxed">
+                                      <MathText text={item.title} inline />
+                                    </span>
+                                    <span
+                                      className={`text-[11px] font-black shrink-0 ${
+                                        n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
+                                      }`}
+                                    >
+                                      {n > 0 ? `${n} خطأ` : 'بلا أخطاء ✓'}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -632,36 +820,100 @@ export const ExamSetup: React.FC<Props> = ({
               )
             ) : sourceMode === 'single' ? (
               <div className="flex flex-col gap-1.5">
-                {orderedQuizzes.map(({ quiz: q, isNested }) => {
+                {mainQuizGroups.map(({ parent: q, children }) => {
                   const n = validPool(q).length;
+                  const isExpanded = Boolean(expandedParents[q.id]);
+                  const childIsSelected = children.some((c) => singleId === c.id);
                   return (
-                    <label
-                      key={q.id}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold cursor-pointer ${
-                        isNested ? 'mr-5 bg-[#FAF7FF]' : ''
-                      } ${n === 0 ? 'opacity-50 cursor-not-allowed' : ''} ${
-                        singleId === q.id ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="single"
-                        disabled={n === 0}
-                        checked={singleId === q.id}
-                        onChange={() => setSingleId(q.id)}
-                      />
-                      {(isNested || q.quizKind === 'drill') && (
-                        <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
-                          تقوية
-                        </span>
+                    <div key={q.id} className="flex flex-col gap-1.5">
+                      <div className="flex items-stretch gap-1.5">
+                        <label
+                          className={`flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold cursor-pointer ${
+                            n === 0 ? 'opacity-50 cursor-not-allowed' : ''
+                          } ${
+                            singleId === q.id ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="single"
+                            disabled={n === 0}
+                            checked={singleId === q.id}
+                            onChange={() => setSingleId(q.id)}
+                          />
+                          {q.quizKind === 'drill' && (
+                            <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                              تقوية
+                            </span>
+                          )}
+                          <span className="flex-1 min-w-0 break-words leading-relaxed">
+                            <MathText text={q.title} inline />
+                          </span>
+                          <span className="text-[11px] font-extrabold text-[#777777] shrink-0">
+                            {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
+                          </span>
+                        </label>
+                        {children.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => toggleParentExpand(q.id)}
+                            aria-expanded={isExpanded}
+                            title={isExpanded ? 'طيّ اختبارات التقوية' : 'عرض اختبارات التقوية التابعة'}
+                            className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-2 rounded-2xl border-2 text-[11px] font-black cursor-pointer transition-colors ${
+                              isExpanded
+                                ? 'bg-[#8938D6] border-[#6B21A8] text-white'
+                                : childIsSelected
+                                ? 'bg-[#F3E8FF] border-[#A560E8] text-[#6B21A8]'
+                                : 'bg-[#FAF7FF] hover:bg-[#F3E8FF] border-[#E2D4F8] text-[#7C3AED]'
+                            }`}
+                          >
+                            <Layers className="w-3.5 h-3.5" />
+                            <span>{children.length} تقوية</span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                      {children.length > 0 && isExpanded && (
+                        <div className="mr-4 pr-3 border-r-2 border-[#E2D4F8] flex flex-col gap-1.5">
+                          {children.map((child) => {
+                            const cn = validPool(child).length;
+                            return (
+                              <label
+                                key={child.id}
+                                className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold bg-[#FAF7FF] cursor-pointer ${
+                                  cn === 0 ? 'opacity-50 cursor-not-allowed' : ''
+                                } ${
+                                  singleId === child.id
+                                    ? 'border-[#A560E8] bg-[#F5ECFF]'
+                                    : 'border-[#E5E5E5]'
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name="single"
+                                  disabled={cn === 0}
+                                  checked={singleId === child.id}
+                                  onChange={() => setSingleId(child.id)}
+                                />
+                                <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                                  تقوية
+                                </span>
+                                <span className="flex-1 min-w-0 break-words leading-relaxed">
+                                  <MathText text={child.title} inline />
+                                </span>
+                                <span className="text-[11px] font-extrabold text-[#777777] shrink-0">
+                                  {cn > 0 ? `${cn} سؤال جاهز` : 'لا أسئلة جاهزة'}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
                       )}
-                      <span className="flex-1 min-w-0 break-words leading-relaxed">
-                        <MathText text={q.title} inline />
-                      </span>
-                      <span className="text-[11px] font-extrabold text-[#777777]">
-                        {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
-                      </span>
-                    </label>
+                    </div>
                   );
                 })}
               </div>
@@ -684,35 +936,102 @@ export const ExamSetup: React.FC<Props> = ({
                       إلغاء التحديد
                     </button>
                   </div>
-                  {orderedQuizzes.map(({ quiz: q, isNested }) => {
+                  {mainQuizGroups.map(({ parent: q, children }) => {
                     const n = validPool(q).length;
+                    const isExpanded = Boolean(expandedParents[q.id]);
+                    const selectedChildCount = children.filter((c) => mixIds.includes(c.id)).length;
                     return (
-                      <label
-                        key={q.id}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
-                          isNested ? 'mr-5 bg-[#FAF7FF]' : ''
-                        } ${n === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${
-                          mixIds.includes(q.id) ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          disabled={n === 0}
-                          checked={mixIds.includes(q.id)}
-                          onChange={() => toggleMix(q.id)}
-                        />
-                        {(isNested || q.quizKind === 'drill') && (
-                          <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
-                            تقوية
-                          </span>
+                      <div key={q.id} className="flex flex-col gap-1.5">
+                        <div className="flex items-stretch gap-1.5">
+                          <label
+                            className={`flex-1 min-w-0 flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold ${
+                              n === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                            } ${
+                              mixIds.includes(q.id) ? 'border-[#A560E8] bg-[#F5ECFF]' : 'border-[#E5E5E5]'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={n === 0}
+                              checked={mixIds.includes(q.id)}
+                              onChange={() => toggleMix(q.id)}
+                            />
+                            {q.quizKind === 'drill' && (
+                              <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                                تقوية
+                              </span>
+                            )}
+                            <span className="flex-1 min-w-0 break-words leading-relaxed">
+                              <MathText text={q.title} inline />
+                            </span>
+                            <span className="text-[11px] font-extrabold text-[#777777] shrink-0">
+                              {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
+                            </span>
+                          </label>
+                          {children.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => toggleParentExpand(q.id)}
+                              aria-expanded={isExpanded}
+                              title={isExpanded ? 'طيّ اختبارات التقوية' : 'عرض اختبارات التقوية التابعة'}
+                              className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-2 rounded-2xl border-2 text-[11px] font-black cursor-pointer transition-colors ${
+                                isExpanded
+                                  ? 'bg-[#8938D6] border-[#6B21A8] text-white'
+                                  : selectedChildCount > 0
+                                  ? 'bg-[#F3E8FF] border-[#A560E8] text-[#6B21A8]'
+                                  : 'bg-[#FAF7FF] hover:bg-[#F3E8FF] border-[#E2D4F8] text-[#7C3AED]'
+                              }`}
+                            >
+                              <Layers className="w-3.5 h-3.5" />
+                              <span>
+                                {selectedChildCount > 0
+                                  ? `${selectedChildCount}/${children.length} تقوية`
+                                  : `${children.length} تقوية`}
+                              </span>
+                              {isExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
+                        </div>
+                        {children.length > 0 && isExpanded && (
+                          <div className="mr-4 pr-3 border-r-2 border-[#E2D4F8] flex flex-col gap-1.5">
+                            {children.map((child) => {
+                              const cn = validPool(child).length;
+                              return (
+                                <label
+                                  key={child.id}
+                                  className={`flex items-center gap-2 px-3 py-2 rounded-2xl border-2 text-sm font-bold bg-[#FAF7FF] ${
+                                    cn === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                                  } ${
+                                    mixIds.includes(child.id)
+                                      ? 'border-[#A560E8] bg-[#F5ECFF]'
+                                      : 'border-[#E5E5E5]'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    disabled={cn === 0}
+                                    checked={mixIds.includes(child.id)}
+                                    onChange={() => toggleMix(child.id)}
+                                  />
+                                  <span className="px-1.5 py-0.5 rounded-lg bg-[#A560E8]/15 text-[#8938D6] text-[10px] font-black shrink-0">
+                                    تقوية
+                                  </span>
+                                  <span className="flex-1 min-w-0 break-words leading-relaxed">
+                                    <MathText text={child.title} inline />
+                                  </span>
+                                  <span className="text-[11px] font-extrabold text-[#777777] shrink-0">
+                                    {cn > 0 ? `${cn} سؤال جاهز` : 'لا أسئلة جاهزة'}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
                         )}
-                        <span className="flex-1 min-w-0 break-words leading-relaxed">
-                          <MathText text={q.title} inline />
-                        </span>
-                        <span className="text-[11px] font-extrabold text-[#777777]">
-                          {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
-                        </span>
-                      </label>
+                      </div>
                     );
                   })}
                 </div>

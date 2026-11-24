@@ -766,7 +766,9 @@ export const SmartAssistantView: React.FC<Props> = ({
             coachState.diagnosis.strengths.slice(0, 3).map((st, idx) => (
               <div key={idx} className="rounded-2xl bg-white border border-[#B8F28B] p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{st.title}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={st.title} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#46A302]">
                     {st.accuracyPct}%
                   </span>
@@ -778,7 +780,9 @@ export const SmartAssistantView: React.FC<Props> = ({
             analytics.strongSections.slice(0, 3).map((s) => (
               <div key={s.sectionKey} className="rounded-2xl bg-white border border-[#B8F28B] p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{s.sectionTitle}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={s.sectionTitle} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#46A302]">
                     {s.accuracyPct}%
                   </span>
@@ -810,7 +814,9 @@ export const SmartAssistantView: React.FC<Props> = ({
                 className="text-right rounded-2xl bg-white border border-[#FFC1C1] hover:border-[#FF4B4B] p-2.5 cursor-pointer transition-colors"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{wk.title}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={wk.title} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#EA2B2B]">
                     {wk.accuracyPct}%
                   </span>
@@ -827,7 +833,9 @@ export const SmartAssistantView: React.FC<Props> = ({
                 className="text-right rounded-2xl bg-white border border-[#FFC1C1] hover:border-[#FF4B4B] p-2.5 cursor-pointer transition-colors"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{s.sectionTitle}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={s.sectionTitle} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#EA2B2B]">
                     {s.accuracyPct}%
                   </span>
@@ -854,7 +862,9 @@ export const SmartAssistantView: React.FC<Props> = ({
             coachState.diagnosis.slowAreas.slice(0, 3).map((sl, idx) => (
               <div key={idx} className="rounded-2xl bg-white border border-[#FFE58F] p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{sl.title}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={sl.title} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#9A6B00]">
                     {sl.avgSecPerQ}ث/س
                   </span>
@@ -866,7 +876,9 @@ export const SmartAssistantView: React.FC<Props> = ({
             analytics.slowSections.slice(0, 3).map((s) => (
               <div key={s.sectionKey} className="rounded-2xl bg-white border border-[#FFE58F] p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-black text-[#3C3C3C]">{s.sectionTitle}</span>
+                  <span className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                    <MathText text={s.sectionTitle} inline />
+                  </span>
                   <span className="text-xs font-black font-latin tabular-nums text-[#9A6B00]">
                     {s.avgSecPerQ}ث/س
                   </span>
@@ -1134,11 +1146,11 @@ export const SmartAssistantView: React.FC<Props> = ({
         {lastCreatedQuiz && (
           <div className="rounded-2xl bg-[#D7FFB8]/65 border-2 border-[#58CC02] p-3.5 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-black text-[#2F6F00]">
-                جاهز: {lastCreatedQuiz.title}
+              <p className="text-sm font-black text-[#2F6F00] leading-relaxed">
+                جاهز: <MathText text={lastCreatedQuiz.title} inline />
               </p>
-              <p className="text-[11px] font-bold text-[#46A302]">
-                تم حفظه ({lastCreatedQuiz.questionCount} أسئلة) تحت قسم «{activeSectionTitle}» في قائمتك.
+              <p className="text-[11px] font-bold text-[#46A302] leading-relaxed">
+                تم حفظه ({lastCreatedQuiz.questionCount} أسئلة) تحت قسم «<MathText text={activeSectionTitle} inline />» في قائمتك.
               </p>
             </div>
             <button
@@ -1161,13 +1173,19 @@ export const SmartAssistantView: React.FC<Props> = ({
                 <Flame className="w-5 h-5" />
               </div>
               <div>
-                <h4 className="text-base font-black text-[#3C3C3C]">
+                <h4 className="text-base font-black text-[#3C3C3C] leading-relaxed">
                   خطة «تقويم المهارات البنائية»
-                  {coachState.activeFoundationalPlan
-                    ? `: ${coachState.activeFoundationalPlan.sectionTitle}`
-                    : analytics.sectionNeedsFoundationalPlan
-                    ? `: ${analytics.sectionNeedsFoundationalPlan.sectionTitle}`
-                    : ''}
+                  {coachState.activeFoundationalPlan ? (
+                    <>
+                      : <MathText text={coachState.activeFoundationalPlan.sectionTitle} inline />
+                    </>
+                  ) : analytics.sectionNeedsFoundationalPlan ? (
+                    <>
+                      : <MathText text={analytics.sectionNeedsFoundationalPlan.sectionTitle} inline />
+                    </>
+                  ) : (
+                    ''
+                  )}
                 </h4>
                 <p className="text-xs font-bold text-[#92400E]">
                   {coachState.activeFoundationalPlan?.reason ||
@@ -1221,7 +1239,9 @@ export const SmartAssistantView: React.FC<Props> = ({
                           {typeof st.bestScorePct === 'number' ? ` · أفضل ${st.bestScorePct}%` : ''}
                         </span>
                       </div>
-                      <h5 className="text-xs font-black text-[#3C3C3C]">{st.title}</h5>
+                      <h5 className="text-xs font-black text-[#3C3C3C] leading-relaxed">
+                        <MathText text={st.title} inline />
+                      </h5>
                       <p className="text-[11px] font-bold text-[#555555] leading-relaxed">
                         {st.objective}
                       </p>
@@ -1394,9 +1414,9 @@ export const SmartAssistantView: React.FC<Props> = ({
                     {msg.quickQuiz && (
                       <div className="mt-3 rounded-2xl border-2 border-[#A560E8] bg-[#FAF5FF] p-3 flex flex-col gap-2">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-black text-[#6D28D9] flex items-center gap-1.5">
-                            <Zap className="w-4 h-4" />
-                            <span>{msg.quickQuiz.title}</span>
+                          <span className="text-xs font-black text-[#6D28D9] flex items-center gap-1.5 leading-relaxed">
+                            <Zap className="w-4 h-4 shrink-0" />
+                            <MathText text={msg.quickQuiz.title} inline />
                           </span>
                           <span className="text-[11px] font-black font-latin text-[#8938D6]">
                             {msg.quickQuiz.questions.length} أسئلة

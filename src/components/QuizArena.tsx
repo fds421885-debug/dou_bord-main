@@ -3337,8 +3337,8 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                                   {selected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <p className="text-xs sm:text-sm font-black text-[#3C3C3C] truncate">
-                                    {entry.quiz.title}
+                                  <p className="text-xs sm:text-sm font-black text-[#3C3C3C] break-words leading-relaxed">
+                                    <MathText text={entry.quiz.title} inline />
                                   </p>
                                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                                     <span
@@ -3428,8 +3428,8 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                                     <span className="font-latin px-2 py-0.5 rounded-lg bg-[#A560E8] text-white text-[11px] font-black">
                                       س{idxInQuiz}
                                     </span>
-                                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#6D23B6] text-[11px] font-black">
-                                      {entry.quiz.title}
+                                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#6D23B6] text-[11px] font-black leading-relaxed">
+                                      <MathText text={entry.quiz.title} inline />
                                     </span>
                                     <span className="text-[11px] font-bold text-[#777777]">
                                       ({entry.isMine ? 'لك' : entry.authorName})

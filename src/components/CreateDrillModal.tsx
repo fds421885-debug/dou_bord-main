@@ -20,7 +20,8 @@ import {
   formatQuizSaveError,
   parseQuizBundleJson,
 } from '../myQuizzes';
-import { MathText } from '../mathText';
+import { clipMathSafe, MathText } from '../mathText';
+import { applySnippet, MathToolbar } from './MathToolbar';
 import { playDuoSound } from './DuoIcons';
 
 interface CreateDrillModalProps {
@@ -78,8 +79,9 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
   }, [sourceQuizId, mainQuizzes]);
 
   const [drillTitle, setDrillTitle] = useState(
-    () => `تقوية: ${question.text.replace(/\s+/g, ' ').trim().slice(0, 42) || 'مسألة مميزة'}`
+    () => `تقوية: ${clipMathSafe(question.text, 42) || 'مسألة مميزة'}`
   );
+  const [showTitleMath, setShowTitleMath] = useState(false);
   const [parentQuizId, setParentQuizId] = useState<string>(defaultParentId);
   const [questionCount, setQuestionCount] = useState<number>(10);
   const [drillStyle, setDrillStyle] = useState<DrillStyle>('mixed');
@@ -92,8 +94,23 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [createdList, setCreatedList] = useState<MyQuiz[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
 
   if (!open) return null;
+
+  const insertIntoDrillTitle = (tex: string) => {
+    const el = titleInputRef.current;
+    const start = el?.selectionStart ?? drillTitle.length;
+    const end = el?.selectionEnd ?? drillTitle.length;
+    const { value, caret } = applySnippet(drillTitle, start, end, tex);
+    setDrillTitle(value.slice(0, 120));
+    window.requestAnimationFrame(() => {
+      if (!el) return;
+      el.focus();
+      const clamped = Math.min(caret, 120);
+      el.setSelectionRange(clamped, clamped);
+    });
+  };
 
   const handleGeneratePrompt = () => {
     setError(null);
@@ -244,7 +261,11 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
         <div className="p-3 rounded-2xl bg-[#FFF9E6] border-2 border-[#FFC800]/60 flex flex-col gap-1">
           <div className="flex items-center justify-between gap-2 text-[11px] font-black text-[#9A6B00]">
             <span>المسألة المرجعية</span>
-            {sourceTitle && <span>من: {sourceTitle}</span>}
+            {sourceTitle && (
+              <span>
+                من: <MathText text={sourceTitle} inline />
+              </span>
+            )}
           </div>
           <MathText
             text={question.text}
@@ -270,7 +291,15 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
             <div className="flex items-center gap-2 text-sm font-black text-[#46A302]">
               <CheckCircle2 className="w-5 h-5 shrink-0" />
               <span>
-                تم إنشاء وحفظ {createdList.length === 1 ? `«${createdList[0].title}»` : `${createdList.length} اختبارات تقوية`} بنجاح!
+                تم إنشاء وحفظ{' '}
+                {createdList.length === 1 ? (
+                  <>
+                    «<MathText text={createdList[0].title} inline />»
+                  </>
+                ) : (
+                  `${createdList.length} اختبارات تقوية`
+                )}{' '}
+                بنجاح!
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -306,18 +335,34 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
 
         {/* Settings Form */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div className="flex flex-col gap-1">
-            <label htmlFor="drill-title-inp" className="text-xs font-black text-[#3C3C3C]">
-              عنوان اختبار التقوية
-            </label>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="drill-title-inp" className="text-xs font-black text-[#3C3C3C]">
+                عنوان اختبار التقوية
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowTitleMath((v) => !v)}
+                className="text-[11px] font-black text-[#8938D6] hover:underline cursor-pointer"
+              >
+                {showTitleMath ? 'إخفاء الرموز' : 'رموز وكسور ±√'}
+              </button>
+            </div>
             <input
+              ref={titleInputRef}
               id="drill-title-inp"
               type="text"
+              dir="auto"
               maxLength={120}
               value={drillTitle}
               onChange={(e) => setDrillTitle(e.target.value)}
               className="px-3 py-2 rounded-xl bg-[#F7F7F7] border-2 border-[#E5E5E5] focus:border-[#A560E8] focus:bg-white outline-none text-xs sm:text-sm font-bold text-[#3C3C3C]"
             />
+            {drillTitle.trim() && (/[$\\^_]/.test(drillTitle) || showTitleMath) && (
+              <div className="rounded-xl bg-[#FAF7FF] border border-[#E2D4F8] px-2.5 py-1.5 text-xs font-black text-[#3C3C3C] leading-relaxed">
+                <MathText text={drillTitle} inline />
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
@@ -340,6 +385,10 @@ export const CreateDrillModal: React.FC<CreateDrillModalProps> = ({
             </select>
           </div>
         </div>
+
+        {showTitleMath && (
+          <MathToolbar onInsert={insertIntoDrillTitle} />
+        )}
 
         {/* Question Count */}
         <div className="flex flex-col gap-1.5">

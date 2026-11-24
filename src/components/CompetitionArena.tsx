@@ -1450,8 +1450,8 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
               <span className="text-xs font-black text-[#8938D6]">
                 نتائج المنافسة التفاعلية
               </span>
-              <h2 className="text-xl sm:text-2xl font-black text-[#3C3C3C]">
-                {activeComp.title}
+              <h2 className="text-xl sm:text-2xl font-black text-[#3C3C3C] leading-relaxed">
+                <MathText text={activeComp.title} inline />
               </h2>
               <p className="text-xs sm:text-sm font-bold text-[#777777]">
                 {activeComp.totalQuestions} سؤال ·{' '}
@@ -1817,8 +1817,8 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                 سؤال {Math.min(activeComp.currentIndex + 1, activeComp.totalQuestions)} /{' '}
                 {activeComp.totalQuestions}
               </span>
-              <span className="text-xs sm:text-sm font-black text-[#3C3C3C] truncate max-w-[260px]">
-                {activeComp.title}
+              <span className="text-xs sm:text-sm font-black text-[#3C3C3C] break-words max-w-[280px] leading-relaxed">
+                <MathText text={activeComp.title} inline />
               </span>
             </div>
 
@@ -2463,8 +2463,8 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <span className="text-xs sm:text-sm font-black text-[#3C3C3C] line-clamp-2">
-                          {entry.quiz.title}
+                        <span className="text-xs sm:text-sm font-black text-[#3C3C3C] leading-relaxed break-words">
+                          <MathText text={entry.quiz.title} inline />
                         </span>
                         <span className="font-latin px-2 py-0.5 rounded-lg bg-[#F7F7F7] border border-[#E5E5E5] text-[11px] font-black text-[#1899D6] shrink-0">
                           {readyLen} س

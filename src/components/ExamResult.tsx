@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowRight, RotateCcw, CheckCircle2, RefreshCw } from 'lucide-react';
 import type { ExamQuestion, ExamSettings } from '../types';
-import { buildAttempt, saveAttempt, scoreExam } from '../exam';
+import { buildAttempt, defaultExamTitle, saveAttempt, scoreExam } from '../exam';
 import { isFirestorePermissionError, isQuotaError } from '../firebase';
 import { deleteSessionSnapshot } from '../localDraftStore';
+import { MathText } from '../mathText';
 import { fetchUserAttemptsAndSyncLeaderboard } from '../social';
 import { ExamReview } from './ExamReview';
 import { DuoLoading } from './DuoLoading';
@@ -87,7 +88,12 @@ export const ExamResult: React.FC<Props> = ({
       <button type="button" onClick={onBack} className="self-start flex items-center gap-1 text-xs font-black text-[#777777] cursor-pointer">
         <ArrowRight className="w-4 h-4" /> العودة إلى اختباراتي
       </button>
-      <h2 className="text-lg font-black text-[#3C3C3C]">نتيجة الاختبار</h2>
+      <div>
+        <h2 className="text-lg font-black text-[#3C3C3C]">نتيجة الاختبار</h2>
+        <p className="text-xs font-extrabold text-[#777777] leading-relaxed">
+          <MathText text={defaultExamTitle(settings)} inline />
+        </p>
+      </div>
 
       {state === 'saving' && (
         <DuoLoading

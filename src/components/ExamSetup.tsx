@@ -34,6 +34,7 @@ import {
   type UnresolvedMistakeItem,
 } from '../mistakeLedger';
 import { DuoLoading } from './DuoLoading';
+import { MathText } from '../mathText';
 
 interface Props {
   ownerId: string;
@@ -545,7 +546,9 @@ export const ExamSetup: React.FC<Props> = ({
                           checked={singleId === item.id}
                           onChange={() => setSingleId(item.id)}
                         />
-                        <span className="flex-1 truncate">{item.title}</span>
+                        <span className="flex-1 min-w-0 break-words leading-relaxed">
+                          <MathText text={item.title} inline />
+                        </span>
                         <span
                           className={`text-[11px] font-black ${
                             n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
@@ -595,7 +598,9 @@ export const ExamSetup: React.FC<Props> = ({
                             checked={mixIds.includes(item.id)}
                             onChange={() => toggleMix(item.id)}
                           />
-                          <span className="flex-1 truncate">{item.title}</span>
+                          <span className="flex-1 min-w-0 break-words leading-relaxed">
+                            <MathText text={item.title} inline />
+                          </span>
                           <span
                             className={`text-[11px] font-black ${
                               n > 0 ? 'text-[#C2410C]' : 'text-[#46A302]'
@@ -650,7 +655,9 @@ export const ExamSetup: React.FC<Props> = ({
                           تقوية
                         </span>
                       )}
-                      <span className="flex-1 truncate">{q.title}</span>
+                      <span className="flex-1 min-w-0 break-words leading-relaxed">
+                        <MathText text={q.title} inline />
+                      </span>
                       <span className="text-[11px] font-extrabold text-[#777777]">
                         {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
                       </span>
@@ -699,7 +706,9 @@ export const ExamSetup: React.FC<Props> = ({
                             تقوية
                           </span>
                         )}
-                        <span className="flex-1 truncate">{q.title}</span>
+                        <span className="flex-1 min-w-0 break-words leading-relaxed">
+                          <MathText text={q.title} inline />
+                        </span>
                         <span className="text-[11px] font-extrabold text-[#777777]">
                           {n > 0 ? `${n} سؤال جاهز` : 'لا أسئلة جاهزة'}
                         </span>

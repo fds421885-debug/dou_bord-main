@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import type { LeaderboardUserEntry } from '../types';
+import { MathText } from '../mathText';
 
 export type UserFriendRelation =
   | 'self'
@@ -389,8 +390,8 @@ export const LeaderboardUserStatsModal: React.FC<Props> = ({
                       </svg>
                       {activePoint && (
                         <div className="p-2.5 rounded-xl bg-[#F8FAFC] border border-[#E5E5E5] flex flex-wrap items-center justify-between gap-2 text-xs">
-                          <span className="font-black text-[#3C3C3C] truncate max-w-xs">
-                            {activePoint.title}
+                          <span className="font-black text-[#3C3C3C] min-w-0 break-words max-w-xs leading-relaxed">
+                            <MathText text={activePoint.title} inline />
                           </span>
                           <div className="flex items-center gap-3 font-bold text-[#777777]">
                             <span>{activePoint.dateLabel}</span>
@@ -556,8 +557,8 @@ export const LeaderboardUserStatsModal: React.FC<Props> = ({
                       <tbody>
                         {quizRows.map((row) => (
                           <tr key={row.key} className="border-b border-[#F0F0F0] font-bold">
-                            <td className="py-2 px-2 font-black text-[#3C3C3C] max-w-[200px] truncate">
-                              {row.title}
+                            <td className="py-2 px-2 font-black text-[#3C3C3C] max-w-[220px] break-words leading-relaxed">
+                              <MathText text={row.title} inline />
                             </td>
                             <td className="py-2 px-2 text-center font-latin">{row.attempts}</td>
                             <td className="py-2 px-2 text-center font-latin">{row.questions}</td>

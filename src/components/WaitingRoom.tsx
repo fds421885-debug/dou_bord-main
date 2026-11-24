@@ -6,6 +6,7 @@ import type { Participant, Room, UserProfile } from '../types';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
 import { DuoLoading } from './DuoLoading';
 import { RoomQuizSyncBanner } from './RoomQuizBank';
+import { MathText } from '../mathText';
 
 interface WaitingRoomProps {
   room: Room;
@@ -92,8 +93,8 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
                 {sessionLabel}
               </span>
             </div>
-            <h1 className="text-xl sm:text-3xl font-black text-[#3C3C3C]">
-              {room.title}
+            <h1 className="text-xl sm:text-3xl font-black text-[#3C3C3C] leading-relaxed">
+              <MathText text={room.title} inline />
             </h1>
             <p className="text-sm font-bold text-[#777777]">
               المشرف: <span className="text-[#3C3C3C]">{room.supervisorName}</span>

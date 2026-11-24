@@ -641,7 +641,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           <ArrowRight className="w-4 h-4" /> العودة إلى اختباراتي
         </button>
         <div>
-          <h2 className="text-lg font-black text-[#3C3C3C]">{a.title}</h2>
+          <h2 className="text-lg font-black text-[#3C3C3C] leading-relaxed">
+            <MathText text={a.title} inline />
+          </h2>
           <p className="text-[11px] font-extrabold text-[#777777]">
             {new Date(a.finishedAt).toLocaleString('ar')} · {describeTiming(a.settings)}
           </p>
@@ -739,7 +741,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
         <button type="button" onClick={() => setMode({ kind: 'list' })} className="self-start flex items-center gap-1 text-xs font-black text-[#777777] cursor-pointer">
           <ArrowRight className="w-4 h-4" /> العودة إلى اختباراتي
         </button>
-        <h2 className="text-lg font-black text-[#3C3C3C]">{q.title}</h2>
+        <h2 className="text-lg font-black text-[#3C3C3C] leading-relaxed">
+          <MathText text={q.title} inline />
+        </h2>
         {q.questions.map((qq, i) => (
           <div key={qq.id} className={`${card} p-4 flex flex-col gap-2`}>
             <span className="self-start px-3 py-1 rounded-full bg-[#DDF4FF] text-[#1899D6] text-xs font-black">السؤال {i + 1}</span>
@@ -1067,7 +1071,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       )}
                       {item.sourceTitle && (
                         <span className="text-[11px] font-bold text-[#777777]">
-                          من: {item.sourceTitle}
+                          من: <MathText text={item.sourceTitle} inline />
                         </span>
                       )}
                     </div>
@@ -1109,7 +1113,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                           className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-[#E9D8FD] px-2.5 py-1.5"
                         >
                           <div className="min-w-0 flex-1">
-                            <p className="text-xs font-black text-[#3C3C3C] truncate">{drill.title}</p>
+                            <p className="text-xs font-black text-[#3C3C3C] break-words leading-relaxed">
+                              <MathText text={drill.title} inline />
+                            </p>
                             <p className="text-[10px] font-bold text-[#777777]">
                               {drill.questionCount} سؤال
                             </p>
@@ -1340,8 +1346,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
       {draft && (
         <div className="rounded-2xl border-2 border-[#FFC800] bg-[#FFF4CC] p-3 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-extrabold text-[#8A6500]">
-            لديك مسودة لم تُحفظ بعد{draft.title ? `: «${draft.title}»` : ''} — تابع من حيث توقفت.
+          <span className="text-xs font-extrabold text-[#8A6500] leading-relaxed">
+            لديك مسودة لم تُحفظ بعد{draft.title ? (
+              <>
+                : «<MathText text={draft.title} inline />»
+              </>
+            ) : ''} — تابع من حيث توقفت.
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -1400,7 +1410,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-base font-black text-[#3C3C3C] truncate">{q.title}</h3>
+                        <h3 className="text-base font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                          <MathText text={q.title} inline />
+                        </h3>
                         {children.length > 0 && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#F5ECFF] border border-[#A560E8]/60 text-[10px] font-black text-[#8938D6]">
                             <Layers className="w-3 h-3" />
@@ -1544,11 +1556,11 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-1.5">
-                                  <h4 className="text-sm font-black text-[#3C3C3C] truncate">
-                                    {child.title}
+                                  <h4 className="text-sm font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                                    <MathText text={child.title} inline />
                                   </h4>
-                                  <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] border border-[#A560E8]/50 text-[10px] font-black text-[#8938D6]">
-                                    {child.ruleTitle || styleLabel}
+                                  <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] border border-[#A560E8]/50 text-[10px] font-black text-[#8938D6] leading-relaxed">
+                                    <MathText text={child.ruleTitle || styleLabel} inline />
                                   </span>
                                 </div>
                                 <p className="text-[11px] font-bold text-[#777777]">
@@ -1684,8 +1696,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <h4 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
-                          {drill.title}
+                        <h4 className="text-sm sm:text-base font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                          <MathText text={drill.title} inline />
                         </h4>
                         <p className="text-[11px] font-bold text-[#777777]">
                           {drill.questionCount} سؤال · تقوية مستقلة
@@ -1814,7 +1826,9 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               <div key={a.id} className={`${card} p-4 flex flex-col gap-2`}>
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <h4 className="text-sm font-black text-[#3C3C3C] truncate">{a.title || 'اختبار سابق'}</h4>
+                    <h4 className="text-sm font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                      <MathText text={a.title || 'اختبار سابق'} inline />
+                    </h4>
                     <p className="text-[11px] font-extrabold text-[#777777]">
                       {dateStr} · {describeTiming(a.settings)} · {formatDuration(a.durationSec)}
                     </p>
@@ -2203,10 +2217,10 @@ const ImportPanel: React.FC<{
           </div>
 
           <div className="p-3 rounded-2xl bg-white border-2 border-[#58CC02] flex items-center justify-between gap-2">
-            <span className="text-sm font-black text-[#3C3C3C]">
-              الأساسي: {bundlePreview.title || 'اختبار أساسي'}
+            <span className="text-sm font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+              الأساسي: <MathText text={bundlePreview.title || 'اختبار أساسي'} inline />
             </span>
-            <span className="px-2.5 py-0.5 rounded-lg bg-[#D7FFB8] text-[#46A302] text-xs font-black">
+            <span className="px-2.5 py-0.5 rounded-lg bg-[#D7FFB8] text-[#46A302] text-xs font-black shrink-0">
               {bundlePreview.questions.length} سؤال
             </span>
           </div>
@@ -2217,14 +2231,16 @@ const ImportPanel: React.FC<{
                 key={idx}
                 className="p-2.5 rounded-2xl bg-white border border-[#E2D4F8] flex items-center justify-between gap-2 text-xs font-bold"
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
                   <span className="w-6 h-6 rounded-lg bg-[#A560E8] text-white flex items-center justify-center font-latin font-black shrink-0">
                     {idx + 1}
                   </span>
-                  <span className="font-black text-[#3C3C3C] truncate">{sq.title}</span>
+                  <span className="font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                    <MathText text={sq.title} inline />
+                  </span>
                   {sq.ruleTitle && (
-                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#8938D6] text-[10px] font-black">
-                      {sq.ruleTitle}
+                    <span className="px-2 py-0.5 rounded-lg bg-[#F3E8FF] text-[#8938D6] text-[10px] font-black leading-relaxed">
+                      <MathText text={sq.ruleTitle} inline />
                     </span>
                   )}
                 </div>

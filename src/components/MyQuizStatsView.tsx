@@ -21,6 +21,7 @@ import {
   formatAchievementSummaryText,
   type StatsTimeRange,
 } from '../quizStats';
+import { MathText } from '../mathText';
 
 interface Props {
   attempts: QuizAttempt[];
@@ -487,8 +488,8 @@ export const MyQuizStatsView: React.FC<Props> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#F9FAFB] border border-[#EFEFEF] px-3 py-2 text-xs">
                   <div className="flex flex-wrap items-center gap-2 min-w-0">
                     <span className="font-black text-[#7C3AED] font-latin">#{activePoint.index}</span>
-                    <span className="font-black text-[#3C3C3C] truncate max-w-[220px]">
-                      {activePoint.title}
+                    <span className="font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                      <MathText text={activePoint.title} inline />
                     </span>
                     <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
                     <span className={`font-black font-latin tabular-nums ${pctToneText(activePoint.pct)}`}>
@@ -1038,8 +1039,8 @@ export const MyQuizStatsView: React.FC<Props> = ({
                 <tbody className="divide-y divide-[#F3F4F6] font-bold text-[#3C3C3C]">
                   {stats.quizRows.map((row) => (
                     <tr key={row.key} className="hover:bg-[#FAFAFA]">
-                      <td className="py-2.5 px-2 font-black max-w-[220px] truncate" title={row.title}>
-                        {row.title}
+                      <td className="py-2.5 px-2 font-black max-w-[240px] break-words leading-relaxed" title={row.title}>
+                        <MathText text={row.title} inline />
                       </td>
                       <td className="py-2.5 px-2 text-left font-latin tabular-nums">{row.attempts}</td>
                       <td className="py-2.5 px-2 text-left font-latin tabular-nums">{row.questions}</td>

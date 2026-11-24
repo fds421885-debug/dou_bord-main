@@ -128,6 +128,7 @@ import { NotificationCenterToast } from './components/NotificationCenterToast';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
+import { MathText } from './mathText';
 import {
   initPWA,
   isNotificationsEnabledPref,
@@ -2346,8 +2347,10 @@ export default function App() {
                 )}
               </nav>
             ) : (
-              <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#3C3C3C] truncate max-w-[140px] sm:max-w-md">
-                <span className="truncate">{room?.title ?? 'غرفة الاختبار'}</span>
+              <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#3C3C3C] min-w-0 max-w-[160px] sm:max-w-md leading-relaxed">
+                <span className="min-w-0 break-words">
+                  <MathText text={room?.title ?? 'غرفة الاختبار'} inline />
+                </span>
               </div>
             )}
 

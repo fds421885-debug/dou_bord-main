@@ -21,6 +21,7 @@ import { saveSavedTestsListSnapshot } from '../localDraftStore';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
 import { DuoLoading } from './DuoLoading';
 import { TestResultsView } from './TestResultsView';
+import { MathText } from '../mathText';
 
 interface SavedTestsViewProps {
   profile: UserProfile;
@@ -172,7 +173,9 @@ export const SavedTestsView: React.FC<SavedTestsViewProps> = ({ profile }) => {
                   </span>
                   <span>{formatTimestamp(test.createdAt)}</span>
                 </div>
-                <h2 className="text-lg font-black text-[#3C3C3C]">{test.title}</h2>
+                <h2 className="text-lg font-black text-[#3C3C3C] break-words leading-relaxed">
+                  <MathText text={test.title} inline />
+                </h2>
                 <p className="text-xs font-bold text-[#777777]">
                   المشرف: <span className="text-[#3C3C3C]">{test.supervisorName}</span>
                   {' · '}

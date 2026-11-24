@@ -43,6 +43,7 @@ import type {
 } from '../types';
 import { playDuoSound } from './DuoIcons';
 import { LeaderboardUserStatsModal } from './LeaderboardUserStatsModal';
+import { MathText } from '../mathText';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface Props {
@@ -686,8 +687,8 @@ export const FriendsView: React.FC<Props> = ({
                                     <span className="block text-[10px] font-black text-[#8938D6]">
                                       {isMine ? 'أرسلت اختباراً' : 'أرسل لك اختباراً هديه'}
                                     </span>
-                                    <p className="text-xs sm:text-sm font-black text-[#3C3C3C]">
-                                      {quizMeta.quizTitle}
+                                    <p className="text-xs sm:text-sm font-black text-[#3C3C3C] break-words leading-relaxed">
+                                      <MathText text={quizMeta.quizTitle} inline />
                                     </p>
                                     <span className="text-[11px] font-bold text-[#777777]">
                                       {quizMeta.questionCount} سؤال
@@ -841,8 +842,8 @@ export const FriendsView: React.FC<Props> = ({
                     className="p-3 rounded-2xl border-2 border-[#E5E5E5] hover:border-[#A560E8] flex items-center justify-between gap-2"
                   >
                     <div className="min-w-0">
-                      <p className="text-xs sm:text-sm font-black text-[#3C3C3C] truncate">
-                        {qz.title}
+                      <p className="text-xs sm:text-sm font-black text-[#3C3C3C] break-words leading-relaxed">
+                        <MathText text={qz.title} inline />
                       </p>
                       <span className="text-[11px] font-bold text-[#777777]">
                         {qz.questions.length} سؤال

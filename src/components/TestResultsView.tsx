@@ -506,7 +506,9 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
             <span className="text-xs font-extrabold text-[#E5A400]">
               النتائج النهائية وسجل الصبورات
             </span>
-            <h1 className="text-2xl sm:text-3xl font-black text-[#3C3C3C]">{title}</h1>
+            <h1 className="text-2xl sm:text-3xl font-black text-[#3C3C3C] leading-relaxed">
+              <MathText text={title} inline />
+            </h1>
             <p className="text-sm font-bold text-[#777777]">
               المشرف: <span className="text-[#3C3C3C]">{supervisorName}</span>
               {' · '}

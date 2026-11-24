@@ -37,6 +37,7 @@ import type { Room, SessionType, UserProfile } from '../types';
 import { closeRoomInDatabase } from '../roomLifecycle';
 import { DUO_IMAGES, DuoArtwork, playDuoSound } from './DuoIcons';
 import { DuoLoading } from './DuoLoading';
+import { MathText } from '../mathText';
 
 interface RoleHubProps {
   profile: UserProfile;
@@ -434,8 +435,8 @@ export const RoleHub: React.FC<RoleHubProps> = ({
                         )}
                       </button>
                     </div>
-                    <h3 className="text-sm sm:text-base font-black text-[#3C3C3C] truncate">
-                      {r.title}
+                    <h3 className="text-sm sm:text-base font-black text-[#3C3C3C] min-w-0 break-words leading-relaxed">
+                      <MathText text={r.title} inline />
                     </h3>
                   </div>
 

@@ -20,19 +20,44 @@ function coerceMathText(src: unknown): string {
 /** يغلّف تعبيرات LaTeX الواضحة المكتوبة خارج $...$ دون كسر النص العادي أو الأقواس. */
 function normalizeBareMath(src: string): string {
   const safeSrc = coerceMathText(src);
-  if (!safeSrc || (!safeSrc.includes('\\frac') && !safeSrc.includes('\\sqrt'))) return safeSrc;
+  if (!safeSrc || (!safeSrc.includes('\\') && !safeSrc.includes('^{\\circ}'))) {
+    return safeSrc;
+  }
   const parts = splitMath(safeSrc);
+  const arg = '(?:[^{}]|\\{[^{}]*\\})+';
+  const barePattern = new RegExp(
+    `(\\\\frac\\{${arg}\\}\\{${arg}\\}` +
+      `|\\\\sqrt(?:\\[[^\\]]+\\])?\\{${arg}\\}` +
+      `|\\\\(?:overline|vec|mathbb)\\{${arg}\\}` +
+      `|(?:\\d+|[A-Za-z\\u0600-\\u06FF])?\\^\\{\\\\circ\\}` +
+      `|\\\\(?:times|div|pm|leq|geq|neq|approx|equiv|propto|pi|infty|theta|alpha|beta|gamma|lambda|mu|sigma|varphi|omega|Delta|Sigma|Omega|angle|triangle|perp|parallel|in|notin|cup|cap|subset|emptyset|Rightarrow|Leftrightarrow|to)(?![A-Za-z]))`,
+    'g'
+  );
   return parts
     .map((seg) => {
       if (seg.kind === 'math') {
         return seg.display ? `$$${seg.value}$$` : `$${seg.value}$`;
       }
-      return seg.value.replace(
-        /(\\frac\{[^{}]+\}\{[^{}]+\}|\\sqrt(?:\[[^\]]+\])?\{[^{}]+\})/g,
-        (m) => `$${m}$`
-      );
+      return seg.value.replace(barePattern, (m) => `$${m}$`);
     })
     .join('');
+}
+
+/** يقص النص لطول محدد دون ترك معادلة $...$ مفتوحة في المنتصف. */
+export function clipMathSafe(src: unknown, maxLen = 45): string {
+  const clean = coerceMathText(src).replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLen) return clean;
+  let cut = clean.slice(0, maxLen);
+  const unescapedDollars = cut.replace(/\\\$/g, '').match(/\$/g);
+  if (unescapedDollars && unescapedDollars.length % 2 === 1) {
+    const lastDollar = cut.lastIndexOf('$');
+    if (lastDollar > 0) {
+      cut = cut.slice(0, lastDollar).trim();
+    } else {
+      cut = cut.replace(/\$/g, '').trim();
+    }
+  }
+  return cut || clean.slice(0, maxLen).replace(/\$/g, '').trim();
 }
 
 export function splitMath(src: string): Seg[] {

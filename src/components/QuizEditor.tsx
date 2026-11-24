@@ -280,15 +280,28 @@ export const QuizEditor: React.FC<Props> = ({
     <div className="flex flex-col gap-4" dir="rtl">
       <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
         <label className="flex flex-col gap-1.5">
-          <span className="text-xs font-black text-[#3C3C3C]">عنوان الاختبار</span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-black text-[#3C3C3C]">
+              عنوان الاختبار (يدعم الكسور والجذور والرموز مثل الأسئلة)
+            </span>
+            <span className="text-[11px] font-bold font-latin text-[#777777]">
+              {title.length}/{LIMITS.title}
+            </span>
+          </div>
           <MathField
             value={title}
             onChange={setTitle}
             maxLength={LIMITS.title}
-            placeholder="مثال: اختبار الجذور والأسس — الفصل الأول"
+            placeholder="مثال: اختبار الكسور $\frac{3}{4}$ والجذور $\sqrt{16}$ — اضغط هنا ثم اختر من شريط الرموز"
             onFocusField={onFocusField}
           />
         </label>
+        {showPreview && title.trim() && (
+          <div className="rounded-2xl bg-[#F8FAFC] border border-[#E5E5E5] px-3 py-2 flex flex-col gap-0.5">
+            <span className="text-[10px] font-black text-[#777777]">معاينة العنوان:</span>
+            <MathText text={title} inline className="text-base font-black text-[#3C3C3C] leading-relaxed" />
+          </div>
+        )}
         <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold text-[#777777]">
           <span>{filled} سؤال جاهز للحفظ</span>
           <button

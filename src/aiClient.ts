@@ -1,3 +1,6 @@
+import { isBackendServerDetected, resolveApiUrl } from './apiBase';
+import { activeFirebaseConfig, auth } from './firebase';
+
 export interface AiSolution {
   finalAnswer: string;
   steps: string[];
@@ -132,23 +135,92 @@ const RESPONSE_SCHEMA = {
   required: ['finalAnswer', 'steps', 'explanation'],
 };
 
+async function solveViaBackend(questionText: string, imageDataUrl: string): Promise<AiSolution> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('يلزم تسجيل الدخول لاستخدام المساعد الذكي.');
+  }
+  const idToken = await user.getIdToken(false);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 85000);
+  try {
+    const resp = await fetch(resolveApiUrl('/api/ai/solve-question'), {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({
+        questionText,
+        imageDataUrl,
+        tokenProjectId: activeFirebaseConfig.projectId,
+        tokenApiKey: activeFirebaseConfig.apiKey,
+        tokenFirestoreDatabaseId: activeFirebaseConfig.firestoreDatabaseId || '',
+      }),
+    });
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      throw new Error('BACKEND_UNAVAILABLE');
+    }
+    const data = (await resp.json()) as Partial<AiSolution> & { error?: string };
+    if (!resp.ok) {
+      throw new Error(data.error || `تعذر تحليل السؤال بالذكاء الاصطناعي (${resp.status}).`);
+    }
+    return {
+      finalAnswer:
+        typeof data.finalAnswer === 'string' && data.finalAnswer.trim()
+          ? data.finalAnswer.trim()
+          : 'راجع خطوات الحل أدناه',
+      steps: Array.isArray(data.steps)
+        ? data.steps.filter((s): s is string => typeof s === 'string' && !!s.trim())
+        : [],
+      explanation: typeof data.explanation === 'string' ? data.explanation.trim() : '',
+    };
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('استغرق المساعد الذكي وقتاً أطول من المعتاد. أعد المحاولة الآن.');
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function solveQuestionWithAi(
   questionText: string,
   imageDataUrl: string
 ): Promise<AiSolution> {
-  const cfg = getAiConfig();
-  if (!cfg) throw new AiKeyError('لم يتم ربط الذكاء الاصطناعي بعد.');
-
   const text = questionText.trim();
   const image = imageDataUrl.trim();
   if (!text && !image) {
     throw new Error('يرجى كتابة نص السؤال أو إرفاق صورة أو صفحة PDF أولاً.');
   }
 
+  const smallImage = image ? await shrinkImage(image) : '';
+
+  if (isBackendServerDetected()) {
+    try {
+      return await solveViaBackend(text, smallImage);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      // If static-host/no-backend error and a legacy local config exists, fall through; otherwise surface real server error
+      const cfg = getAiConfig();
+      if (msg !== 'BACKEND_UNAVAILABLE' || !cfg) {
+        if (msg === 'BACKEND_UNAVAILABLE') {
+          throw new AiKeyError('لم يتم ربط خادم الذكاء الاصطناعي.');
+        }
+        throw err;
+      }
+    }
+  }
+
+  const cfg = getAiConfig();
+  if (!cfg) throw new AiKeyError('لم يتم ربط الذكاء الاصطناعي بعد.');
+
   const parts: Array<Record<string, unknown>> = [];
-  if (image) {
-    const small = await shrinkImage(image);
-    const m = /^data:([a-zA-Z0-9/+.-]+);base64,(.+)$/.exec(small);
+  if (smallImage) {
+    const m = /^data:([a-zA-Z0-9/+.-]+);base64,(.+)$/.exec(smallImage);
     if (!m) throw new Error('صيغة الصورة أو صفحة PDF المرفقة غير صالحة.');
     parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
   }

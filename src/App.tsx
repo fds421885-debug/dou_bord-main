@@ -125,6 +125,7 @@ import { QuickMigrateModal } from './components/QuickMigrateModal';
 import { QuotaFullDbSelectorModal } from './components/QuotaFullDbSelectorModal';
 import { RulesCheckModal } from './components/RulesCheckModal';
 import { NotificationCenterToast } from './components/NotificationCenterToast';
+import { AchievementCelebrationToast } from './components/AchievementCelebrationToast';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { DuoOwlEmblem, playDuoSound } from './components/DuoIcons';
 import { DuoLoading } from './components/DuoLoading';
@@ -2954,6 +2955,13 @@ export default function App() {
           </div>
         </div>
       )}
+      <AchievementCelebrationToast
+        currentUid={profile?.uid}
+        onOpenLeaderboard={() => {
+          setActiveRoomId(null);
+          setTab('leaderboard');
+        }}
+      />
       {canReceiveQuotaAlerts && quotaToastNotification && (
         <div
           className="fixed bottom-4 left-4 z-50 max-w-sm w-[calc(100vw-2rem)]"

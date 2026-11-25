@@ -37,6 +37,7 @@ import {
   LeaderboardUserStatsModal,
   type UserFriendRelation,
 } from './LeaderboardUserStatsModal';
+import { LeaderboardAchievementsCarousel } from './LeaderboardAchievementsCarousel';
 
 interface Props {
   profile: UserProfile;
@@ -339,6 +340,19 @@ export const LeaderboardView: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* 100 Achievements & Breakable Records Carousel */}
+      <LeaderboardAchievementsCarousel
+        profile={profile}
+        resetEpoch={resetEpoch}
+        allUsers={effectiveUsers}
+        myEntry={myEntry}
+        onOpenMyRecord={
+          myEntry && myRank
+            ? () => setSelectedUserForStats({ entry: myEntry, rank: myRank })
+            : undefined
+        }
+      />
 
       {/* My Position Card */}
       {myEntry && myRank && (

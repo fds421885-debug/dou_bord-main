@@ -1,7 +1,7 @@
 import { GoogleGenAI, ThinkingLevel, Type, type GenerateContentParameters, type GenerateContentResponse } from '@google/genai';
 
-const PRIMARY_MODEL = 'gemini-4-hydrogen';
-const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const PRIMARY_MODEL = (process.env.GEMINI_PRIMARY_MODEL || '').trim() || 'gemini-4-hydrogen';
+const FALLBACK_MODEL = (process.env.GEMINI_FALLBACK_MODEL || '').trim() || 'gemini-3.1-flash-lite';
 
 export class AiCoachUpstreamError extends Error {
   readonly httpStatus: number;
@@ -50,6 +50,9 @@ export function extractGeminiErrorMeta(err: unknown): {
 
   if (err && typeof err === 'object') {
     const rec = err as Record<string, unknown>;
+    if (!message && typeof rec.message === 'string') {
+      message = rec.message;
+    }
     const rawCode = rec.status ?? rec.statusCode ?? rec.code;
     if (typeof rawCode === 'number' && Number.isFinite(rawCode)) {
       statusCode = rawCode;
@@ -174,6 +177,36 @@ export function toFriendlyAiError(err: unknown): AiCoachUpstreamError {
   );
 }
 
+function isFallbackEligibleAiError(err: unknown): boolean {
+  if (isTransientAiError(err)) return true;
+  const { statusCode, statusText, message } = extractGeminiErrorMeta(err);
+  const upperStatus = (statusText || '').toUpperCase();
+  if (statusCode === 404 || upperStatus === 'NOT_FOUND') {
+    return true;
+  }
+  if (
+    statusCode === 400 &&
+    /thinking|thinkingconfig|thinkinglevel|not supported|unsupported|unknown name/i.test(message)
+  ) {
+    return true;
+  }
+  return /model.*not found|not supported for generatecontent|unknown field.*thinking/i.test(message);
+}
+
+function stripThinkingConfig(
+  request: Omit<GenerateContentParameters, 'model'>
+): Omit<GenerateContentParameters, 'model'> {
+  if (!request.config || !('thinkingConfig' in request.config)) {
+    return request;
+  }
+  const restConfig = { ...request.config } as Record<string, unknown>;
+  delete restConfig.thinkingConfig;
+  return {
+    ...request,
+    config: restConfig as GenerateContentParameters['config'],
+  };
+}
+
 export async function generateContentWithRetry(
   generateFn: (params: GenerateContentParameters) => Promise<GenerateContentResponse>,
   request: Omit<GenerateContentParameters, 'model'>,
@@ -187,37 +220,47 @@ export async function generateContentWithRetry(
   const primaryModel = options?.primaryModel || PRIMARY_MODEL;
   const fallbackModel = options?.fallbackModel || FALLBACK_MODEL;
 
-  const attemptPlan: Array<{ model: string; waitBeforeMs: number }> = [
+  const attemptPlan: Array<{ model: string; waitBeforeMs: number; dropThinking?: boolean }> = [
     { model: primaryModel, waitBeforeMs: 0 },
-    { model: primaryModel, waitBeforeMs: 700 + Math.floor(Math.random() * 200) },
+    { model: primaryModel, waitBeforeMs: 650 + Math.floor(Math.random() * 200) },
     ...(fallbackModel !== primaryModel
       ? [
           { model: fallbackModel, waitBeforeMs: 250 },
-          { model: fallbackModel, waitBeforeMs: 900 + Math.floor(Math.random() * 200) },
+          { model: fallbackModel, waitBeforeMs: 900 + Math.floor(Math.random() * 200), dropThinking: true },
         ]
-      : []),
+      : [{ model: primaryModel, waitBeforeMs: 900, dropThinking: true }]),
   ];
 
   let lastErr: unknown;
+  let forceDropThinking = false;
   for (let i = 0; i < attemptPlan.length; i++) {
     const step = attemptPlan[i];
     if (step.waitBeforeMs > 0) {
       await sleep(step.waitBeforeMs);
     }
+    const baseReq = forceDropThinking || step.dropThinking ? stripThinkingConfig(request) : request;
     try {
       return await generateFn({
-        ...request,
+        ...baseReq,
         model: step.model,
       });
     } catch (err) {
       lastErr = err;
-      if (!isTransientAiError(err)) {
+      const meta = extractGeminiErrorMeta(err);
+      if (/thinking|thinkingconfig|thinkinglevel/i.test(meta.message)) {
+        forceDropThinking = true;
+      }
+      if (!isFallbackEligibleAiError(err)) {
         throw toFriendlyAiError(err);
+      }
+      // If 404 on primary, skip second retry on same unavailable primary model
+      if ((meta.statusCode === 404 || meta.statusText === 'NOT_FOUND') && attemptPlan[i + 1]?.model === step.model) {
+        i += 1;
       }
       const nextStep = attemptPlan[i + 1];
       if (nextStep) {
         console.warn(
-          `[serverAi] Transient Gemini error on ${step.model}; retrying with ${nextStep.model}:`,
+          `[serverAi] Recoverable Gemini error on ${step.model}; retrying with ${nextStep.model}:`,
           err instanceof Error ? err.message : err
         );
       }
@@ -234,30 +277,119 @@ function generateContentResilient(
   return generateContentWithRetry((params) => ai.models.generateContent(params), request);
 }
 
-function safeParseJson<T = Record<string, unknown>>(raw: string | undefined | null): T {
+/**
+ * يصلّح أخطاء الهروب الشائعة داخل JSON الناتج عن صيغ LaTeX مثل \frac أو \triangle أو \times
+ * دون إفساد محارف الهروب القانونية (\" \\ \/ \b \f \n \r \t \uXXXX) عند صحة البنية.
+ */
+function repairJsonStrings(rawJson: string): string {
+  // Repair invalid backslash escapes inside JSON string literals + trailing commas before } or ]
+  let out = '';
+  let inString = false;
+  let i = 0;
+  while (i < rawJson.length) {
+    const ch = rawJson[i];
+    if (!inString) {
+      if (ch === '"') {
+        inString = true;
+      }
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '\\') {
+      const next = rawJson[i + 1] ?? '';
+      const validHex =
+        next === 'u' && /^[0-9a-fA-F]{4}$/.test(rawJson.slice(i + 2, i + 6));
+      if (
+        next === '"' ||
+        next === '\\' ||
+        next === '/' ||
+        next === 'n' ||
+        next === 'r' ||
+        next === 't' ||
+        validHex
+      ) {
+        out += ch + next;
+        i += 2;
+      } else if (next) {
+        // Common LaTeX commands like \frac, \triangle, \binom, \sqrt, \times, \boxed
+        out += '\\\\' + next;
+        i += 2;
+      } else {
+        out += '\\\\';
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '\n') {
+      out += '\\n';
+      i += 1;
+      continue;
+    }
+    if (ch === '\r') {
+      out += '\\r';
+      i += 1;
+      continue;
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out.replace(/,\s*([}\]])/g, '$1');
+}
+
+function tryParseJsonCandidate<T>(candidate: string): T | null {
+  try {
+    return JSON.parse(candidate) as T;
+  } catch {
+    try {
+      return JSON.parse(repairJsonStrings(candidate)) as T;
+    } catch {
+      return null;
+    }
+  }
+}
+
+export function safeParseJson<T = Record<string, unknown>>(raw: string | undefined | null): T {
   const txt = (raw || '').trim();
   if (!txt) {
     throw new Error('استجابة الذكاء الاصطناعي كانت فارغة');
   }
-  try {
-    return JSON.parse(txt) as T;
-  } catch {
-    const fenced = txt.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fenced && fenced[1]) {
-      return JSON.parse(fenced[1].trim()) as T;
-    }
-    const firstBrace = txt.indexOf('{');
-    const lastBrace = txt.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      return JSON.parse(txt.slice(firstBrace, lastBrace + 1)) as T;
-    }
-    const firstBracket = txt.indexOf('[');
-    const lastBracket = txt.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket > firstBracket) {
-      return JSON.parse(txt.slice(firstBracket, lastBracket + 1)) as T;
-    }
-    throw new Error('تعذر قراءة صيغة JSON من استجابة الذكاء الاصطناعي');
+
+  const direct = tryParseJsonCandidate<T>(txt);
+  if (direct !== null) return direct;
+
+  const fenced = txt.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && fenced[1]) {
+    const parsedFenced = tryParseJsonCandidate<T>(fenced[1].trim());
+    if (parsedFenced !== null) return parsedFenced;
   }
+
+  const firstBrace = txt.indexOf('{');
+  const lastBrace = txt.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const parsedBrace = tryParseJsonCandidate<T>(txt.slice(firstBrace, lastBrace + 1));
+    if (parsedBrace !== null) return parsedBrace;
+  }
+
+  const firstBracket = txt.indexOf('[');
+  const lastBracket = txt.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    const parsedBracket = tryParseJsonCandidate<T>(txt.slice(firstBracket, lastBracket + 1));
+    if (parsedBracket !== null) return parsedBracket;
+  }
+
+  throw new Error('تعذر قراءة صيغة JSON من استجابة الذكاء الاصطناعي');
 }
 
 const DUOBOARD_QUESTION_SCHEMA_GUIDE = `
@@ -729,3 +861,82 @@ ${DUOBOARD_QUESTION_SCHEMA_GUIDE}`;
     quickQuiz: qq,
   };
 }
+
+export interface SolveQuestionRequestPayload {
+  questionText?: string;
+  imageDataUrl?: string;
+}
+
+export async function runAiSolveQuestion(payload: SolveQuestionRequestPayload): Promise<{
+  finalAnswer: string;
+  steps: string[];
+  explanation: string;
+}> {
+  const ai = getAiClient();
+  const text = typeof payload.questionText === 'string' ? payload.questionText.trim().slice(0, 4000) : '';
+  const image = typeof payload.imageDataUrl === 'string' ? payload.imageDataUrl.trim() : '';
+
+  if (!text && !image) {
+    throw new AiCoachUpstreamError('يرجى كتابة نص السؤال أو إرفاق صورة أو صفحة PDF أولاً.', 400);
+  }
+
+  const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+  if (image) {
+    const match = /^data:(image\/[a-zA-Z0-9.+-]+|application\/pdf);base64,([A-Za-z0-9+/=]+)$/.exec(image);
+    if (!match) {
+      throw new AiCoachUpstreamError('صيغة الصورة أو الملف المرفق غير صالحة.', 400);
+    }
+    parts.push({
+      inlineData: {
+        mimeType: match[1],
+        data: match[2],
+      },
+    });
+  }
+
+  parts.push({
+    text: text
+      ? `السؤال أو الملاحظة المرفقة من المشرف:\n${text}\n\nحلّل الصورة (إن وُجدت) مع النص أعلاه، وأعطِ الإجابة الصحيحة النهائية مع خطوات الحل بالعربية.`
+      : 'حلّل هذه الصورة جيداً، واستخرج التمرين/السؤال، ثم قدّم الإجابة الصحيحة النهائية مع شرح الحل خطوة بخطوة بالعربية.',
+  });
+
+  const systemInstruction =
+    'أنت مساعد ذكي ومعلّم خبير مخصص للمشرف فقط داخل فصل دراسي تفاعلي. مهمتك قراءة السؤال من الصورة أو صفحة PDF أو النص بدقة عالية، وتقديم: (1) الإجابة النهائية الصحيحة بشكل مباشر وواضح، (2) خطوات الحل مرتبة خطوة بخطوة بأسلوب بسيط وسلس ومفصل يناسب الشرح للطلاب، (3) توضيح القاعدة أو الفكرة الأساسية للحل. إذا احتوت الصفحة على عدة مسائل أو فروع، رتّب حل كل فرع بوضوح. التزم باللغة العربية الفصحى السهلة والدقة العلمية التامة.';
+
+  const response = await generateContentResilient(ai, {
+    contents: [{ role: 'user', parts }],
+    config: {
+      systemInstruction,
+      responseMimeType: 'application/json',
+      temperature: 0.2,
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          finalAnswer: { type: Type.STRING },
+          steps: { type: Type.ARRAY, items: { type: Type.STRING } },
+          explanation: { type: Type.STRING },
+        },
+        required: ['finalAnswer', 'steps', 'explanation'],
+      },
+    },
+  });
+
+  const parsed = safeParseJson<{
+    finalAnswer?: string;
+    steps?: unknown[];
+    explanation?: string;
+  }>(response.text);
+
+  return {
+    finalAnswer:
+      typeof parsed.finalAnswer === 'string' && parsed.finalAnswer.trim()
+        ? parsed.finalAnswer.trim()
+        : 'راجع خطوات الحل أدناه',
+    steps: Array.isArray(parsed.steps)
+      ? parsed.steps.filter((s): s is string => typeof s === 'string' && Boolean(s.trim()))
+      : [],
+    explanation: typeof parsed.explanation === 'string' ? parsed.explanation.trim() : '',
+  };
+}
+

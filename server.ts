@@ -1,8 +1,8 @@
+import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import * as webpush from 'web-push';
 import {
   AiCoachUpstreamError,
@@ -10,11 +10,13 @@ import {
   runAiCoachAnalyze,
   runAiCoachChat,
   runAiCoachGenerateQuiz,
+  runAiSolveQuestion,
   toFriendlyAiError,
   type AnalyzeRequestPayload,
   type ChatRequestPayload,
   type GenerateQuizRequestPayload,
-} from './serverAi';
+  type SolveQuestionRequestPayload,
+} from './serverAi.ts';
 
 type DatabaseRole = 'player' | 'backup';
 
@@ -101,11 +103,19 @@ interface PublicPlatformPointer {
 }
 
 const PORT = Number(process.env.PORT || 3000);
-const STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-state.json');
-const QUOTA_STATE_FILE_PATH = path.resolve(process.cwd(), '.duoboard-quota-state.json');
-const VAPID_FILE_PATH = path.resolve(process.cwd(), '.duoboard-vapid.json');
-const PUSH_SUBS_FILE_PATH = path.resolve(process.cwd(), '.duoboard-push-subs.json');
-const LEGACY_POINTER_FILE_PATH = path.resolve(process.cwd(), '.duoboard-platform-db.json');
+const DATA_DIR = process.env.DUOBOARD_DATA_DIR
+  ? path.resolve(process.env.DUOBOARD_DATA_DIR)
+  : process.cwd();
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch {
+  // Fallback if DATA_DIR already exists or is read-only
+}
+const STATE_FILE_PATH = path.resolve(DATA_DIR, '.duoboard-platform-state.json');
+const QUOTA_STATE_FILE_PATH = path.resolve(DATA_DIR, '.duoboard-quota-state.json');
+const VAPID_FILE_PATH = path.resolve(DATA_DIR, '.duoboard-vapid.json');
+const PUSH_SUBS_FILE_PATH = path.resolve(DATA_DIR, '.duoboard-push-subs.json');
+const LEGACY_POINTER_FILE_PATH = path.resolve(DATA_DIR, '.duoboard-platform-db.json');
 const DEFAULT_APP_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
 
 const SPARK_DAILY_LIMITS = {
@@ -463,7 +473,7 @@ async function verifyFirebaseIdToken(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
+    const timer = setTimeout(() => controller.abort(), 5000);
     const resp = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
       {
@@ -1373,7 +1383,8 @@ async function authenticateRequest(
 
 async function startServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.set('trust proxy', 1);
+  app.use(express.json({ limit: '15mb' }));
 
   // CORS support so a static GitHub Pages build can talk to this backend when VITE_API_ORIGIN is configured
   app.use((req: Request, res: Response, next) => {
@@ -1399,6 +1410,17 @@ async function startServer(): Promise<void> {
     ]);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(buildPublicPayload(platformState));
+  });
+
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({
+      ok: true,
+      service: 'duoboard',
+      aiConfigured: isAiConfigured(),
+      env: process.env.NODE_ENV || 'development',
+      uptimeSec: Math.round(process.uptime()),
+    });
   });
 
   app.get('/api/ai/status', (_req: Request, res: Response) => {
@@ -1465,6 +1487,27 @@ async function startServer(): Promise<void> {
     } catch (err) {
       const friendly = err instanceof AiCoachUpstreamError ? err : toFriendlyAiError(err);
       console.error('/api/ai/chat error:', err);
+      res.status(friendly.httpStatus).json({ error: friendly.message });
+    }
+  });
+
+  app.post('/api/ai/solve-question', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const authRes = await authenticateRequest(req, body);
+    if (!authRes.ok || !authRes.uid) {
+      res.status(authRes.ok ? 401 : authRes.status).json({ error: authRes.ok ? 'Unauthorized' : authRes.error });
+      return;
+    }
+    if (!isAiConfigured()) {
+      res.status(503).json({ error: 'مفتاح الذكاء الاصطناعي غير مضاف على الخادم حالياً (GEMINI_API_KEY).' });
+      return;
+    }
+    try {
+      const result = await runAiSolveQuestion(body as unknown as SolveQuestionRequestPayload);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      const friendly = err instanceof AiCoachUpstreamError ? err : toFriendlyAiError(err);
+      console.error('/api/ai/solve-question error:', err);
       res.status(friendly.httpStatus).json({ error: friendly.message });
     }
   });
@@ -2596,7 +2639,12 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, state: platformState });
   });
 
+  app.use('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'API route not found' });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

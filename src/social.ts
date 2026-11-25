@@ -15,6 +15,7 @@ import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
 import { computeQuizStats } from './quizStats';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from './quizTable';
+import { buildAchievementsSnapshot, detectAndRecordAchievementUnlocks } from './achievements';
 import type {
   DirectChatDoc,
   DirectMessageDoc,
@@ -104,6 +105,23 @@ export function makeEmptyStatsSnapshot(): LeaderboardStatsSnapshot {
       withLawsTotal: 0,
       withLawsCorrect: 0,
     },
+    achievements: {
+      unlockedIds: [],
+      unlockedCount: 0,
+      unlockedAtById: {},
+      records: {
+        maxQuestionsInDay: 0,
+        maxCorrectInDay: 0,
+        fastest100Sec: null,
+        fastest50Sec: null,
+        fastest25Sec: null,
+        bestAvgSecPerQ: null,
+        perfect100Count: 0,
+        maxConsecutiveActiveDays: 0,
+        correctedMistakesTotal: 0,
+        totalDurationMin: 0,
+      },
+    },
   };
 }
 
@@ -114,7 +132,12 @@ export function filterAttemptsForEpoch(attempts: QuizAttempt[], resetEpoch: numb
 
 export function buildLeaderboardStatsSnapshot(
   attempts: QuizAttempt[],
-  resetEpoch: number
+  resetEpoch: number,
+  achievementTracking?: {
+    uid: string;
+    highlightNewAttempt?: QuizAttempt;
+    existingUnlockedAtById?: Record<string, number>;
+  }
 ): {
   correctCount: number;
   wrongCount: number;
@@ -207,6 +230,14 @@ export function buildLeaderboardStatsSnapshot(
         avgSecPerQ: r.avgSecPerQ,
       })),
       typeBreakdown: { ...computed.typeBreakdown },
+      achievements: achievementTracking
+        ? detectAndRecordAchievementUnlocks({
+            uid: achievementTracking.uid,
+            epoch: Math.max(INITIAL_LEADERBOARD_EPOCH, resetEpoch),
+            scopedAttempts: scoped,
+            highlightNewAttempt: achievementTracking.highlightNewAttempt,
+          }).snapshot
+        : buildAchievementsSnapshot(scoped, undefined),
     },
   };
 }
@@ -305,11 +336,15 @@ export async function syncUserStatsToLeaderboard(
   uid: string,
   fullNameQuad: string,
   attempts: QuizAttempt[],
-  activeResetEpoch?: number
+  activeResetEpoch?: number,
+  highlightNewAttempt?: QuizAttempt
 ): Promise<void> {
   if (!uid || !fullNameQuad.trim()) return;
   const epoch = Math.max(INITIAL_LEADERBOARD_EPOCH, activeResetEpoch || getCachedLeaderboardEpoch());
-  const built = buildLeaderboardStatsSnapshot(attempts, epoch);
+  const built = buildLeaderboardStatsSnapshot(attempts, epoch, {
+    uid,
+    highlightNewAttempt,
+  });
 
   const ref = doc(db, 'leaderboardUsers', uid);
   let joinedAt = Date.now();
@@ -318,13 +353,23 @@ export async function syncUserStatsToLeaderboard(
     if (existing.exists()) {
       const prev = existing.data() as LeaderboardUserEntry;
       joinedAt = Number(prev.joinedAt || joinedAt);
+      const prevAchCount = prev.statsSnapshot?.achievements?.unlockedCount;
+      const nextAchCount = built.statsSnapshot.achievements?.unlockedCount ?? 0;
+      const prevMaxDay = prev.statsSnapshot?.achievements?.records?.maxQuestionsInDay ?? 0;
+      const nextMaxDay = built.statsSnapshot.achievements?.records?.maxQuestionsInDay ?? 0;
+      const prevFast100 = prev.statsSnapshot?.achievements?.records?.fastest100Sec ?? null;
+      const nextFast100 = built.statsSnapshot.achievements?.records?.fastest100Sec ?? null;
+
       if (
         Number(prev.epoch || 0) === epoch &&
         prev.fullNameQuad.trim() === fullNameQuad.trim() &&
         prev.correctCount === built.correctCount &&
         prev.wrongCount === built.wrongCount &&
         prev.totalQuestions === built.totalQuestions &&
-        prev.attemptsCount === built.attemptsCount
+        prev.attemptsCount === built.attemptsCount &&
+        prevAchCount === nextAchCount &&
+        prevMaxDay === nextMaxDay &&
+        prevFast100 === nextFast100
       ) {
         return;
       }
@@ -375,7 +420,7 @@ export async function fetchUserAttemptsAndSyncLeaderboard(
   if (extraAttempt?.id) {
     byId.set(extraAttempt.id, extraAttempt);
   }
-  await syncUserStatsToLeaderboard(uid, fullNameQuad, Array.from(byId.values()), metaEpoch);
+  await syncUserStatsToLeaderboard(uid, fullNameQuad, Array.from(byId.values()), metaEpoch, extraAttempt);
 }
 
 export async function resetLeaderboardEpoch(

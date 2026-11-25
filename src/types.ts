@@ -643,6 +643,26 @@ export interface LeaderboardQuizRowSnapshot {
   avgSecPerQ: number;
 }
 
+export interface LeaderboardAchievementRecords {
+  maxQuestionsInDay: number;
+  maxCorrectInDay: number;
+  fastest100Sec: number | null;
+  fastest50Sec: number | null;
+  fastest25Sec: number | null;
+  bestAvgSecPerQ: number | null;
+  perfect100Count: number;
+  maxConsecutiveActiveDays: number;
+  correctedMistakesTotal: number;
+  totalDurationMin: number;
+}
+
+export interface LeaderboardAchievementsSnapshot {
+  unlockedIds: string[];
+  unlockedCount: number;
+  unlockedAtById?: Record<string, number>;
+  records: LeaderboardAchievementRecords;
+}
+
 export interface LeaderboardStatsSnapshot {
   accuracyPct: number;
   skippedAnswers: number;
@@ -672,6 +692,7 @@ export interface LeaderboardStatsSnapshot {
     withLawsTotal: number;
     withLawsCorrect: number;
   };
+  achievements?: LeaderboardAchievementsSnapshot;
 }
 
 export interface LeaderboardUserEntry {

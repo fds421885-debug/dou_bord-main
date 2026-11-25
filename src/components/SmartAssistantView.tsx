@@ -586,11 +586,31 @@ export const SmartAssistantView: React.FC<Props> = ({
         )}
 
         {aiStatus.checked && !aiReady && (
-          <div className="rounded-2xl bg-[#FFF4CC] border border-[#FFC800] px-3.5 py-2.5 flex items-start gap-2 text-xs font-bold text-[#8A6500]">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>
-              المساعد يعرض التحليل الإحصائي المحلي حالياً. لتفعيل توليد الاختبارات والمحادثة الذكية عبر هذا الموقع الثابت، اربط خادم المنصة في إعدادات النشر (`VITE_API_ORIGIN`).
-            </span>
+          <div className="rounded-2xl bg-[#FFF4CC] border border-[#FFC800] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-[#8A6500]">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                {aiStatus.reachable
+                  ? 'الخادم متصل بنجاح، تبقّى إضافة مفتاح GEMINI_API_KEY في متغيرات البيئة (Environment Variables) على الخادم لتفعيل الذكاء الاصطناعي الكامل.'
+                  : 'المساعد يعرض التحليل الإحصائي المحلي حالياً. إذا كان الخادم في وضع السكون على الاستضافة المجانية فسيستغرق ثوانٍ للاستيقاظ.'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setAiStatus((prev) => ({ ...prev, checked: false }));
+                void checkAiServerStatus().then((res) => {
+                  setAiStatus({
+                    checked: true,
+                    reachable: res.reachable,
+                    aiConfigured: res.aiConfigured,
+                  });
+                });
+              }}
+              className="px-3 py-1.5 rounded-xl bg-white border border-[#E5A400] text-[#8A6500] text-xs font-black whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              إعادة فحص الاتصال
+            </button>
           </div>
         )}
 

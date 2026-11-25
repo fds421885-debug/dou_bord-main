@@ -173,7 +173,7 @@ function formatClientAiErrorMessage(rawMessage: unknown, httpStatus?: number): s
   return `تعذر الاتصال بالمساعد الذكي مؤقتاً${httpStatus ? ` (${httpStatus})` : ''}. أعد المحاولة بعد لحظات.`;
 }
 
-async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, timeoutMs = 55000): Promise<T> {
+async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, timeoutMs = 85000): Promise<T> {
   if (!isBackendServerDetected()) {
     throw new Error('BACKEND_UNAVAILABLE');
   }
@@ -181,9 +181,9 @@ async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, ti
   if (!user) {
     throw new Error('يلزم تسجيل الدخول لاستخدام المساعد الذكي.');
   }
-  const idToken = await user.getIdToken(false);
 
-  const attemptFetch = async (): Promise<{ resp: Response; data: (T & { error?: string }) | null }> => {
+  const attemptFetch = async (forceRefreshToken = false): Promise<{ resp: Response; data: (T & { error?: string }) | null }> => {
+    const idToken = await user.getIdToken(forceRefreshToken);
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -213,10 +213,12 @@ async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, ti
   };
 
   try {
-    let { resp, data } = await attemptFetch();
-    if (resp.status === 503) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      ({ resp, data } = await attemptFetch());
+    let { resp, data } = await attemptFetch(false);
+    if (resp.status === 401 || resp.status === 403) {
+      ({ resp, data } = await attemptFetch(true));
+    } else if (resp.status === 503) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1100));
+      ({ resp, data } = await attemptFetch(false));
     }
     if (!resp.ok) {
       throw new Error(formatClientAiErrorMessage(data?.error, resp.status));
@@ -224,7 +226,7 @@ async function callAiEndpoint<T>(path: string, body: Record<string, unknown>, ti
     return data as T;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error('استغرق المساعد الذكي وقتاً أطول من المعتاد بسبب ضغط الطلبات. أعد المحاولة الآن.');
+      throw new Error('استغرق المساعد الذكي وقتاً أطول من المعتاد بسبب ضغط الطلبات أو استيقاظ الخادم. أعد المحاولة الآن.');
     }
     if (err instanceof Error && err.message === 'BACKEND_UNAVAILABLE') {
       throw err;
@@ -240,23 +242,32 @@ export async function checkAiServerStatus(): Promise<{ reachable: boolean; aiCon
   if (!isBackendServerDetected()) {
     return { reachable: false, aiConfigured: false };
   }
-  try {
+  const probe = async (timeoutMs: number): Promise<{ reachable: boolean; aiConfigured: boolean } | null> => {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 3500);
-    const resp = await fetch(resolveApiUrl(`/api/ai/status?t=${Date.now()}`), {
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    window.clearTimeout(timer);
-    const ct = resp.headers.get('content-type') || '';
-    if (!resp.ok || !ct.includes('application/json')) {
-      return { reachable: false, aiConfigured: false };
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(resolveApiUrl(`/api/ai/status?t=${Date.now()}`), {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      const ct = resp.headers.get('content-type') || '';
+      if (!resp.ok || !ct.includes('application/json')) {
+        return { reachable: false, aiConfigured: false };
+      }
+      const json = (await resp.json()) as { ok?: boolean; aiConfigured?: boolean };
+      return { reachable: Boolean(json.ok), aiConfigured: Boolean(json.aiConfigured) };
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timer);
     }
-    const json = (await resp.json()) as { ok?: boolean; aiConfigured?: boolean };
-    return { reachable: Boolean(json.ok), aiConfigured: Boolean(json.aiConfigured) };
-  } catch {
-    return { reachable: false, aiConfigured: false };
-  }
+  };
+
+  const first = await probe(12000);
+  if (first !== null) return first;
+  // Second attempt handles Render free-tier cold start wake-up cleanly
+  const second = await probe(18000);
+  return second ?? { reachable: false, aiConfigured: false };
 }
 
 export async function requestAiDiagnosis(params: {

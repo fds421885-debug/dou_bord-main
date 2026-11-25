@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { LeaderboardUserEntry } from '../types';
 import { MathText } from '../mathText';
+import { ACHIEVEMENTS_BY_ID, formatDurationCompactAr } from '../achievements';
 
 export type UserFriendRelation =
   | 'self'
@@ -579,6 +580,80 @@ export const LeaderboardUserStatsModal: React.FC<Props> = ({
                   </div>
                 </div>
               )}
+              {/* Student Achievements & Personal Records */}
+              <div className="rounded-2xl border border-[#FDE68A] bg-[#FFFDF2] p-4 flex flex-col gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Award className="w-4 h-4 text-[#E5A400]" />
+                    <h3 className="text-sm font-black text-[#3C3C3C]">
+                      سجل الأوسمة والأرقام القياسية
+                    </h3>
+                  </div>
+                  <span className="text-xs font-black text-[#9A6B00] font-latin tabular-nums">
+                    {snap.achievements?.unlockedCount ?? 0} / 100 وسام مكتسب
+                  </span>
+                </div>
+
+                {snap.achievements?.records && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    <div className="p-2.5 rounded-xl bg-white border border-[#FDE68A]">
+                      <span className="block text-[10px] font-bold text-[#777777]">أسرع 100 سؤال</span>
+                      <span className="font-black text-[#3C3C3C] font-latin tabular-nums">
+                        {formatDurationCompactAr(snap.achievements.records.fastest100Sec)}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-white border border-[#FDE68A]">
+                      <span className="block text-[10px] font-bold text-[#777777]">أكثر يوم حلاً</span>
+                      <span className="font-black text-[#3C3C3C] font-latin tabular-nums">
+                        {snap.achievements.records.maxQuestionsInDay} سؤال
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-white border border-[#FDE68A]">
+                      <span className="block text-[10px] font-bold text-[#777777]">سلسلة الأيام</span>
+                      <span className="font-black text-[#3C3C3C] font-latin tabular-nums">
+                        {snap.achievements.records.maxConsecutiveActiveDays} يوم
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-white border border-[#FDE68A]">
+                      <span className="block text-[10px] font-bold text-[#777777]">أخطاء مصححة</span>
+                      <span className="font-black text-[#3C3C3C] font-latin tabular-nums">
+                        {snap.achievements.records.correctedMistakesTotal} خطأ
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {snap.achievements?.unlockedIds?.length ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-52 overflow-y-auto pr-0.5">
+                    {snap.achievements.unlockedIds.map((id) => {
+                      const def = ACHIEVEMENTS_BY_ID[id];
+                      if (!def) return null;
+                      return (
+                        <div
+                          key={id}
+                          className="p-2.5 rounded-xl bg-white border border-[#E5E5E5] flex items-start gap-2"
+                        >
+                          <span className="w-6 h-6 rounded-lg bg-[#FEF08A] text-[#854D0E] text-[10px] font-black font-latin tabular-nums flex items-center justify-center shrink-0">
+                            #{def.order}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-xs font-black text-[#3C3C3C] leading-snug truncate">
+                              {def.title}
+                            </p>
+                            <p className="text-[10px] font-bold text-[#777777] truncate">
+                              {def.description}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs font-bold text-[#777777]">
+                    لا توجد أوسمة مكسورة في السجل حتى الآن — تبدأ بالظهور فور كسر أي إنجاز من أصل 100.
+                  </p>
+                )}
+              </div>
             </>
           )}
         </div>

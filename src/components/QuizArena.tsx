@@ -98,7 +98,7 @@ import {
   DuoGemIcon,
   playDuoSound,
 } from './DuoIcons';
-import { solveQuestionWithAi, getAiConfig, AiKeyError, type AiSolution } from '../aiClient';
+import { solveQuestionWithAi, AiKeyError, type AiSolution } from '../aiClient';
 import AiKeyModal from './AiKeyModal';
 import {
   loadQuizDraft,
@@ -889,11 +889,6 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       setDraftAiError('يرجى كتابة نص السؤال أو تحديد صفحة PDF أو رفع صورة أولاً ليتمكن الذكاء الاصطناعي من حلها.');
       return;
     }
-    if (!getAiConfig()) {
-      pendingAiActionRef.current = handleAskAiForDraft;
-      setAiKeyModalOpen(true);
-      return;
-    }
     setDraftAiError(null);
     setDraftAiLoading(true);
     try {
@@ -917,11 +912,6 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     if (!isSupervisor || !currentQuestion || activeAiLoading) return;
     if (activeAiCache[currentQuestion.id]) {
       setActiveAiOpen((prev) => !prev);
-      return;
-    }
-    if (!getAiConfig()) {
-      pendingAiActionRef.current = handleAskAiForActiveQuestion;
-      setAiKeyModalOpen(true);
       return;
     }
     setActiveAiOpen(true);

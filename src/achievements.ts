@@ -76,15 +76,21 @@ export interface EvaluatedAchievement {
   unlockedAt?: number;
 }
 
+export interface BrokenRecordEntry {
+  key: keyof LeaderboardAchievementRecords;
+  label: string;
+  previousValue: number | null;
+  previousFormatted: string | null;
+  newValue: number;
+  newFormatted: string;
+  isFirstTime: boolean;
+}
+
 export interface AchievementUnlockEventDetail {
   uid: string;
   epoch: number;
   newlyUnlocked: AchievementDef[];
-  brokenRecords: Array<{
-    key: keyof LeaderboardAchievementRecords;
-    label: string;
-    valueFormatted: string;
-  }>;
+  brokenRecords: BrokenRecordEntry[];
   totalUnlockedCount: number;
   happenedAt: number;
 }
@@ -918,7 +924,23 @@ interface StoredAchievementTracking {
   unlockedAtById: Record<string, number>;
   bestRecords: Partial<LeaderboardAchievementRecords>;
   recentUnlockedIds: string[];
+  celebratedAttemptIds?: string[];
   updatedAt: number;
+}
+
+const reservedCelebrationAttemptIds = new Set<string>();
+
+export function reserveAttemptForCelebration(attemptId: string): void {
+  if (attemptId) reservedCelebrationAttemptIds.add(attemptId);
+}
+
+export function releaseAttemptReservation(attemptId: string): void {
+  if (attemptId) reservedCelebrationAttemptIds.delete(attemptId);
+}
+
+export function hasReservedAttemptCelebration(attempts: QuizAttempt[]): boolean {
+  if (reservedCelebrationAttemptIds.size === 0) return false;
+  return attempts.some((a) => Boolean(a?.id && reservedCelebrationAttemptIds.has(a.id)));
 }
 
 function trackingStorageKey(uid: string, epoch: number): string {
@@ -938,6 +960,7 @@ export function loadAchievementTracking(uid: string, epoch: number): StoredAchie
       bestRecords:
         parsed.bestRecords && typeof parsed.bestRecords === 'object' ? parsed.bestRecords : {},
       recentUnlockedIds: Array.isArray(parsed.recentUnlockedIds) ? parsed.recentUnlockedIds : [],
+      celebratedAttemptIds: Array.isArray(parsed.celebratedAttemptIds) ? parsed.celebratedAttemptIds : [],
       updatedAt: Number(parsed.updatedAt) || 0,
     };
   } catch {
@@ -954,29 +977,134 @@ function saveAchievementTracking(uid: string, epoch: number, data: StoredAchieve
   }
 }
 
+function collectBrokenRecords(
+  prev: Partial<LeaderboardAchievementRecords>,
+  curr: LeaderboardAchievementRecords,
+  options?: { isVeryFirstExam?: boolean }
+): BrokenRecordEntry[] {
+  const out: BrokenRecordEntry[] = [];
+
+  const checkMin = (
+    key: keyof LeaderboardAchievementRecords,
+    label: string,
+    format: (v: number) => string
+  ) => {
+    const newVal = curr[key];
+    if (typeof newVal !== 'number' || !Number.isFinite(newVal) || newVal <= 0) return;
+    const oldVal = prev[key];
+    const hasOld = typeof oldVal === 'number' && Number.isFinite(oldVal) && oldVal > 0;
+    if (!hasOld) {
+      out.push({
+        key,
+        label,
+        previousValue: null,
+        previousFormatted: null,
+        newValue: newVal,
+        newFormatted: format(newVal),
+        isFirstTime: true,
+      });
+    } else if (newVal < oldVal) {
+      out.push({
+        key,
+        label,
+        previousValue: oldVal,
+        previousFormatted: format(oldVal),
+        newValue: newVal,
+        newFormatted: format(newVal),
+        isFirstTime: false,
+      });
+    }
+  };
+
+  const checkMax = (
+    key: keyof LeaderboardAchievementRecords,
+    label: string,
+    format: (v: number) => string,
+    minFirstValue = 1
+  ) => {
+    const newVal = Number(curr[key] || 0);
+    if (!Number.isFinite(newVal) || newVal <= 0) return;
+    const oldVal = Number(prev[key] || 0);
+    if (oldVal <= 0) {
+      if (newVal >= minFirstValue) {
+        out.push({
+          key,
+          label,
+          previousValue: null,
+          previousFormatted: null,
+          newValue: newVal,
+          newFormatted: format(newVal),
+          isFirstTime: true,
+        });
+      }
+    } else if (newVal > oldVal) {
+      out.push({
+        key,
+        label,
+        previousValue: oldVal,
+        previousFormatted: format(oldVal),
+        newValue: newVal,
+        newFormatted: format(newVal),
+        isFirstTime: false,
+      });
+    }
+  };
+
+  checkMin('fastest100Sec', 'أسرع 100 سؤال', (v) => formatDurationCompactAr(v));
+  checkMax('maxQuestionsInDay', 'أكثر أسئلة في يوم واحد', (v) => `${v} سؤال`, 1);
+  checkMin('fastest50Sec', 'أسرع 50 سؤالاً', (v) => formatDurationCompactAr(v));
+  checkMin('fastest25Sec', 'أسرع 25 سؤالاً', (v) => formatDurationCompactAr(v));
+  checkMin('bestAvgSecPerQ', 'أسرع معدل حل (20+ سؤال)', (v) => `${v} ث/س`);
+  // On the very first exam avoid repeating maxQuestionsInDay + maxCorrectInDay together if redundant; show when broken or distinct
+  if (!options?.isVeryFirstExam || curr.maxCorrectInDay !== curr.maxQuestionsInDay) {
+    checkMax('maxCorrectInDay', 'أكثر إجابات صحيحة في يوم', (v) => `${v} صحيح`, 1);
+  }
+  checkMax('perfect100Count', 'الدرجات الكاملة 100%', (v) => `${v} اختبار`, 1);
+  checkMax('maxConsecutiveActiveDays', 'أطول سلسلة أيام متتالية', (v) => `${v} يوم`, 2);
+  checkMax('correctedMistakesTotal', 'تصحيح الأخطاء السابقة', (v) => `${v} خطأ`, 1);
+
+  return out;
+}
+
 export function detectAndRecordAchievementUnlocks(params: {
   uid: string;
   epoch: number;
   scopedAttempts: QuizAttempt[];
   highlightNewAttempt?: QuizAttempt;
+  skipTrackingWrite?: boolean;
 }): {
   snapshot: LeaderboardAchievementsSnapshot;
   newlyUnlocked: AchievementDef[];
 } {
-  const { uid, epoch, scopedAttempts, highlightNewAttempt } = params;
+  const { uid, epoch, scopedAttempts, highlightNewAttempt, skipTrackingWrite } = params;
   const now = Date.now();
   const prevTrack = loadAchievementTracking(uid, epoch);
 
+  if (skipTrackingWrite) {
+    const snap = buildAchievementsSnapshot(scopedAttempts, prevTrack?.unlockedAtById);
+    return { snapshot: snap, newlyUnlocked: [] };
+  }
+
+  // Prevent re-firing for the same finished attempt ID if retried
+  if (
+    highlightNewAttempt?.id &&
+    prevTrack?.celebratedAttemptIds?.includes(highlightNewAttempt.id)
+  ) {
+    const snap = buildAchievementsSnapshot(scopedAttempts, prevTrack.unlockedAtById);
+    return { snapshot: snap, newlyUnlocked: [] };
+  }
+
   let baselineUnlockedSet: Set<string>;
   let baselineRecords: Partial<LeaderboardAchievementRecords>;
+  let isVeryFirstExam = false;
   const existingTimestamps: Record<string, number> = { ...(prevTrack?.unlockedAtById || {}) };
 
   if (prevTrack) {
     baselineUnlockedSet = new Set(prevTrack.seenUnlockedIds);
     baselineRecords = prevTrack.bestRecords;
   } else if (highlightNewAttempt && scopedAttempts.length > 1) {
-    // First time tracking for this user/epoch when submitting a new exam:
-    // baseline from prior attempts so ONLY badges broken by THIS exam celebrate!
+    // First time tracking when submitting a new exam with existing history:
+    // compute prior baseline cleanly so ONLY records/badges broken by THIS exam celebrate!
     const prior = scopedAttempts.filter((a) => a.id !== highlightNewAttempt.id);
     const priorSnap = buildAchievementsSnapshot(prior);
     baselineUnlockedSet = new Set(priorSnap.unlockedIds);
@@ -984,32 +1112,23 @@ export function detectAndRecordAchievementUnlocks(params: {
     for (const id of priorSnap.unlockedIds) {
       existingTimestamps[id] = now - 1000;
     }
+  } else if (highlightNewAttempt && scopedAttempts.length <= 1) {
+    // User's very first exam in this epoch: every record earned is celebrated as First-Time!
+    isVeryFirstExam = true;
+    baselineUnlockedSet = new Set();
+    baselineRecords = {};
   } else {
-    // Silent initial backfill on sync (unless it's literally a single newly completed attempt)
+    // Silent initial backfill on background sync (e.g., opening MyQuizzes/Leaderboard)
     const snap = buildAchievementsSnapshot(scopedAttempts, existingTimestamps);
-    const isSingleNewExam = Boolean(highlightNewAttempt && scopedAttempts.length === 1);
-    const newlyOnFirst = isSingleNewExam
-      ? snap.unlockedIds.map((id) => ACHIEVEMENTS_BY_ID[id]).filter(Boolean)
-      : [];
     saveAchievementTracking(uid, epoch, {
       seenUnlockedIds: snap.unlockedIds,
       unlockedAtById: snap.unlockedAtById || {},
       bestRecords: snap.records,
-      recentUnlockedIds: newlyOnFirst.map((a) => a.id),
+      recentUnlockedIds: [],
+      celebratedAttemptIds: scopedAttempts.map((a) => a.id).slice(-40),
       updatedAt: now,
     });
-    if (newlyOnFirst.length > 0 && typeof window !== 'undefined') {
-      const detail: AchievementUnlockEventDetail = {
-        uid,
-        epoch,
-        newlyUnlocked: newlyOnFirst,
-        brokenRecords: [],
-        totalUnlockedCount: snap.unlockedCount,
-        happenedAt: now,
-      };
-      window.dispatchEvent(new CustomEvent(ACHIEVEMENTS_UNLOCKED_EVENT, { detail }));
-    }
-    return { snapshot: snap, newlyUnlocked: newlyOnFirst };
+    return { snapshot: snap, newlyUnlocked: [] };
   }
 
   const snap = buildAchievementsSnapshot(scopedAttempts, existingTimestamps);
@@ -1018,54 +1137,31 @@ export function detectAndRecordAchievementUnlocks(params: {
     .map((id) => ACHIEVEMENTS_BY_ID[id])
     .filter(Boolean);
 
-  const brokenRecords: AchievementUnlockEventDetail['brokenRecords'] = [];
-  if (highlightNewAttempt) {
-    if (
-      snap.records.maxQuestionsInDay > (baselineRecords.maxQuestionsInDay || 0) &&
-      snap.records.maxQuestionsInDay >= 10
-    ) {
-      brokenRecords.push({
-        key: 'maxQuestionsInDay',
-        label: 'أكثر يوم حللت فيه أسئلة',
-        valueFormatted: `${snap.records.maxQuestionsInDay} سؤال`,
-      });
-    }
-    if (
-      snap.records.fastest100Sec !== null &&
-      (baselineRecords.fastest100Sec == null ||
-        snap.records.fastest100Sec < baselineRecords.fastest100Sec)
-    ) {
-      brokenRecords.push({
-        key: 'fastest100Sec',
-        label: 'رقمك الجديد في أسرع 100 سؤال',
-        valueFormatted: formatDurationCompactAr(snap.records.fastest100Sec),
-      });
-    }
-    if (
-      snap.records.fastest50Sec !== null &&
-      baselineRecords.fastest50Sec != null &&
-      snap.records.fastest50Sec < baselineRecords.fastest50Sec
-    ) {
-      brokenRecords.push({
-        key: 'fastest50Sec',
-        label: 'رقمك الجديد في أسرع 50 سؤالاً',
-        valueFormatted: formatDurationCompactAr(snap.records.fastest50Sec),
-      });
-    }
-  }
+  const brokenRecords = highlightNewAttempt
+    ? collectBrokenRecords(baselineRecords, snap.records, { isVeryFirstExam })
+    : [];
 
   const nextRecent =
     newlyUnlocked.length > 0
       ? newlyUnlocked.map((a) => a.id).slice(0, 30)
       : prevTrack?.recentUnlockedIds || [];
 
+  const nextCelebratedIds = highlightNewAttempt?.id
+    ? [...(prevTrack?.celebratedAttemptIds || []), highlightNewAttempt.id].slice(-40)
+    : prevTrack?.celebratedAttemptIds || [];
+
   saveAchievementTracking(uid, epoch, {
     seenUnlockedIds: snap.unlockedIds,
     unlockedAtById: snap.unlockedAtById || {},
     bestRecords: snap.records,
     recentUnlockedIds: nextRecent,
+    celebratedAttemptIds: nextCelebratedIds,
     updatedAt: now,
   });
+
+  if (highlightNewAttempt) {
+    releaseAttemptReservation(highlightNewAttempt.id);
+  }
 
   if ((newlyUnlocked.length > 0 || brokenRecords.length > 0) && typeof window !== 'undefined') {
     const detail: AchievementUnlockEventDetail = {

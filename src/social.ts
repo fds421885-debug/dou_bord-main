@@ -15,7 +15,11 @@ import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
 import { computeQuizStats } from './quizStats';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from './quizTable';
-import { buildAchievementsSnapshot, detectAndRecordAchievementUnlocks } from './achievements';
+import {
+  buildAchievementsSnapshot,
+  detectAndRecordAchievementUnlocks,
+  hasReservedAttemptCelebration,
+} from './achievements';
 import type {
   DirectChatDoc,
   DirectMessageDoc,
@@ -137,6 +141,7 @@ export function buildLeaderboardStatsSnapshot(
     uid: string;
     highlightNewAttempt?: QuizAttempt;
     existingUnlockedAtById?: Record<string, number>;
+    skipTrackingWrite?: boolean;
   }
 ): {
   correctCount: number;
@@ -236,6 +241,7 @@ export function buildLeaderboardStatsSnapshot(
             epoch: Math.max(INITIAL_LEADERBOARD_EPOCH, resetEpoch),
             scopedAttempts: scoped,
             highlightNewAttempt: achievementTracking.highlightNewAttempt,
+            skipTrackingWrite: achievementTracking.skipTrackingWrite,
           }).snapshot
         : buildAchievementsSnapshot(scoped, undefined),
     },
@@ -344,6 +350,7 @@ export async function syncUserStatsToLeaderboard(
   const built = buildLeaderboardStatsSnapshot(attempts, epoch, {
     uid,
     highlightNewAttempt,
+    skipTrackingWrite: !highlightNewAttempt && hasReservedAttemptCelebration(attempts),
   });
 
   const ref = doc(db, 'leaderboardUsers', uid);

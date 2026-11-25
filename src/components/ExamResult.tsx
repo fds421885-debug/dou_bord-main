@@ -6,6 +6,7 @@ import { isFirestorePermissionError, isQuotaError } from '../firebase';
 import { deleteSessionSnapshot } from '../localDraftStore';
 import { MathText } from '../mathText';
 import { fetchUserAttemptsAndSyncLeaderboard } from '../social';
+import { releaseAttemptReservation, reserveAttemptForCelebration } from '../achievements';
 import { ExamReview } from './ExamReview';
 import { DuoLoading } from './DuoLoading';
 
@@ -47,6 +48,7 @@ export const ExamResult: React.FC<Props> = ({
   const save = async () => {
     setState('saving');
     setErr(null);
+    reserveAttemptForCelebration(attemptId);
     try {
       const attempt = buildAttempt(
         ownerId,
@@ -60,11 +62,16 @@ export const ExamResult: React.FC<Props> = ({
       );
       await saveAttempt(attempt);
       if (ownerName?.trim()) {
-        void fetchUserAttemptsAndSyncLeaderboard(ownerId, ownerName, attempt).catch(() => undefined);
+        void fetchUserAttemptsAndSyncLeaderboard(ownerId, ownerName, attempt)
+          .catch(() => undefined)
+          .finally(() => releaseAttemptReservation(attemptId));
+      } else {
+        releaseAttemptReservation(attemptId);
       }
       await deleteSessionSnapshot('exam_session');
       setState('saved');
     } catch (e) {
+      releaseAttemptReservation(attemptId);
       setErr(
         isFirestorePermissionError(e)
           ? 'قاعدة البيانات رفضت الحفظ لأن قواعد الأمان (firestore.rules) لم تُحدَّث بعد. انشرها ثم اضغط إعادة الحفظ — نتيجتك محفوظة على جهازك.'

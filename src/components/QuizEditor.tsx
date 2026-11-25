@@ -5,15 +5,20 @@ import {
   ArrowUp,
   BookOpen,
   Check,
+  CheckCircle2,
   Copy,
   Eye,
   EyeOff,
+  FileJson,
   ListChecks,
   Loader2,
+  Pencil,
   PlusCircle,
   Save,
   Table2,
   Trash2,
+  Upload,
+  Wand2,
   X,
 } from 'lucide-react';
 import type { QuizQuestion } from '../types';
@@ -32,8 +37,11 @@ import {
   formatQuizSaveError,
   LIMITS,
   newQuestionId,
+  parseQuizBundleJson,
+  quizToEditableJson,
   updateMyQuiz,
   validateForSave,
+  type MyQuizMetaInput,
 } from '../myQuizzes';
 import { deleteSessionSnapshot, saveSessionSnapshot } from '../localDraftStore';
 
@@ -42,6 +50,8 @@ interface Props {
   editingId: string | null;
   initialTitle: string;
   initialQuestions: QuizQuestion[];
+  initialEditMode?: 'visual' | 'json';
+  quizMeta?: MyQuizMetaInput;
   warnings?: string[];
   onDone: (message: string) => void;
   onCancel: () => void;
@@ -100,11 +110,14 @@ export const QuizEditor: React.FC<Props> = ({
   editingId,
   initialTitle,
   initialQuestions,
+  initialEditMode = 'visual',
+  quizMeta,
   warnings = [],
   onDone,
   onCancel,
 }) => {
   const [title, setTitle] = useState(initialTitle);
+  const [metaState, setMetaState] = useState<MyQuizMetaInput>(() => ({ ...(quizMeta || {}) }));
   const [questions, setQuestions] = useState<QuizQuestion[]>(() =>
     initialQuestions.length
       ? initialQuestions.map((q) => {
@@ -124,6 +137,20 @@ export const QuizEditor: React.FC<Props> = ({
         })
       : [emptyQuestion()]
   );
+  const [editMode, setEditMode] = useState<'visual' | 'json'>(initialEditMode);
+  const [jsonText, setJsonText] = useState<string>(() =>
+    initialEditMode === 'json'
+      ? quizToEditableJson(
+          initialTitle,
+          initialQuestions.length ? initialQuestions : [emptyQuestion()],
+          quizMeta
+        )
+      : ''
+  );
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [jsonWarnings, setJsonWarnings] = useState<string[]>([]);
+  const [jsonCopied, setJsonCopied] = useState(false);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const [showPreview, setShowPreview] = useState(true);
   const [page, setPage] = useState(0);
   const [showAllQuestions, setShowAllQuestions] = useState(false);
@@ -236,27 +263,148 @@ export const QuizEditor: React.FC<Props> = ({
 
   const filled = useMemo(() => cleanQuestions(questions).length, [questions]);
 
+  const liveJsonCheck = useMemo(() => {
+    if (editMode !== 'json') return null;
+    try {
+      const parsed = parseQuizBundleJson(jsonText);
+      return { ok: true as const, parsed };
+    } catch (e) {
+      return {
+        ok: false as const,
+        message: e instanceof Error ? e.message : 'تعذر قراءة صيغة JSON.',
+      };
+    }
+  }, [editMode, jsonText]);
+
+  const parseAndApplyJson = (): {
+    nextTitle: string;
+    nextQuestions: QuizQuestion[];
+    nextMeta: MyQuizMetaInput;
+    parsedWarnings: string[];
+  } | null => {
+    setJsonError(null);
+    setError(null);
+    try {
+      const parsed = parseQuizBundleJson(jsonText);
+      const nextTitle = parsed.title || (jsonText.trim().startsWith('[') ? title : '');
+      const reconciledQuestions = parsed.questions.map((pq, idx) =>
+        questions[idx]?.id && pq.id.startsWith('q_') ? { ...pq, id: questions[idx].id } : pq
+      );
+      const nextMeta: MyQuizMetaInput = {
+        ...metaState,
+        ...(parsed.ruleTitle ? { ruleTitle: parsed.ruleTitle } : {}),
+        ...(parsed.drillStyle ? { drillStyle: parsed.drillStyle } : {}),
+      };
+      const nextWarnings = [...parsed.warnings];
+      if (parsed.subQuizzes.length > 0) {
+        nextWarnings.unshift(
+          'تمت قراءة هذا الاختبار فقط (title و questions). لتعديل اختبارات التقوية التابعة افتح «تعديل JSON» الخاص بكل تقوية.'
+        );
+      }
+      setTitle(nextTitle);
+      setQuestions(reconciledQuestions);
+      setMetaState(nextMeta);
+      setJsonWarnings(nextWarnings);
+      return {
+        nextTitle,
+        nextQuestions: reconciledQuestions,
+        nextMeta,
+        parsedWarnings: nextWarnings,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'تعذر قراءة صيغة JSON.';
+      setJsonError(msg);
+      return null;
+    }
+  };
+
+  const switchToMode = (nextMode: 'visual' | 'json') => {
+    if (nextMode === editMode) return;
+    setError(null);
+    if (nextMode === 'json') {
+      setJsonText(quizToEditableJson(title, questions, metaState));
+      setJsonError(null);
+      setJsonWarnings([]);
+      setEditMode('json');
+      return;
+    }
+    const applied = parseAndApplyJson();
+    if (!applied) return;
+    setEditMode('visual');
+  };
+
+  const formatCurrentJson = () => {
+    const applied = parseAndApplyJson();
+    if (!applied) return;
+    setJsonText(quizToEditableJson(applied.nextTitle, applied.nextQuestions, applied.nextMeta));
+  };
+
+  const copyCurrentJson = async () => {
+    try {
+      await navigator.clipboard.writeText(jsonText);
+      setJsonCopied(true);
+      window.setTimeout(() => setJsonCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleJsonFileUpload = async (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 15_000_000) {
+      setJsonError('حجم الملف كبير جداً (الحد الأقصى 15MB).');
+      return;
+    }
+    const text = await file.text();
+    setJsonText(text);
+    setJsonError(null);
+    setError(null);
+  };
+
   const handleSave = async () => {
-    const problem = validateForSave(title, questions, { allowAutoSplit: !editingId });
+    let targetTitle = title;
+    let targetQuestions = questions;
+    let targetMeta = metaState;
+
+    if (editMode === 'json') {
+      const applied = parseAndApplyJson();
+      if (!applied) {
+        setError('راجع خطأ صيغة JSON أولاً قبل الحفظ.');
+        return;
+      }
+      targetTitle = applied.nextTitle;
+      targetQuestions = applied.nextQuestions;
+      targetMeta = applied.nextMeta;
+    }
+
+    const problem = validateForSave(targetTitle, targetQuestions, { allowAutoSplit: !editingId });
     if (problem) {
       setError(problem);
       return;
     }
     setSaving(true);
     setError(null);
+    const hasMeta =
+      Boolean(targetMeta.parentQuizId) ||
+      Boolean(targetMeta.quizKind) ||
+      Boolean(targetMeta.drillStyle) ||
+      Boolean(targetMeta.sourceStarredId) ||
+      Boolean(targetMeta.ruleTitle);
+    const effectiveMeta = hasMeta ? targetMeta : undefined;
     try {
       if (editingId) {
-        await updateMyQuiz(ownerId, editingId, title, questions);
+        await updateMyQuiz(ownerId, editingId, targetTitle, targetQuestions, effectiveMeta);
         await deleteSessionSnapshot('my_quiz_draft');
         onDone('تم حفظ التعديلات.');
       } else {
-        const chunks = await createMyQuizzesAutoSplit(ownerId, title, questions);
+        const chunks = await createMyQuizzesAutoSplit(ownerId, targetTitle, targetQuestions, effectiveMeta);
         await deleteSessionSnapshot('my_quiz_draft');
         if (chunks.length > 1) {
           const totalQ = chunks.reduce((acc, c) => acc + c.questions.length, 0);
           onDone(`تمت إضافة الاختبار كاملاً (${totalQ} سؤالاً) مقسماً تلقائياً على ${chunks.length} أجزاء لتجاوز حد حجم المستند.`);
         } else {
-          onDone(`تمت إضافة الاختبار (${filled} سؤالاً) إلى اختباراتي.`);
+          const savedCount = cleanQuestions(targetQuestions).length;
+          onDone(`تمت إضافة الاختبار (${savedCount} سؤالاً) إلى اختباراتي.`);
         }
       }
     } catch (e) {
@@ -276,8 +424,155 @@ export const QuizEditor: React.FC<Props> = ({
     }
   };
 
+  const allWarnings = editMode === 'json' ? jsonWarnings : warnings;
+
   return (
     <div className="flex flex-col gap-4" dir="rtl">
+      {/* Mode Switcher: Visual Editor vs JSON Editor */}
+      <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="inline-flex items-center rounded-2xl border-2 border-[#E5E5E5] bg-[#F7F7F7] p-1 text-xs font-black gap-1">
+          <button
+            type="button"
+            onClick={() => switchToMode('visual')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              editMode === 'visual'
+                ? 'bg-white text-[#1899D6] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <Pencil className="w-3.5 h-3.5" />
+            <span>المحرر المرئي</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => switchToMode('json')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
+              editMode === 'json'
+                ? 'bg-white text-[#8938D6] shadow-xs'
+                : 'text-[#777777] hover:text-[#3C3C3C]'
+            }`}
+          >
+            <FileJson className="w-3.5 h-3.5" />
+            <span>تعديل بصيغة JSON</span>
+          </button>
+        </div>
+
+        <span className="text-xs font-extrabold text-[#777777] px-1">
+          {metaState.quizKind === 'drill' ? 'نوع الاختبار: تقوية وتدريب' : 'نوع الاختبار: اختبار أساسي'}
+          <span aria-hidden="true"> · </span>
+          <span className="font-latin tabular-nums">{filled}</span> سؤال
+        </span>
+      </div>
+
+      {editMode === 'json' ? (
+        <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-black text-[#3C3C3C]">
+                محرر JSON المباشر
+              </h3>
+              <p className="text-xs font-bold text-[#777777]">
+                عدّل الأسئلة أو الإجابات أو الجداول التفاعلية والأشكال والشرح مباشرة ثم احفظ، أو انسخ الـ JSON للذكاء الاصطناعي وأعد لصقه هنا.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void copyCurrentJson()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] hover:border-[#1CB0F6] text-xs font-black text-[#3C3C3C] whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5 text-[#1899D6]" />
+                <span>{jsonCopied ? 'تم النسخ' : 'نسخ JSON'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={formatCurrentJson}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] hover:border-[#A560E8] text-xs font-black text-[#8938D6] whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                <span>تنسيق والتحقق</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => jsonFileInputRef.current?.click()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border-2 border-[#E5E5E5] hover:border-[#58CC02] text-xs font-black text-[#46A302] whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>من ملف</span>
+              </button>
+              <input
+                ref={jsonFileInputRef}
+                type="file"
+                accept=".json,application/json,text/plain"
+                className="hidden"
+                onChange={(e) => {
+                  void handleJsonFileUpload(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+            </div>
+          </div>
+
+          {liveJsonCheck && (
+            <div
+              className={`flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-3 py-2 text-xs font-black ${
+                liveJsonCheck.ok
+                  ? 'bg-[#F3FBE9] border-[#B7E88B] text-[#46A302]'
+                  : 'bg-[#FFF3F3] border-[#FCA5A5] text-[#DC2626]'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                {liveJsonCheck.ok ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>
+                      صيغة JSON صالحة — العنوان: «{liveJsonCheck.parsed.title || title || 'بدون عنوان'}» ·{' '}
+                      <span className="font-latin tabular-nums">{liveJsonCheck.parsed.questions.length}</span> سؤال
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{liveJsonCheck.message}</span>
+                  </>
+                )}
+              </span>
+            </div>
+          )}
+
+          {jsonError && (
+            <div className="p-3 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs font-extrabold text-[#EA2B2B]">
+              {jsonError}
+            </div>
+          )}
+
+          {allWarnings.length > 0 && (
+            <div className="rounded-2xl border-2 border-[#FFC800] bg-[#FFF4CC] p-3 text-xs font-extrabold text-[#8A6500] flex flex-col gap-1">
+              <div className="flex items-center gap-1.5 font-black">
+                <AlertTriangle className="w-4 h-4" /> ملاحظات القراءة
+              </div>
+              {allWarnings.slice(0, 8).map((w, i) => (
+                <div key={i}>• {w}</div>
+              ))}
+            </div>
+          )}
+
+          <textarea
+            dir="ltr"
+            rows={20}
+            value={jsonText}
+            onChange={(e) => {
+              setJsonText(e.target.value);
+              if (jsonError) setJsonError(null);
+              if (error) setError(null);
+            }}
+            spellCheck={false}
+            placeholder='{ "title": "...", "questions": [ ... ] }'
+            className="w-full rounded-2xl border-2 border-[#E5E5E5] focus:border-[#8938D6] outline-none p-3.5 text-xs font-mono leading-relaxed bg-[#FAFAFA] text-[#1E293B] min-h-[340px]"
+          />
+        </div>
+      ) : (
+        <>
       <div className="rounded-3xl border-2 border-[#E5E5E5] border-b-4 bg-white p-4 flex flex-col gap-3">
         <label className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between gap-2">
@@ -670,6 +965,8 @@ export const QuizEditor: React.FC<Props> = ({
           <Table2 className="w-4 h-4" /> إضافة سؤال جدول تفاعلي
         </button>
       </div>
+        </>
+      )}
 
       {error && (
         <div className="p-3 rounded-2xl bg-[#FFDFE0] border-2 border-[#FF4B4B] text-xs font-extrabold text-[#EA2B2B]">

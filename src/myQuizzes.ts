@@ -887,8 +887,11 @@ function parseQuestionsList(
       o.laws ?? o.rules ?? o.formulas ?? o.law ?? o['القوانين'] ?? o['قوانين'] ?? o['القانون']
     );
 
+    const rawId = typeof o.id === 'string' ? o.id.trim() : '';
+    const safeId = /^[a-zA-Z0-9_-]{1,64}$/.test(rawId) ? rawId : newQuestionId();
+
     questions.push({
-      id: newQuestionId(),
+      id: safeId,
       questionType: isTable ? 'table' : 'mcq',
       ...(laws ? { laws } : {}),
       ...(table ? { table } : {}),
@@ -1033,6 +1036,23 @@ export function quizToExportJson(
             })),
           }
         : {}),
+    },
+    null,
+    2
+  );
+}
+
+export function quizToEditableJson(
+  title: string,
+  questions: QuizQuestion[],
+  meta?: { ruleTitle?: string; drillStyle?: DrillStyle }
+): string {
+  return JSON.stringify(
+    {
+      title,
+      ...(meta?.ruleTitle ? { ruleTitle: meta.ruleTitle } : {}),
+      ...(meta?.drillStyle ? { drillStyle: meta.drillStyle } : {}),
+      questions: questions.map(serializeQuestionForExport),
     },
     null,
     2

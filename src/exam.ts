@@ -598,6 +598,213 @@ export function scoreExam(
   return qs.reduce((n, q, i) => n + (isQuestionCorrect(q, i, answers, tableAnswers) ? 1 : 0), 0);
 }
 
+function normReconcileKey(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function buildUpdatedExamQuestion(eq: ExamQuestion, latestQ: QuizQuestion, choices: string[], correctIndex: number): ExamQuestion {
+  const isTable = latestQ.questionType === 'table' || Boolean(latestQ.table && latestQ.choices.length === 0);
+  const out: ExamQuestion = {
+    id: eq.id,
+    sourceQuizId: eq.sourceQuizId,
+    sourceTitle: eq.sourceTitle,
+    ...(isTable ? { questionType: 'table' as const } : { questionType: 'mcq' as const }),
+    ...(latestQ.laws && latestQ.laws.length > 0 ? { laws: latestQ.laws } : {}),
+    ...(isTable && latestQ.table ? { table: latestQ.table } : {}),
+    ...(latestQ.chart ? { chart: latestQ.chart } : {}),
+    ...(latestQ.figure ? { figure: latestQ.figure } : {}),
+    ...(latestQ.explanationChart ? { explanationChart: latestQ.explanationChart } : {}),
+    ...(latestQ.explanationFigure ? { explanationFigure: latestQ.explanationFigure } : {}),
+    ...(latestQ.explanationTable ? { explanationTable: latestQ.explanationTable } : {}),
+    ...(latestQ.explanationComparison ? { explanationComparison: latestQ.explanationComparison } : {}),
+    ...(eq.redeemsFingerprint ? { redeemsFingerprint: eq.redeemsFingerprint } : {}),
+    text: latestQ.text,
+    choices: isTable ? [] : choices,
+    correctIndex: isTable ? -1 : correctIndex,
+    explanation: latestQ.explanation || '',
+  };
+  return out;
+}
+
+function reconcileMcqChoicesAndCorrectIndex(
+  eq: ExamQuestion,
+  latestQ: QuizQuestion,
+  shuffleChoices: boolean
+): { choices: string[]; correctIndex: number } {
+  const oldChoices = Array.isArray(eq.choices) ? eq.choices : [];
+  const newChoices = Array.isArray(latestQ.choices) ? latestQ.choices : [];
+  const targetIdx = Number.isInteger(latestQ.correctIndex) ? latestQ.correctIndex : -1;
+  const newCorrectText = targetIdx >= 0 && targetIdx < newChoices.length ? newChoices[targetIdx] : '';
+  const normCorrect = normReconcileKey(newCorrectText);
+
+  if (oldChoices.length === 0) {
+    return { choices: newChoices.slice(), correctIndex: targetIdx };
+  }
+
+  // Case 1: Match the edited correct answer text inside the choices the student saw
+  if (normCorrect) {
+    const matchInOld = oldChoices.findIndex((c) => normReconcileKey(c) === normCorrect);
+    if (matchInOld >= 0) {
+      // If unshuffled and choice counts align, keep exact updated texts if in same order; otherwise preserve seen order
+      const exactSameOrder =
+        !shuffleChoices &&
+        oldChoices.length === newChoices.length &&
+        oldChoices.every((c, idx) => normReconcileKey(c) === normReconcileKey(newChoices[idx]));
+      if (exactSameOrder) {
+        return { choices: newChoices.slice(), correctIndex: targetIdx };
+      }
+      return { choices: oldChoices.slice(), correctIndex: matchInOld };
+    }
+  }
+
+  // Case 2: Only one option's text was edited (e.g. typo/math fix in the correct choice while shuffled)
+  const newSet = new Set(newChoices.map(normReconcileKey));
+  const missingOldIndices = oldChoices
+    .map((c, idx) => (newSet.has(normReconcileKey(c)) ? -1 : idx))
+    .filter((idx) => idx >= 0);
+
+  if (missingOldIndices.length === 1 && normCorrect) {
+    const updated = oldChoices.slice();
+    const slot = missingOldIndices[0];
+    updated[slot] = newCorrectText;
+    return { choices: updated, correctIndex: slot };
+  }
+
+  // Case 3: Unshuffled exam -> mirror newChoices & new correctIndex directly
+  if (!shuffleChoices) {
+    return { choices: newChoices.slice(), correctIndex: targetIdx };
+  }
+
+  return { choices: newChoices.slice(), correctIndex: targetIdx };
+}
+
+/**
+ * يُحدّث محاولات الاختبارات السابقة ونتائجها تلقائياً عند تعديل أي سؤال أو تصحيح إجابته
+ * (سواء في المحرر المرئي أو بصيغة JSON، للاختبارات الأساسية أو اختبارات التقوية).
+ */
+export function reconcileAttemptsWithQuizzes(
+  attempts: QuizAttempt[],
+  quizzes: MyQuiz[]
+): QuizAttempt[] {
+  if (!Array.isArray(attempts) || attempts.length === 0) return attempts;
+  if (!Array.isArray(quizzes) || quizzes.length === 0) return attempts;
+
+  const byQuizId = new Map<
+    string,
+    { byId: Map<string, QuizQuestion>; byNormText: Map<string, QuizQuestion> }
+  >();
+  const globalById = new Map<string, QuizQuestion>();
+  const globalByNormText = new Map<string, QuizQuestion>();
+
+  for (const quiz of quizzes) {
+    if (!quiz?.id || !Array.isArray(quiz.questions)) continue;
+    const byId = new Map<string, QuizQuestion>();
+    const byNormText = new Map<string, QuizQuestion>();
+    for (const qq of quiz.questions) {
+      if (!qq || typeof qq !== 'object') continue;
+      if (qq.id) {
+        byId.set(qq.id, qq);
+        if (!globalById.has(qq.id)) globalById.set(qq.id, qq);
+      }
+      const key = normReconcileKey(qq.text);
+      if (key) {
+        if (!byNormText.has(key)) byNormText.set(key, qq);
+        if (!globalByNormText.has(key)) globalByNormText.set(key, qq);
+      }
+    }
+    byQuizId.set(quiz.id, { byId, byNormText });
+  }
+
+  let anyAttemptChanged = false;
+
+  const reconciled = attempts.map((attempt) => {
+    if (!attempt || typeof attempt !== 'object') return attempt;
+    const prevQuestions = Array.isArray(attempt.questions) ? attempt.questions : [];
+    const prevAnswers = Array.isArray(attempt.answers) ? attempt.answers : [];
+    if (prevQuestions.length === 0) return attempt;
+
+    let modified = false;
+    const shuffleChoices = Boolean(attempt.settings?.shuffleChoices);
+    const nextAnswers = prevAnswers.slice();
+
+    const nextQuestions = prevQuestions.map((eq, idx) => {
+      if (!eq || typeof eq !== 'object') return eq;
+
+      const sourceMap = eq.sourceQuizId ? byQuizId.get(eq.sourceQuizId) : undefined;
+      let latestQ: QuizQuestion | undefined;
+      if (sourceMap) {
+        latestQ =
+          (eq.id ? sourceMap.byId.get(eq.id) : undefined) ||
+          sourceMap.byNormText.get(normReconcileKey(eq.text));
+      } else {
+        latestQ =
+          (eq.id ? globalById.get(eq.id) : undefined) ||
+          (eq.sourceQuizId === 'starred' || eq.sourceQuizId === 'coach_mistakes_review'
+            ? globalByNormText.get(normReconcileKey(eq.text))
+            : undefined);
+      }
+
+      if (!latestQ || !isExamReady(latestQ)) return eq;
+
+      const isTable = latestQ.questionType === 'table' || Boolean(latestQ.table && latestQ.choices.length === 0);
+      let nextQ: ExamQuestion;
+
+      if (isTable) {
+        nextQ = buildUpdatedExamQuestion(eq, latestQ, [], -1);
+        if (latestQ.table) {
+          const g = gradeTableQuestion(latestQ.table, attempt.tableAnswers?.[String(idx)]);
+          const regraded = g.answeredBlanks === 0 ? -1 : g.isAllCorrect ? 1 : 0;
+          if (nextAnswers[idx] !== regraded) {
+            nextAnswers[idx] = regraded;
+            modified = true;
+          }
+        }
+      } else {
+        const mcq = reconcileMcqChoicesAndCorrectIndex(eq, latestQ, shuffleChoices);
+        nextQ = buildUpdatedExamQuestion(eq, latestQ, mcq.choices, mcq.correctIndex);
+      }
+
+      if (
+        nextQ.text !== eq.text ||
+        nextQ.correctIndex !== eq.correctIndex ||
+        nextQ.explanation !== eq.explanation ||
+        nextQ.questionType !== eq.questionType ||
+        JSON.stringify(nextQ.choices) !== JSON.stringify(eq.choices) ||
+        JSON.stringify(nextQ.table ?? null) !== JSON.stringify(eq.table ?? null) ||
+        JSON.stringify(nextQ.laws ?? null) !== JSON.stringify(eq.laws ?? null) ||
+        JSON.stringify(nextQ.figure ?? null) !== JSON.stringify(eq.figure ?? null) ||
+        JSON.stringify(nextQ.chart ?? null) !== JSON.stringify(eq.chart ?? null) ||
+        JSON.stringify(nextQ.explanationTable ?? null) !== JSON.stringify(eq.explanationTable ?? null) ||
+        JSON.stringify(nextQ.explanationComparison ?? null) !== JSON.stringify(eq.explanationComparison ?? null) ||
+        JSON.stringify(nextQ.explanationChart ?? null) !== JSON.stringify(eq.explanationChart ?? null) ||
+        JSON.stringify(nextQ.explanationFigure ?? null) !== JSON.stringify(eq.explanationFigure ?? null)
+      ) {
+        modified = true;
+        return nextQ;
+      }
+      return eq;
+    });
+
+    const nextScore = scoreExam(nextQuestions, nextAnswers, attempt.tableAnswers);
+    if (!modified && nextScore === attempt.score) {
+      return attempt;
+    }
+
+    anyAttemptChanged = true;
+    return {
+      ...attempt,
+      questions: nextQuestions,
+      answers: nextAnswers,
+      score: nextScore,
+    };
+  });
+
+  return anyAttemptChanged ? reconciled : attempts;
+}
+
 export function defaultExamTitle(settings: ExamSettings): string {
   const titles = Array.isArray(settings?.quizTitles) ? settings.quizTitles : [];
   const base =

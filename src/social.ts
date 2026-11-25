@@ -13,6 +13,8 @@ import {
 import { isBackendServerDetected, resolveApiUrl } from './apiBase';
 import { activeFirebaseConfig, auth, db } from './firebase';
 import { cleanQuestions, createMyQuizzesAutoSplit, LIMITS, prepareQuestionsForFirestore } from './myQuizzes';
+import { reconcileAttemptsWithQuizzes } from './exam';
+import { loadSessionSnapshot, type StoredMyQuizzesSnapshot } from './localDraftStore';
 import { computeQuizStats } from './quizStats';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from './quizTable';
 import {
@@ -416,9 +418,10 @@ export async function fetchUserAttemptsAndSyncLeaderboard(
     // Use cached epoch
   }
 
-  const attemptsSnap = await getDocs(
-    query(collection(db, 'users', uid, 'quizAttempts'), where('ownerId', '==', uid))
-  );
+  const [attemptsSnap, quizzesSnap] = await Promise.all([
+    getDocs(query(collection(db, 'users', uid, 'quizAttempts'), where('ownerId', '==', uid))),
+    getDocs(query(collection(db, 'users', uid, 'myQuizzes'), where('ownerId', '==', uid))).catch(() => null),
+  ]);
   const byId = new Map<string, QuizAttempt>();
   attemptsSnap.forEach((d) => {
     const a = decodeExamAttemptFromFirestore(d.data() as QuizAttempt);
@@ -427,7 +430,29 @@ export async function fetchUserAttemptsAndSyncLeaderboard(
   if (extraAttempt?.id) {
     byId.set(extraAttempt.id, extraAttempt);
   }
-  await syncUserStatsToLeaderboard(uid, fullNameQuad, Array.from(byId.values()), metaEpoch, extraAttempt);
+
+  let userQuizzes: MyQuiz[] = [];
+  if (quizzesSnap) {
+    quizzesSnap.forEach((d) => {
+      const data = d.data() as MyQuiz;
+      if (data && typeof data === 'object') {
+        userQuizzes.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
+      }
+    });
+  } else {
+    const cached = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes').catch(() => null);
+    if (cached && cached.ownerId === uid && Array.isArray(cached.quizzes)) {
+      userQuizzes = cached.quizzes
+        .filter((x): x is MyQuiz => Boolean(x && typeof x === 'object'))
+        .map(decodeMyQuizFromFirestore);
+    }
+  }
+
+  const reconciledAttempts = reconcileAttemptsWithQuizzes(Array.from(byId.values()), userQuizzes);
+  const reconciledExtra = extraAttempt?.id
+    ? reconciledAttempts.find((a) => a.id === extraAttempt.id) || extraAttempt
+    : undefined;
+  await syncUserStatsToLeaderboard(uid, fullNameQuad, reconciledAttempts, metaEpoch, reconciledExtra);
 }
 
 export async function resetLeaderboardEpoch(

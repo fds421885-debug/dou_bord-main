@@ -62,6 +62,7 @@ import {
   isEmptyMyQuiz,
   parseQuizBundleJson,
   quizToExportJson,
+  type MyQuizMetaInput,
   type ParsedQuizBundle,
 } from '../myQuizzes';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../quizTable';
@@ -88,6 +89,7 @@ import {
   isExamReady,
   isQuestionAnswered,
   newAttemptId,
+  reconcileAttemptsWithQuizzes,
 } from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
@@ -114,6 +116,8 @@ type Mode =
       editingId: string | null;
       title: string;
       questions: QuizQuestion[];
+      initialEditMode?: 'visual' | 'json';
+      quizMeta?: MyQuizMetaInput;
       warnings: string[];
     }
   | { kind: 'view'; quiz: MyQuiz }
@@ -152,7 +156,8 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const [draft, setDraft] = useState<StoredMyQuizDraft | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [attempts, setAttempts] = useState<QuizAttempt[]>([]);
+  const [rawAttempts, setRawAttempts] = useState<QuizAttempt[]>([]);
+  const [attemptsLoaded, setAttemptsLoaded] = useState(false);
   const [session, setSession] = useState<StoredExamSession | null>(null);
   const [confirmDeleteAttemptId, setConfirmDeleteAttemptId] = useState<string | null>(null);
   const [metaOverrides, setMetaOverrides] = useState<Record<string, MyQuizMetaOverride>>({});
@@ -271,7 +276,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     );
     void loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts').then((snap) => {
       if (alive && snap && snap.ownerId === profile.uid && Array.isArray(snap.attempts)) {
-        setAttempts(
+        setRawAttempts(
           snap.attempts
             .filter((x): x is QuizAttempt => Boolean(x && typeof x === 'object'))
             .map(decodeExamAttemptFromFirestore)
@@ -289,17 +294,12 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           }
         });
         list.sort((a, b) => (Number(b.finishedAt) || 0) - (Number(a.finishedAt) || 0));
-        setAttempts(list);
-        void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, list).catch(() => undefined);
-        void saveSessionSnapshot({
-          key: 'quiz_attempts',
-          ownerId: profile.uid,
-          attempts: list.slice(0, 150),
-          updatedAt: Date.now(),
-        });
+        setRawAttempts(list);
+        setAttemptsLoaded(true);
       },
       (err) => {
         console.error('quizAttempts listener error', err);
+        setAttemptsLoaded(true);
       }
     );
     const unsubStarred = subscribeStarredQuestions(profile.uid, (items) => {
@@ -341,6 +341,25 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
       })
       .filter((q) => !isEmptyMyQuiz(q));
   }, [quizzes, metaOverrides]);
+
+  const attempts = useMemo<QuizAttempt[]>(
+    () => reconcileAttemptsWithQuizzes(rawAttempts, mergedQuizzes),
+    [rawAttempts, mergedQuizzes]
+  );
+
+  useEffect(() => {
+    if (loading || !attemptsLoaded) return;
+    const timer = window.setTimeout(() => {
+      void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, attempts).catch(() => undefined);
+      void saveSessionSnapshot({
+        key: 'quiz_attempts',
+        ownerId: profile.uid,
+        attempts: attempts.slice(0, 150),
+        updatedAt: Date.now(),
+      });
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [loading, attemptsLoaded, profile.uid, profile.fullNameQuad, attempts]);
 
   const { mainQuizzes, childrenByParentId, standaloneDrills } = useMemo(() => {
     const idSet = new Set(mergedQuizzes.map((q) => q.id));
@@ -436,6 +455,24 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
     void refreshDraft();
     void reloadMetaOverrides();
     window.setTimeout(() => setNotice(null), 4000);
+  };
+
+  const openQuizEditor = (quiz: MyQuiz, initialEditMode: 'visual' | 'json' = 'visual') => {
+    setMode({
+      kind: 'edit',
+      editingId: quiz.id,
+      title: quiz.title,
+      questions: quiz.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion),
+      initialEditMode,
+      quizMeta: {
+        ...(quiz.parentQuizId ? { parentQuizId: quiz.parentQuizId } : {}),
+        ...(quiz.quizKind ? { quizKind: quiz.quizKind } : {}),
+        ...(quiz.drillStyle ? { drillStyle: quiz.drillStyle } : {}),
+        ...(quiz.sourceStarredId ? { sourceStarredId: quiz.sourceStarredId } : {}),
+        ...(quiz.ruleTitle ? { ruleTitle: quiz.ruleTitle } : {}),
+      },
+      warnings: [],
+    });
   };
 
   const exportQuiz = (quiz: MyQuiz, childDrills: MyQuiz[] = []) => {
@@ -664,7 +701,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   }
 
   if (mode.kind === 'attempt') {
-    const a = mode.attempt;
+    const a = attempts.find((x) => x.id === mode.attempt.id) ?? mode.attempt;
     return (
       <div className="max-w-3xl mx-auto w-full flex flex-col gap-4" dir="rtl">
         <button type="button" onClick={() => setMode({ kind: 'list' })} className="self-start flex items-center gap-1 text-xs font-black text-[#777777] cursor-pointer">
@@ -731,13 +768,20 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           <ArrowRight className="w-4 h-4" /> العودة إلى اختباراتي
         </button>
         <h2 className="text-lg font-black text-[#3C3C3C]">
-          {mode.editingId ? 'تعديل الاختبار' : 'مراجعة وإضافة الاختبار'}
+          {mode.editingId
+            ? mode.initialEditMode === 'json'
+              ? 'تعديل الاختبار بصيغة JSON'
+              : 'تعديل الاختبار'
+            : 'مراجعة وإضافة الاختبار'}
         </h2>
         <QuizEditor
+          key={`${mode.editingId || 'new'}-${mode.initialEditMode || 'visual'}`}
           ownerId={profile.uid}
           editingId={mode.editingId}
           initialTitle={mode.title}
           initialQuestions={mode.questions}
+          initialEditMode={mode.initialEditMode}
+          quizMeta={mode.quizMeta}
           warnings={mode.warnings}
           onDone={finish}
           onCancel={() => {
@@ -814,13 +858,22 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
             )}
           </div>
         ))}
-        <button
-          type="button"
-          onClick={() => setMode({ kind: 'edit', editingId: q.id, title: q.title, questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion), warnings: [] })}
-          className="duo-btn self-start flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-sm font-black cursor-pointer"
-        >
-          <Pencil className="w-4 h-4" /> تعديل
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => openQuizEditor(q, 'visual')}
+            className="duo-btn flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#1CB0F6] border-2 border-[#1899D6] border-b-4 text-white text-sm font-black cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Pencil className="w-4 h-4" /> تعديل
+          </button>
+          <button
+            type="button"
+            onClick={() => openQuizEditor(q, 'json')}
+            className="duo-btn flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-[#A560E8] border-2 border-[#8938D6] border-b-4 text-white text-sm font-black cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <FileJson className="w-4 h-4" /> تعديل JSON
+          </button>
+        </div>
       </div>
     );
   }
@@ -1150,20 +1203,27 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                               {drill.questionCount} سؤال
                             </p>
                           </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                             <button
                               type="button"
                               onClick={() => startSingleQuizNow(drill)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#A560E8] text-white text-[11px] font-black cursor-pointer"
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#A560E8] text-white text-[11px] font-black cursor-pointer whitespace-nowrap shrink-0"
                             >
                               <Play className="w-3 h-3" /> ابدأ
                             </button>
                             <button
                               type="button"
                               onClick={() => setMode({ kind: 'view', quiz: drill })}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#DDF4FF] text-[#1899D6] text-[11px] font-black cursor-pointer"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#DDF4FF] text-[#1899D6] text-[11px] font-black cursor-pointer whitespace-nowrap shrink-0"
                             >
                               <FolderOpen className="w-3 h-3" /> فتح
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openQuizEditor(drill, 'json')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-[#F5ECFF] border border-[#CE82FF] text-[#7C3AED] text-[11px] font-black cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              <FileJson className="w-3 h-3" /> تعديل JSON
                             </button>
                           </div>
                         </div>
@@ -1562,18 +1622,17 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        setMode({
-                          kind: 'edit',
-                          editingId: q.id,
-                          title: q.title,
-                          questions: q.questions.map((x) => JSON.parse(JSON.stringify(x)) as QuizQuestion),
-                          warnings: [],
-                        })
-                      }
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                      onClick={() => openQuizEditor(q, 'visual')}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer whitespace-nowrap shrink-0"
                     >
                       <Pencil className="w-3.5 h-3.5" /> تعديل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openQuizEditor(q, 'json')}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F5ECFF] border-2 border-[#CE82FF] text-xs font-black text-[#7C3AED] hover:bg-[#EDE0FF] cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <FileJson className="w-3.5 h-3.5" /> تعديل JSON
                     </button>
                     <button
                       type="button"
@@ -1727,20 +1786,17 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                             </button>
                             <button
                               type="button"
-                              onClick={() =>
-                                setMode({
-                                  kind: 'edit',
-                                  editingId: child.id,
-                                  title: child.title,
-                                  questions: child.questions.map(
-                                    (x) => JSON.parse(JSON.stringify(x)) as QuizQuestion
-                                  ),
-                                  warnings: [],
-                                })
-                              }
-                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer"
+                              onClick={() => openQuizEditor(child, 'visual')}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-white border border-[#E5E5E5] text-[11px] font-black text-[#3C3C3C] cursor-pointer whitespace-nowrap shrink-0"
                             >
                               <Pencil className="w-3.5 h-3.5" /> تعديل
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openQuizEditor(child, 'json')}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#F5ECFF] border border-[#CE82FF] text-[11px] font-black text-[#7C3AED] hover:bg-[#EDE0FF] cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              <FileJson className="w-3.5 h-3.5" /> تعديل JSON
                             </button>
                             <button
                               type="button"
@@ -1860,20 +1916,17 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          setMode({
-                            kind: 'edit',
-                            editingId: drill.id,
-                            title: drill.title,
-                            questions: drill.questions.map(
-                              (x) => JSON.parse(JSON.stringify(x)) as QuizQuestion
-                            ),
-                            warnings: [],
-                          })
-                        }
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer"
+                        onClick={() => openQuizEditor(drill, 'visual')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border-2 border-[#E5E5E5] text-xs font-black text-[#3C3C3C] cursor-pointer whitespace-nowrap shrink-0"
                       >
                         <Pencil className="w-3.5 h-3.5" /> تعديل
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openQuizEditor(drill, 'json')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F5ECFF] border-2 border-[#CE82FF] text-xs font-black text-[#7C3AED] hover:bg-[#EDE0FF] cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <FileJson className="w-3.5 h-3.5" /> تعديل JSON
                       </button>
                       <button
                         type="button"

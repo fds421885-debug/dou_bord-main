@@ -33,10 +33,15 @@ import {
 } from '../achievements';
 import { collection, getDocs, query, where } from '../firestoreTracked';
 import { db } from '../firebase';
-import { loadSessionSnapshot, type StoredQuizAttemptsSnapshot } from '../localDraftStore';
-import { decodeExamAttemptFromFirestore } from '../quizTable';
+import {
+  loadSessionSnapshot,
+  type StoredMyQuizzesSnapshot,
+  type StoredQuizAttemptsSnapshot,
+} from '../localDraftStore';
+import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../quizTable';
+import { reconcileAttemptsWithQuizzes } from '../exam';
 import { filterAttemptsForEpoch, syncUserStatsToLeaderboard } from '../social';
-import type { LeaderboardUserEntry, QuizAttempt, UserProfile } from '../types';
+import type { LeaderboardUserEntry, MyQuiz, QuizAttempt, UserProfile } from '../types';
 
 interface Props {
   profile: UserProfile;
@@ -140,7 +145,10 @@ export const LeaderboardAchievementsCarousel: React.FC<Props> = ({
   useEffect(() => {
     let alive = true;
     const loadAttempts = async () => {
-      const localSnap = await loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts');
+      const [localSnap, localQuizzesSnap] = await Promise.all([
+        loadSessionSnapshot<StoredQuizAttemptsSnapshot>('quiz_attempts'),
+        loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes'),
+      ]);
       const byId = new Map<string, QuizAttempt>();
       if (localSnap && localSnap.ownerId === profile.uid && Array.isArray(localSnap.attempts)) {
         for (const a of localSnap.attempts) {
@@ -148,25 +156,48 @@ export const LeaderboardAchievementsCarousel: React.FC<Props> = ({
           if (decoded?.id) byId.set(decoded.id, decoded);
         }
       }
+      let localQuizzes: MyQuiz[] = [];
+      if (localQuizzesSnap && localQuizzesSnap.ownerId === profile.uid && Array.isArray(localQuizzesSnap.quizzes)) {
+        localQuizzes = localQuizzesSnap.quizzes
+          .filter((x): x is MyQuiz => Boolean(x && typeof x === 'object'))
+          .map(decodeMyQuizFromFirestore);
+      }
       if (alive && byId.size > 0) {
-        setAttempts(Array.from(byId.values()));
+        setAttempts(reconcileAttemptsWithQuizzes(Array.from(byId.values()), localQuizzes));
       }
 
       try {
-        const snap = await getDocs(
-          query(collection(db, 'users', profile.uid, 'quizAttempts'), where('ownerId', '==', profile.uid))
-        );
+        const [snap, quizzesSnap] = await Promise.all([
+          getDocs(
+            query(collection(db, 'users', profile.uid, 'quizAttempts'), where('ownerId', '==', profile.uid))
+          ),
+          getDocs(
+            query(collection(db, 'users', profile.uid, 'myQuizzes'), where('ownerId', '==', profile.uid))
+          ).catch(() => null),
+        ]);
         snap.forEach((d) => {
-          const a = decodeExamAttemptFromFirestore({ ...(d.data() as QuizAttempt), id: d.id });
+          const data = d.data() as QuizAttempt;
+          const a = decodeExamAttemptFromFirestore({ ...data, id: data?.id || d.id });
           if (a?.id) byId.set(a.id, a);
         });
-        const merged = Array.from(byId.values());
+        let userQuizzes: MyQuiz[] = localQuizzes;
+        if (quizzesSnap) {
+          const fetchedQuizzes: MyQuiz[] = [];
+          quizzesSnap.forEach((d) => {
+            const data = d.data() as MyQuiz;
+            if (data && typeof data === 'object') {
+              fetchedQuizzes.push(decodeMyQuizFromFirestore({ ...data, id: data.id || d.id }));
+            }
+          });
+          userQuizzes = fetchedQuizzes;
+        }
+        const reconciled = reconcileAttemptsWithQuizzes(Array.from(byId.values()), userQuizzes);
         if (alive) {
-          setAttempts(merged);
+          setAttempts(reconciled);
         }
         // Backfill achievements into leaderboardUsers doc if needed
-        if (merged.length > 0 && profile.fullNameQuad.trim()) {
-          void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, merged, resetEpoch).catch(
+        if (reconciled.length > 0 && profile.fullNameQuad.trim()) {
+          void syncUserStatsToLeaderboard(profile.uid, profile.fullNameQuad, reconciled, resetEpoch).catch(
             () => undefined
           );
         }

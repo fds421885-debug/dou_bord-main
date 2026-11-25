@@ -424,7 +424,8 @@ export async function fetchUserAttemptsAndSyncLeaderboard(
   ]);
   const byId = new Map<string, QuizAttempt>();
   attemptsSnap.forEach((d) => {
-    const a = decodeExamAttemptFromFirestore(d.data() as QuizAttempt);
+    const data = d.data() as QuizAttempt;
+    const a = decodeExamAttemptFromFirestore({ ...data, id: data?.id || d.id });
     if (a?.id) byId.set(a.id, a);
   });
   if (extraAttempt?.id) {

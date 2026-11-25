@@ -1,6 +1,6 @@
 import { deleteDoc, doc, serverTimestamp, setDoc } from './firestoreTracked';
 import { db, handleFirestoreError, isFirestorePermissionError, OperationType } from './firebase';
-import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion } from './types';
+import type { ExamQuestion, ExamSettings, MyQuiz, QuizAttempt, QuizQuestion, StarredQuestion } from './types';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
@@ -605,12 +605,53 @@ function normReconcileKey(raw: unknown): string {
     .toLowerCase();
 }
 
-function buildUpdatedExamQuestion(eq: ExamQuestion, latestQ: QuizQuestion, choices: string[], correctIndex: number): ExamQuestion {
+function looseReconcileKey(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/\$/g, '')
+    .replace(/\\(?:left|right)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function similarityScore(a: string, b: string): number {
+  const la = looseReconcileKey(a);
+  const lb = looseReconcileKey(b);
+  if (!la || !lb) return 0;
+  if (la === lb) return 1000;
+  let score = 0;
+  if (la.includes(lb) || lb.includes(la)) score += 40;
+  const numsA = la.match(/\d+(?:[.,]\d+)?/g) ?? [];
+  const numsB = lb.match(/\d+(?:[.,]\d+)?/g) ?? [];
+  if (numsA.length > 0 && numsB.length > 0) {
+    const setB = new Set(numsB);
+    for (const n of numsA) {
+      if (setB.has(n)) score += 30;
+    }
+  }
+  const tokensA = new Set(la.split(/\s+/).filter(Boolean));
+  const tokensB = new Set(lb.split(/\s+/).filter(Boolean));
+  for (const t of tokensA) {
+    if (tokensB.has(t)) score += 10;
+  }
+  return score;
+}
+
+function buildUpdatedExamQuestion(
+  eq: ExamQuestion,
+  latestQ: QuizQuestion,
+  choices: string[],
+  correctIndex: number,
+  latestQuizTitle?: string
+): ExamQuestion {
   const isTable = latestQ.questionType === 'table' || Boolean(latestQ.table && latestQ.choices.length === 0);
   const out: ExamQuestion = {
     id: eq.id,
     sourceQuizId: eq.sourceQuizId,
-    sourceTitle: eq.sourceTitle,
+    sourceTitle: latestQuizTitle || eq.sourceTitle,
     ...(isTable ? { questionType: 'table' as const } : { questionType: 'mcq' as const }),
     ...(latestQ.laws && latestQ.laws.length > 0 ? { laws: latestQ.laws } : {}),
     ...(isTable && latestQ.table ? { table: latestQ.table } : {}),
@@ -629,56 +670,381 @@ function buildUpdatedExamQuestion(eq: ExamQuestion, latestQ: QuizQuestion, choic
   return out;
 }
 
-function reconcileMcqChoicesAndCorrectIndex(
+function reconcileMcqChoicesAndAnswer(
   eq: ExamQuestion,
   latestQ: QuizQuestion,
+  oldAns: number,
   shuffleChoices: boolean
-): { choices: string[]; correctIndex: number } {
+): { choices: string[]; correctIndex: number; nextAnswer: number } {
   const oldChoices = Array.isArray(eq.choices) ? eq.choices : [];
   const newChoices = Array.isArray(latestQ.choices) ? latestQ.choices : [];
-  const targetIdx = Number.isInteger(latestQ.correctIndex) ? latestQ.correctIndex : -1;
-  const newCorrectText = targetIdx >= 0 && targetIdx < newChoices.length ? newChoices[targetIdx] : '';
-  const normCorrect = normReconcileKey(newCorrectText);
+  const targetIdx =
+    Number.isInteger(latestQ.correctIndex) && latestQ.correctIndex >= 0 && latestQ.correctIndex < newChoices.length
+      ? latestQ.correctIndex
+      : -1;
 
-  if (oldChoices.length === 0) {
-    return { choices: newChoices.slice(), correctIndex: targetIdx };
+  if (oldChoices.length === 0 || oldAns < 0 || oldAns >= oldChoices.length) {
+    return {
+      choices: newChoices.slice(),
+      correctIndex: targetIdx,
+      nextAnswer: oldAns >= 0 && oldChoices.length === 0 && oldAns < newChoices.length ? oldAns : -1,
+    };
   }
 
-  // Case 1: Match the edited correct answer text inside the choices the student saw
-  if (normCorrect) {
-    const matchInOld = oldChoices.findIndex((c) => normReconcileKey(c) === normCorrect);
-    if (matchInOld >= 0) {
-      // If unshuffled and choice counts align, keep exact updated texts if in same order; otherwise preserve seen order
-      const exactSameOrder =
-        !shuffleChoices &&
-        oldChoices.length === newChoices.length &&
-        oldChoices.every((c, idx) => normReconcileKey(c) === normReconcileKey(newChoices[idx]));
-      if (exactSameOrder) {
-        return { choices: newChoices.slice(), correctIndex: targetIdx };
+  const chosenText = oldChoices[oldAns];
+  const normChosen = normReconcileKey(chosenText);
+  const looseChosen = looseReconcileKey(chosenText);
+
+  if (!shuffleChoices) {
+    if (oldChoices.length === newChoices.length) {
+      if (normReconcileKey(newChoices[oldAns]) === normChosen || looseReconcileKey(newChoices[oldAns]) === looseChosen) {
+        return { choices: newChoices.slice(), correctIndex: targetIdx, nextAnswer: oldAns };
       }
-      return { choices: oldChoices.slice(), correctIndex: matchInOld };
+      const movedIdxNorm = newChoices.findIndex((c) => normReconcileKey(c) === normChosen);
+      const movedIdxLoose =
+        movedIdxNorm >= 0 ? movedIdxNorm : newChoices.findIndex((c) => looseReconcileKey(c) === looseChosen);
+      if (
+        movedIdxLoose >= 0 &&
+        normReconcileKey(oldChoices[movedIdxLoose]) !== normReconcileKey(newChoices[movedIdxLoose])
+      ) {
+        return { choices: newChoices.slice(), correctIndex: targetIdx, nextAnswer: movedIdxLoose };
+      }
+      return { choices: newChoices.slice(), correctIndex: targetIdx, nextAnswer: oldAns };
+    }
+    const movedNorm = newChoices.findIndex((c) => normReconcileKey(c) === normChosen);
+    const movedLoose = movedNorm >= 0 ? movedNorm : newChoices.findIndex((c) => looseReconcileKey(c) === looseChosen);
+    return {
+      choices: newChoices.slice(),
+      correctIndex: targetIdx,
+      nextAnswer: movedLoose >= 0 ? movedLoose : oldAns < newChoices.length ? oldAns : -1,
+    };
+  }
+
+  // Shuffled choices: build 1-to-1 correspondence for unchanged options first
+  const oldToNew = new Map<number, number>();
+  const usedNew = new Set<number>();
+
+  // Pass 1: strict norm match
+  for (let oi = 0; oi < oldChoices.length; oi++) {
+    const key = normReconcileKey(oldChoices[oi]);
+    if (!key) continue;
+    const hit = newChoices.findIndex((nc, ni) => !usedNew.has(ni) && normReconcileKey(nc) === key);
+    if (hit >= 0) {
+      oldToNew.set(oi, hit);
+      usedNew.add(hit);
+    }
+  }
+  // Pass 2: loose match
+  for (let oi = 0; oi < oldChoices.length; oi++) {
+    if (oldToNew.has(oi)) continue;
+    const key = looseReconcileKey(oldChoices[oi]);
+    if (!key) continue;
+    const hit = newChoices.findIndex((nc, ni) => !usedNew.has(ni) && looseReconcileKey(nc) === key);
+    if (hit >= 0) {
+      oldToNew.set(oi, hit);
+      usedNew.add(hit);
     }
   }
 
-  // Case 2: Only one option's text was edited (e.g. typo/math fix in the correct choice while shuffled)
-  const newSet = new Set(newChoices.map(normReconcileKey));
-  const missingOldIndices = oldChoices
-    .map((c, idx) => (newSet.has(normReconcileKey(c)) ? -1 : idx))
-    .filter((idx) => idx >= 0);
-
-  if (missingOldIndices.length === 1 && normCorrect) {
-    const updated = oldChoices.slice();
-    const slot = missingOldIndices[0];
-    updated[slot] = newCorrectText;
-    return { choices: updated, correctIndex: slot };
+  if (oldToNew.has(oldAns)) {
+    return {
+      choices: newChoices.slice(),
+      correctIndex: targetIdx,
+      nextAnswer: oldToNew.get(oldAns)!,
+    };
   }
 
-  // Case 3: Unshuffled exam -> mirror newChoices & new correctIndex directly
-  if (!shuffleChoices) {
-    return { choices: newChoices.slice(), correctIndex: targetIdx };
+  const unmatchedOld = oldChoices.map((_, i) => i).filter((i) => !oldToNew.has(i));
+  const unmatchedNew = newChoices.map((_, i) => i).filter((i) => !usedNew.has(i));
+
+  if (unmatchedOld.length === 1 && unmatchedNew.length === 1) {
+    return {
+      choices: newChoices.slice(),
+      correctIndex: targetIdx,
+      nextAnswer: unmatchedNew[0],
+    };
   }
 
-  return { choices: newChoices.slice(), correctIndex: targetIdx };
+  if (unmatchedNew.length > 0) {
+    let bestNi = unmatchedNew[0];
+    let bestScore = -1;
+    for (const ni of unmatchedNew) {
+      const s = similarityScore(chosenText, newChoices[ni]);
+      if (s > bestScore) {
+        bestScore = s;
+        bestNi = ni;
+      }
+    }
+    if (bestScore > 0) {
+      return { choices: newChoices.slice(), correctIndex: targetIdx, nextAnswer: bestNi };
+    }
+    const ord = unmatchedOld.indexOf(oldAns);
+    const mapped = ord >= 0 && ord < unmatchedNew.length ? unmatchedNew[ord] : unmatchedNew[0];
+    return { choices: newChoices.slice(), correctIndex: targetIdx, nextAnswer: mapped };
+  }
+
+  return {
+    choices: newChoices.slice(),
+    correctIndex: targetIdx,
+    nextAnswer: oldAns < newChoices.length ? oldAns : -1,
+  };
+}
+
+interface QuizQuestionLookup {
+  quiz: MyQuiz;
+  questions: QuizQuestion[];
+  byId: Map<string, QuizQuestion>;
+  byNormText: Map<string, QuizQuestion>;
+  byLooseText: Map<string, QuizQuestion>;
+}
+
+interface QuizLookupIndex {
+  byQuizId: Map<string, QuizQuestionLookup>;
+  byNormTitle: Map<string, QuizQuestionLookup[]>;
+  globalById: Map<string, { quiz: MyQuiz; qq: QuizQuestion }>;
+  globalByNormText: Map<string, { quiz: MyQuiz; qq: QuizQuestion }>;
+  globalByLooseText: Map<string, { quiz: MyQuiz; qq: QuizQuestion }>;
+}
+
+function buildQuizLookupIndex(quizzes: MyQuiz[]): QuizLookupIndex {
+  const byQuizId = new Map<string, QuizQuestionLookup>();
+  const byNormTitle = new Map<string, QuizQuestionLookup[]>();
+  const globalById = new Map<string, { quiz: MyQuiz; qq: QuizQuestion }>();
+  const globalByNormText = new Map<string, { quiz: MyQuiz; qq: QuizQuestion }>();
+  const globalByLooseText = new Map<string, { quiz: MyQuiz; qq: QuizQuestion }>();
+
+  for (const quiz of quizzes) {
+    if (!quiz?.id || !Array.isArray(quiz.questions)) continue;
+    const byId = new Map<string, QuizQuestion>();
+    const byNormText = new Map<string, QuizQuestion>();
+    const byLooseText = new Map<string, QuizQuestion>();
+    for (const qq of quiz.questions) {
+      if (!qq || typeof qq !== 'object') continue;
+      if (qq.id) {
+        const composite = `${quiz.id}:${qq.id}`.slice(0, 120);
+        byId.set(qq.id, qq);
+        byId.set(composite, qq);
+        if (!globalById.has(qq.id)) globalById.set(qq.id, { quiz, qq });
+        if (!globalById.has(composite)) globalById.set(composite, { quiz, qq });
+      }
+      const normKey = normReconcileKey(qq.text);
+      if (normKey) {
+        if (!byNormText.has(normKey)) byNormText.set(normKey, qq);
+        if (!globalByNormText.has(normKey)) globalByNormText.set(normKey, { quiz, qq });
+      }
+      const looseKey = looseReconcileKey(qq.text);
+      if (looseKey) {
+        if (!byLooseText.has(looseKey)) byLooseText.set(looseKey, qq);
+        if (!globalByLooseText.has(looseKey)) globalByLooseText.set(looseKey, { quiz, qq });
+      }
+    }
+    const entry: QuizQuestionLookup = {
+      quiz,
+      questions: quiz.questions,
+      byId,
+      byNormText,
+      byLooseText,
+    };
+    byQuizId.set(quiz.id, entry);
+    const titleKey = normReconcileKey(quiz.title);
+    if (titleKey) {
+      const arr = byNormTitle.get(titleKey) ?? [];
+      arr.push(entry);
+      byNormTitle.set(titleKey, arr);
+    }
+  }
+
+  return { byQuizId, byNormTitle, globalById, globalByNormText, globalByLooseText };
+}
+
+function lookupIdInMap(
+  map: Map<string, QuizQuestion>,
+  eqId: string | undefined,
+  sourceQuizId: string | undefined
+): QuizQuestion | undefined {
+  if (!eqId) return undefined;
+  const direct = map.get(eqId);
+  if (direct) return direct;
+  if (sourceQuizId && eqId.startsWith(`${sourceQuizId}:`)) {
+    const stripped = eqId.slice(sourceQuizId.length + 1);
+    const hit = map.get(stripped);
+    if (hit) return hit;
+  }
+  const colonIdx = eqId.indexOf(':');
+  if (colonIdx > 0 && colonIdx < eqId.length - 1) {
+    return map.get(eqId.slice(colonIdx + 1));
+  }
+  return undefined;
+}
+
+function findLatestMatchForExamQuestion(
+  eq: ExamQuestion,
+  idx: number,
+  index: QuizLookupIndex,
+  options?: { allowSingleQuizPositionalFallback?: boolean; totalQuestions?: number }
+): { quiz?: MyQuiz; qq: QuizQuestion } | null {
+  const sourceMap = eq.sourceQuizId ? index.byQuizId.get(eq.sourceQuizId) : undefined;
+  const normText = normReconcileKey(eq.text);
+  const looseText = looseReconcileKey(eq.text);
+
+  if (sourceMap) {
+    const direct =
+      lookupIdInMap(sourceMap.byId, eq.id, eq.sourceQuizId) ||
+      (normText ? sourceMap.byNormText.get(normText) : undefined) ||
+      (looseText ? sourceMap.byLooseText.get(looseText) : undefined);
+    if (direct) return { quiz: sourceMap.quiz, qq: direct };
+
+    if (
+      options?.allowSingleQuizPositionalFallback &&
+      options.totalQuestions === sourceMap.questions.length &&
+      idx >= 0 &&
+      idx < sourceMap.questions.length
+    ) {
+      const positional = sourceMap.questions[idx];
+      if (positional && isExamReady(positional)) {
+        return { quiz: sourceMap.quiz, qq: positional };
+      }
+    }
+  }
+
+  // Same-title quiz lookup (e.g. if quiz was re-imported with same title)
+  const titleKey = normReconcileKey(eq.sourceTitle);
+  if (titleKey) {
+    const candidates = index.byNormTitle.get(titleKey);
+    if (candidates) {
+      for (const lk of candidates) {
+        const hit =
+          lookupIdInMap(lk.byId, eq.id, lk.quiz.id) ||
+          (normText ? lk.byNormText.get(normText) : undefined) ||
+          (looseText ? lk.byLooseText.get(looseText) : undefined);
+        if (hit) return { quiz: lk.quiz, qq: hit };
+      }
+    }
+  }
+
+  // Global fallback (covers starred, coach_mistakes_review, mix, or re-imported quizzes)
+  if (eq.id) {
+    const directGlobal = index.globalById.get(eq.id);
+    if (directGlobal) return directGlobal;
+    const colonIdx = eq.id.indexOf(':');
+    if (colonIdx > 0 && colonIdx < eq.id.length - 1) {
+      const strippedGlobal = index.globalById.get(eq.id.slice(colonIdx + 1));
+      if (strippedGlobal) return strippedGlobal;
+    }
+  }
+  if (normText) {
+    const hit = index.globalByNormText.get(normText);
+    if (hit) return hit;
+  }
+  if (looseText) {
+    const hit = index.globalByLooseText.get(looseText);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function examQuestionsDiffer(a: ExamQuestion, b: ExamQuestion): boolean {
+  return (
+    a.text !== b.text ||
+    a.sourceTitle !== b.sourceTitle ||
+    a.correctIndex !== b.correctIndex ||
+    a.explanation !== b.explanation ||
+    a.questionType !== b.questionType ||
+    JSON.stringify(a.choices) !== JSON.stringify(b.choices) ||
+    JSON.stringify(a.table ?? null) !== JSON.stringify(b.table ?? null) ||
+    JSON.stringify(a.laws ?? null) !== JSON.stringify(b.laws ?? null) ||
+    JSON.stringify(a.figure ?? null) !== JSON.stringify(b.figure ?? null) ||
+    JSON.stringify(a.chart ?? null) !== JSON.stringify(b.chart ?? null) ||
+    JSON.stringify(a.explanationTable ?? null) !== JSON.stringify(b.explanationTable ?? null) ||
+    JSON.stringify(a.explanationComparison ?? null) !== JSON.stringify(b.explanationComparison ?? null) ||
+    JSON.stringify(a.explanationChart ?? null) !== JSON.stringify(b.explanationChart ?? null) ||
+    JSON.stringify(a.explanationFigure ?? null) !== JSON.stringify(b.explanationFigure ?? null)
+  );
+}
+
+export function reconcileExamQuestionsWithQuizzes(
+  questions: ExamQuestion[],
+  quizzes: MyQuiz[],
+  shuffleChoices = false
+): ExamQuestion[] {
+  if (!Array.isArray(questions) || questions.length === 0 || !Array.isArray(quizzes) || quizzes.length === 0) {
+    return questions;
+  }
+  const index = buildQuizLookupIndex(quizzes);
+  let changed = false;
+  const next = questions.map((eq, idx) => {
+    if (!eq || typeof eq !== 'object') return eq;
+    const hit = findLatestMatchForExamQuestion(eq, idx, index);
+    if (!hit || !isExamReady(hit.qq)) return eq;
+    const latestQ = hit.qq;
+    const isTable = latestQ.questionType === 'table' || Boolean(latestQ.table && latestQ.choices.length === 0);
+    const updated = isTable
+      ? buildUpdatedExamQuestion(eq, latestQ, [], -1, hit.quiz?.title)
+      : (() => {
+          const r = reconcileMcqChoicesAndAnswer(eq, latestQ, -1, shuffleChoices);
+          return buildUpdatedExamQuestion(eq, latestQ, r.choices, r.correctIndex, hit.quiz?.title);
+        })();
+    if (examQuestionsDiffer(updated, eq)) {
+      changed = true;
+      return updated;
+    }
+    return eq;
+  });
+  return changed ? next : questions;
+}
+
+export function reconcileStarredItemsWithQuizzes(
+  items: StarredQuestion[],
+  quizzes: MyQuiz[]
+): StarredQuestion[] {
+  if (!Array.isArray(items) || items.length === 0 || !Array.isArray(quizzes) || quizzes.length === 0) {
+    return items;
+  }
+  const index = buildQuizLookupIndex(quizzes);
+  let changed = false;
+  const next = items.map((item) => {
+    if (!item?.question) return item;
+    const qq = item.question;
+    const pseudoEq: ExamQuestion = {
+      id: qq.id || item.id,
+      sourceQuizId: item.sourceQuizId || '',
+      sourceTitle: item.sourceTitle || '',
+      questionType: qq.questionType,
+      laws: qq.laws,
+      table: qq.table,
+      chart: qq.chart,
+      figure: qq.figure,
+      explanationChart: qq.explanationChart,
+      explanationFigure: qq.explanationFigure,
+      explanationTable: qq.explanationTable,
+      explanationComparison: qq.explanationComparison,
+      text: qq.text,
+      choices: Array.isArray(qq.choices) ? qq.choices : [],
+      correctIndex: Number.isInteger(qq.correctIndex) ? qq.correctIndex : -1,
+      explanation: qq.explanation || '',
+    };
+    const hit = findLatestMatchForExamQuestion(pseudoEq, -1, index);
+    if (!hit || !isExamReady(hit.qq)) return item;
+    const latestQ = hit.qq;
+    const nextQuestion: QuizQuestion = {
+      ...latestQ,
+      id: qq.id || latestQ.id,
+    };
+    const nextSourceTitle = hit.quiz?.title || item.sourceTitle;
+    if (
+      JSON.stringify(nextQuestion) !== JSON.stringify(item.question) ||
+      nextSourceTitle !== item.sourceTitle
+    ) {
+      changed = true;
+      return {
+        ...item,
+        ...(nextSourceTitle ? { sourceTitle: nextSourceTitle } : {}),
+        question: nextQuestion,
+      };
+    }
+    return item;
+  });
+  return changed ? next : items;
 }
 
 /**
@@ -692,32 +1058,7 @@ export function reconcileAttemptsWithQuizzes(
   if (!Array.isArray(attempts) || attempts.length === 0) return attempts;
   if (!Array.isArray(quizzes) || quizzes.length === 0) return attempts;
 
-  const byQuizId = new Map<
-    string,
-    { byId: Map<string, QuizQuestion>; byNormText: Map<string, QuizQuestion> }
-  >();
-  const globalById = new Map<string, QuizQuestion>();
-  const globalByNormText = new Map<string, QuizQuestion>();
-
-  for (const quiz of quizzes) {
-    if (!quiz?.id || !Array.isArray(quiz.questions)) continue;
-    const byId = new Map<string, QuizQuestion>();
-    const byNormText = new Map<string, QuizQuestion>();
-    for (const qq of quiz.questions) {
-      if (!qq || typeof qq !== 'object') continue;
-      if (qq.id) {
-        byId.set(qq.id, qq);
-        if (!globalById.has(qq.id)) globalById.set(qq.id, qq);
-      }
-      const key = normReconcileKey(qq.text);
-      if (key) {
-        if (!byNormText.has(key)) byNormText.set(key, qq);
-        if (!globalByNormText.has(key)) globalByNormText.set(key, qq);
-      }
-    }
-    byQuizId.set(quiz.id, { byId, byNormText });
-  }
-
+  const index = buildQuizLookupIndex(quizzes);
   let anyAttemptChanged = false;
 
   const reconciled = attempts.map((attempt) => {
@@ -728,34 +1069,30 @@ export function reconcileAttemptsWithQuizzes(
 
     let modified = false;
     const shuffleChoices = Boolean(attempt.settings?.shuffleChoices);
+    const allowSingleQuizPositionalFallback =
+      attempt.settings?.sourceMode === 'single' &&
+      !attempt.settings?.shuffleQuestions &&
+      !attempt.settings?.mistakeReviewMode;
     const nextAnswers = prevAnswers.slice();
 
     const nextQuestions = prevQuestions.map((eq, idx) => {
       if (!eq || typeof eq !== 'object') return eq;
 
-      const sourceMap = eq.sourceQuizId ? byQuizId.get(eq.sourceQuizId) : undefined;
-      let latestQ: QuizQuestion | undefined;
-      if (sourceMap) {
-        latestQ =
-          (eq.id ? sourceMap.byId.get(eq.id) : undefined) ||
-          sourceMap.byNormText.get(normReconcileKey(eq.text));
-      } else {
-        latestQ =
-          (eq.id ? globalById.get(eq.id) : undefined) ||
-          (eq.sourceQuizId === 'starred' || eq.sourceQuizId === 'coach_mistakes_review'
-            ? globalByNormText.get(normReconcileKey(eq.text))
-            : undefined);
-      }
-
+      const hit = findLatestMatchForExamQuestion(eq, idx, index, {
+        allowSingleQuizPositionalFallback,
+        totalQuestions: prevQuestions.length,
+      });
+      const latestQ = hit?.qq;
       if (!latestQ || !isExamReady(latestQ)) return eq;
 
       const isTable = latestQ.questionType === 'table' || Boolean(latestQ.table && latestQ.choices.length === 0);
       let nextQ: ExamQuestion;
 
       if (isTable) {
-        nextQ = buildUpdatedExamQuestion(eq, latestQ, [], -1);
-        if (latestQ.table) {
-          const g = gradeTableQuestion(latestQ.table, attempt.tableAnswers?.[String(idx)]);
+        nextQ = buildUpdatedExamQuestion(eq, latestQ, [], -1, hit?.quiz?.title);
+        const rawTableAns = attempt.tableAnswers?.[eq.id] || attempt.tableAnswers?.[String(idx)];
+        if (latestQ.table && rawTableAns && Object.keys(rawTableAns).length > 0) {
+          const g = gradeTableQuestion(latestQ.table, rawTableAns);
           const regraded = g.answeredBlanks === 0 ? -1 : g.isAllCorrect ? 1 : 0;
           if (nextAnswers[idx] !== regraded) {
             nextAnswers[idx] = regraded;
@@ -763,30 +1100,35 @@ export function reconcileAttemptsWithQuizzes(
           }
         }
       } else {
-        const mcq = reconcileMcqChoicesAndCorrectIndex(eq, latestQ, shuffleChoices);
-        nextQ = buildUpdatedExamQuestion(eq, latestQ, mcq.choices, mcq.correctIndex);
+        const oldAns = Number.isInteger(prevAnswers[idx]) ? prevAnswers[idx] : -1;
+        const mcq = reconcileMcqChoicesAndAnswer(eq, latestQ, oldAns, shuffleChoices);
+        nextQ = buildUpdatedExamQuestion(eq, latestQ, mcq.choices, mcq.correctIndex, hit?.quiz?.title);
+        if (nextAnswers[idx] !== mcq.nextAnswer) {
+          nextAnswers[idx] = mcq.nextAnswer;
+          modified = true;
+        }
       }
 
-      if (
-        nextQ.text !== eq.text ||
-        nextQ.correctIndex !== eq.correctIndex ||
-        nextQ.explanation !== eq.explanation ||
-        nextQ.questionType !== eq.questionType ||
-        JSON.stringify(nextQ.choices) !== JSON.stringify(eq.choices) ||
-        JSON.stringify(nextQ.table ?? null) !== JSON.stringify(eq.table ?? null) ||
-        JSON.stringify(nextQ.laws ?? null) !== JSON.stringify(eq.laws ?? null) ||
-        JSON.stringify(nextQ.figure ?? null) !== JSON.stringify(eq.figure ?? null) ||
-        JSON.stringify(nextQ.chart ?? null) !== JSON.stringify(eq.chart ?? null) ||
-        JSON.stringify(nextQ.explanationTable ?? null) !== JSON.stringify(eq.explanationTable ?? null) ||
-        JSON.stringify(nextQ.explanationComparison ?? null) !== JSON.stringify(eq.explanationComparison ?? null) ||
-        JSON.stringify(nextQ.explanationChart ?? null) !== JSON.stringify(eq.explanationChart ?? null) ||
-        JSON.stringify(nextQ.explanationFigure ?? null) !== JSON.stringify(eq.explanationFigure ?? null)
-      ) {
+      if (examQuestionsDiffer(nextQ, eq)) {
         modified = true;
         return nextQ;
       }
       return eq;
     });
+
+    let nextTitle = attempt.title;
+    if (
+      attempt.settings?.sourceMode === 'single' &&
+      !attempt.settings?.mistakeReviewMode &&
+      Array.isArray(attempt.settings.quizIds) &&
+      attempt.settings.quizIds.length === 1
+    ) {
+      const matchedQuiz = index.byQuizId.get(attempt.settings.quizIds[0])?.quiz;
+      if (matchedQuiz?.title && matchedQuiz.title !== attempt.title) {
+        nextTitle = matchedQuiz.title;
+        modified = true;
+      }
+    }
 
     const nextScore = scoreExam(nextQuestions, nextAnswers, attempt.tableAnswers);
     if (!modified && nextScore === attempt.score) {
@@ -796,6 +1138,7 @@ export function reconcileAttemptsWithQuizzes(
     anyAttemptChanged = true;
     return {
       ...attempt,
+      title: nextTitle,
       questions: nextQuestions,
       answers: nextAnswers,
       score: nextScore,

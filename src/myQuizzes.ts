@@ -832,8 +832,15 @@ function parseQuestionsList(
       }
       if (correctIndex === -1 && answer) {
         const lower = answer.toLowerCase();
+        const normAns = answer.replace(/\s+/g, ' ').trim().toLowerCase();
         if (choices.includes(answer)) correctIndex = choices.indexOf(answer);
         else if (lower in LETTER_INDEX && LETTER_INDEX[lower] < choices.length) correctIndex = LETTER_INDEX[lower];
+        else {
+          const normHit = choices.findIndex(
+            (c) => c.replace(/\s+/g, ' ').trim().toLowerCase() === normAns
+          );
+          if (normHit >= 0) correctIndex = normHit;
+        }
       }
       if (correctIndex === -1) warnings.push(`${pfx}السؤال ${n}: لم تُحدد الإجابة الصحيحة، اخترها أثناء التعديل.`);
       answer = correctIndex >= 0 ? choices[correctIndex] : '';
@@ -1042,6 +1049,24 @@ export function quizToExportJson(
   );
 }
 
+function serializeQuestionForEditableJson(q: QuizQuestion) {
+  const isTable = q.questionType === 'table' || Boolean(q.table && (!q.choices || q.choices.length === 0));
+  return {
+    questionType: isTable ? 'table' : 'mcq',
+    text: q.text,
+    ...(q.laws && q.laws.length > 0 ? { laws: q.laws } : {}),
+    ...(q.table ? { table: q.table } : {}),
+    ...(!isTable ? { choices: q.choices, correctIndex: q.correctIndex } : {}),
+    explanation: q.explanation,
+    ...(q.chart ? { chart: q.chart } : {}),
+    ...(q.figure ? { figure: q.figure } : {}),
+    ...(q.explanationChart ? { explanationChart: q.explanationChart } : {}),
+    ...(q.explanationFigure ? { explanationFigure: q.explanationFigure } : {}),
+    ...(q.explanationTable ? { explanationTable: q.explanationTable } : {}),
+    ...(q.explanationComparison ? { explanationComparison: q.explanationComparison } : {}),
+  };
+}
+
 export function quizToEditableJson(
   title: string,
   questions: QuizQuestion[],
@@ -1052,7 +1077,7 @@ export function quizToEditableJson(
       title,
       ...(meta?.ruleTitle ? { ruleTitle: meta.ruleTitle } : {}),
       ...(meta?.drillStyle ? { drillStyle: meta.drillStyle } : {}),
-      questions: questions.map(serializeQuestionForExport),
+      questions: questions.map(serializeQuestionForEditableJson),
     },
     null,
     2

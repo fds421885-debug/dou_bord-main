@@ -90,6 +90,8 @@ import {
   isQuestionAnswered,
   newAttemptId,
   reconcileAttemptsWithQuizzes,
+  reconcileExamQuestionsWithQuizzes,
+  reconcileStarredItemsWithQuizzes,
 } from '../exam';
 import { MathText } from '../mathText';
 import { QuizEditor } from './QuizEditor';
@@ -345,6 +347,11 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   const attempts = useMemo<QuizAttempt[]>(
     () => reconcileAttemptsWithQuizzes(rawAttempts, mergedQuizzes),
     [rawAttempts, mergedQuizzes]
+  );
+
+  const reconciledStarredItems = useMemo<StarredQuestion[]>(
+    () => reconcileStarredItemsWithQuizzes(starredItems, mergedQuizzes),
+    [starredItems, mergedQuizzes]
   );
 
   useEffect(() => {
@@ -809,7 +816,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
 
   /* ---------------- عرض اختبار ---------------- */
   if (mode.kind === 'view') {
-    const q = mode.quiz;
+    const q = mergedQuizzes.find((x) => x.id === mode.quiz.id) ?? mode.quiz;
     return (
       <div className="max-w-3xl mx-auto w-full flex flex-col gap-4">
         <button type="button" onClick={() => setMode({ kind: 'list' })} className="self-start flex items-center gap-1 text-xs font-black text-[#777777] cursor-pointer">
@@ -879,7 +886,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
   }
 
   const startStarredExam = (showLawsOverride?: boolean) => {
-    const readyQuestions: ExamQuestion[] = starredItems
+    const readyQuestions: ExamQuestion[] = reconciledStarredItems
       .filter((st) => isExamReady(st.question))
       .map((st) => ({
         id: st.id,
@@ -1063,7 +1070,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
           profile={profile}
           attempts={attempts}
           quizzes={mergedQuizzes}
-          starredItems={starredItems}
+          starredItems={reconciledStarredItems}
           onStartQuiz={(q) => startSingleQuizNow(q)}
           onStartQuickQuiz={(qq, msgId) => startCoachQuickQuiz(qq, msgId)}
           onStartMistakesReview={(qs, title) => startMistakesReview(qs, title)}
@@ -1087,19 +1094,19 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                 </p>
               </div>
             </div>
-            {starredItems.length > 0 && (
+            {reconciledStarredItems.length > 0 && (
               <button
                 type="button"
                 onClick={() => startStarredExam()}
                 className="duo-btn flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-[#FFC800] hover:bg-[#FFD426] border-2 border-b-4 border-[#E5A400] text-[#3C3C3C] text-xs font-black cursor-pointer shrink-0"
               >
                 <Play className="w-4 h-4" />
-                <span>اختبر نفسي بالأسئلة المميزة ({starredItems.length})</span>
+                <span>اختبر نفسي بالأسئلة المميزة ({reconciledStarredItems.length})</span>
               </button>
             )}
           </div>
 
-          {starredItems.length === 0 ? (
+          {reconciledStarredItems.length === 0 ? (
             <div className={`${card} p-8 text-center flex flex-col items-center gap-2 text-[#777777]`}>
               <Star className="w-8 h-8 text-[#FFC800]" />
               <p className="text-sm font-black text-[#3C3C3C]">لا توجد أسئلة مميزة بعد</p>
@@ -1108,7 +1115,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               </p>
             </div>
           ) : (
-            starredItems.map((item, idx) => {
+            reconciledStarredItems.map((item, idx) => {
               const qq = item.question;
               const isTable = qq.questionType === 'table' && Boolean(qq.table);
               const expShown = Boolean(revealedStarExplanations[item.id]);
@@ -1406,7 +1413,11 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                   : setMode({
                       kind: 'examRun',
                       settings: session.settings,
-                      questions: session.questions,
+                      questions: reconcileExamQuestionsWithQuizzes(
+                        session.questions,
+                        mergedQuizzes,
+                        Boolean(session.settings?.shuffleChoices)
+                      ),
                       initial: {
                         answers: session.answers,
                         tableAnswers: session.tableAnswers,

@@ -287,9 +287,56 @@ export const QuizEditor: React.FC<Props> = ({
     try {
       const parsed = parseQuizBundleJson(jsonText);
       const nextTitle = parsed.title || (jsonText.trim().startsWith('[') ? title : '');
-      const reconciledQuestions = parsed.questions.map((pq, idx) =>
-        questions[idx]?.id && pq.id.startsWith('q_') ? { ...pq, id: questions[idx].id } : pq
-      );
+
+      const normalizeQText = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+      const sourcePool = questions.length > 0 ? questions : initialQuestions;
+      const usedIds = new Set<string>();
+      const idQueueByNormText = new Map<string, string[]>();
+
+      for (const eq of sourcePool) {
+        if (!eq?.id) continue;
+        const key = normalizeQText(eq.text || '');
+        if (!key) continue;
+        const arr = idQueueByNormText.get(key) ?? [];
+        arr.push(eq.id);
+        idQueueByNormText.set(key, arr);
+      }
+
+      // First pass: keep explicit IDs if matched to existing questions, or match unchanged text
+      const firstPass = parsed.questions.map((pq) => {
+        if (!pq.id.startsWith('q_')) {
+          usedIds.add(pq.id);
+          return pq;
+        }
+        const exactExisting = sourcePool.find((eq) => eq.id === pq.id);
+        if (exactExisting && !usedIds.has(exactExisting.id)) {
+          usedIds.add(exactExisting.id);
+          return pq;
+        }
+        const key = normalizeQText(pq.text || '');
+        const queue = key ? idQueueByNormText.get(key) : undefined;
+        while (queue && queue.length > 0) {
+          const candidate = queue.shift()!;
+          if (!usedIds.has(candidate)) {
+            usedIds.add(candidate);
+            return { ...pq, id: candidate };
+          }
+        }
+        return null;
+      });
+
+      // Second pass: for questions whose text was edited/replaced, keep unused ID at same slot
+      const reconciledQuestions = parsed.questions.map((pq, idx) => {
+        const hit = firstPass[idx];
+        if (hit) return hit;
+        const slotId = sourcePool[idx]?.id || initialQuestions[idx]?.id;
+        if (slotId && !usedIds.has(slotId)) {
+          usedIds.add(slotId);
+          return { ...pq, id: slotId };
+        }
+        return pq;
+      });
+
       const nextMeta: MyQuizMetaInput = {
         ...metaState,
         ...(parsed.ruleTitle ? { ruleTitle: parsed.ruleTitle } : {}),

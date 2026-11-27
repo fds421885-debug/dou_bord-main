@@ -35,7 +35,9 @@ import type {
   UserProfile,
 } from '../types';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
+import { decodeQuizQuestionFromFirestore, encodeDataTableForFirestore, sanitizeDataTable } from '../quizTable';
 import { formatTimeSeconds } from './CompetitionArena';
 import {
   DUO_IMAGES,
@@ -191,6 +193,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 choices: cq.question.choices,
                 correctIndex: cq.question.correctIndex,
                 explanation: (cq.question.explanation || '').slice(0, 2000),
+                ...(cq.question.dataTable ? { dataTable: sanitizeDataTable(cq.question.dataTable) ?? undefined } : {}),
                 ...(cq.question.chart ? { chart: cq.question.chart } : {}),
                 ...(cq.question.figure ? { figure: cq.question.figure } : {}),
                 ...(cq.question.explanationChart ? { explanationChart: cq.question.explanationChart } : {}),
@@ -281,7 +284,11 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
             query(collection(db, 'rooms', liveRoom.id, 'questions'), where('roomId', '==', liveRoom.id))
           );
           const rawQuestions: Question[] = [];
-          qSnap.forEach((d) => rawQuestions.push(d.data() as Question));
+          qSnap.forEach((d) =>
+            rawQuestions.push(
+              decodeQuizQuestionFromFirestore(d.data() as Record<string, unknown>) as unknown as Question
+            )
+          );
           rawQuestions.sort((a, b) => a.orderIndex - b.orderIndex);
 
           for (const q of rawQuestions) {
@@ -329,6 +336,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               text: q.text,
               imageData: q.imageData,
               ...(q.choices ? { choices: q.choices } : {}),
+              ...(q.dataTable ? { dataTable: sanitizeDataTable(q.dataTable) ?? undefined } : {}),
               ...(q.chart ? { chart: q.chart } : {}),
               ...(q.figure ? { figure: q.figure } : {}),
               status: q.status,
@@ -415,6 +423,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
               ...(sq.choices ? { choices: sq.choices } : {}),
               ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
               ...(sq.explanation ? { explanation: sq.explanation } : {}),
+              ...(sq.dataTable ? { dataTable: encodeDataTableForFirestore(sq.dataTable) } : {}),
               ...(sq.chart ? { chart: sq.chart } : {}),
               ...(sq.figure ? { figure: sq.figure } : {}),
               ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
@@ -449,6 +458,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                 ...(sq.choices ? { choices: sq.choices } : {}),
                 ...(typeof sq.correctIndex === 'number' ? { correctIndex: sq.correctIndex } : {}),
                 ...(sq.explanation ? { explanation: sq.explanation } : {}),
+                ...(sq.dataTable ? { dataTable: encodeDataTableForFirestore(sq.dataTable) } : {}),
                 ...(sq.chart ? { chart: sq.chart } : {}),
                 ...(sq.figure ? { figure: sq.figure } : {}),
                 ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
@@ -684,6 +694,7 @@ export const TestResultsView: React.FC<TestResultsViewProps> = ({
                     )}
                   </div>
 
+                  {q.dataTable && <DataTableView table={q.dataTable} className="max-w-lg" />}
                   {q.chart && <ChartView chart={q.chart} className="max-w-lg" />}
                   {q.figure && <FigureView figure={q.figure} className="max-w-lg" />}
 

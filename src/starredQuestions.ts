@@ -15,6 +15,7 @@ import { sanitizeFigure } from './quizFigure';
 import {
   decodeStarredQuestionFromFirestore,
   encodeQuestionFieldsForFirestore,
+  sanitizeDataTable,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
   sanitizeQuestionLaws,
@@ -58,13 +59,14 @@ function fnv1aHex(input: string): string {
 }
 
 export function computeStarredQuestionId(
-  q: Pick<QuizQuestion | ExamQuestion, 'text' | 'choices' | 'table'> | null | undefined
+  q: Pick<QuizQuestion | ExamQuestion, 'text' | 'choices' | 'table' | 'dataTable'> | null | undefined
 ): string {
   if (!q || typeof q !== 'object') return `star_empty`;
   const signature = JSON.stringify({
     t: String((q as { text?: unknown }).text ?? '').trim().slice(0, 300),
     c: Array.isArray(q.choices) ? q.choices.slice(0, 4).map((x) => String(x ?? '').trim().slice(0, 80)) : [],
     tb: q.table?.rows ? q.table.rows.length : 0,
+    dt: q.dataTable?.rows ? `${q.dataTable.rows.length}:${(q.dataTable.headers || []).join('|')}` : '',
   });
   return `star_${fnv1aHex(signature)}`;
 }
@@ -72,6 +74,7 @@ export function computeStarredQuestionId(
 export function cleanQuizQuestionForStar(raw: QuizQuestion | ExamQuestion): QuizQuestion {
   const questionType = raw.questionType === 'table' || raw.table ? 'table' : 'mcq';
   const table = raw.table ? sanitizeTableQuestion(raw.table) : null;
+  const dataTable = raw.dataTable ? sanitizeDataTable(raw.dataTable) : null;
   const chart = raw.chart ? sanitizeChart(raw.chart) : null;
   const figure = raw.figure ? sanitizeFigure(raw.figure) : null;
   const explanationChart = raw.explanationChart ? sanitizeChart(raw.explanationChart) : null;
@@ -97,6 +100,7 @@ export function cleanQuizQuestionForStar(raw: QuizQuestion | ExamQuestion): Quiz
         : '',
     explanation: String(raw.explanation || '').slice(0, 2000),
     ...(table ? { table } : {}),
+    ...(dataTable ? { dataTable } : {}),
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
     ...(explanationChart ? { explanationChart } : {}),

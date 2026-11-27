@@ -5,6 +5,7 @@ import type {
   ExplanationComparison,
   ExplanationTable,
   MyQuiz,
+  QuestionDataTable,
   QuestionKind,
   QuizChart,
   QuizFigure,
@@ -40,6 +41,7 @@ export interface StoredQuizAnswerMeta {
   answer: string;
   explanation: string;
   table?: QuizTableQuestion;
+  dataTable?: QuestionDataTable;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;

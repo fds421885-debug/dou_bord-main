@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Clock, Flag, LogOut, Star } from 'lucide-react';
 import type { ExamQuestion, ExamSettings } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
 import { QuestionLawsBox } from './QuestionLawsBox';
 import { QuestionTableView } from './QuestionTableView';
@@ -300,6 +301,7 @@ export const ExamRunner: React.FC<Props> = ({
         )}
 
         <MathText text={q.text} className="text-base font-black text-[#3C3C3C] leading-relaxed" />
+        {q.dataTable && <DataTableView table={q.dataTable} />}
         {q.chart && <ChartView chart={q.chart} />}
         {q.figure && <FigureView figure={q.figure} />}
 

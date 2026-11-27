@@ -6,6 +6,7 @@ import { sanitizeFigure } from './quizFigure';
 import {
   encodeQuestionFieldsForFirestore,
   gradeTableQuestion,
+  sanitizeDataTable,
   sanitizeExplanationComparison,
   sanitizeExplanationTable,
   sanitizeQuestionLaws,
@@ -85,6 +86,7 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     correctIndex = order.indexOf(q.correctIndex);
   }
   const table = isTable && q.table ? sanitizeTableQuestion(q.table) : null;
+  const dataTable = q.dataTable ? sanitizeDataTable(q.dataTable) : null;
   const chart = q.chart ? sanitizeChart(q.chart) : null;
   const figure = q.figure ? sanitizeFigure(q.figure) : null;
   const explanationChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
@@ -101,6 +103,7 @@ function toExamQuestion(q: QuizQuestion, quiz: MyQuiz, shuffleChoices: boolean):
     ...(isTable ? { questionType: 'table' as const } : {}),
     ...(laws ? { laws } : {}),
     ...(table ? { table } : {}),
+    ...(dataTable ? { dataTable } : {}),
     text: q.text,
     choices,
     correctIndex,
@@ -655,6 +658,7 @@ function buildUpdatedExamQuestion(
     ...(isTable ? { questionType: 'table' as const } : { questionType: 'mcq' as const }),
     ...(latestQ.laws && latestQ.laws.length > 0 ? { laws: latestQ.laws } : {}),
     ...(isTable && latestQ.table ? { table: latestQ.table } : {}),
+    ...(latestQ.dataTable ? { dataTable: latestQ.dataTable } : {}),
     ...(latestQ.chart ? { chart: latestQ.chart } : {}),
     ...(latestQ.figure ? { figure: latestQ.figure } : {}),
     ...(latestQ.explanationChart ? { explanationChart: latestQ.explanationChart } : {}),
@@ -952,6 +956,7 @@ function examQuestionsDiffer(a: ExamQuestion, b: ExamQuestion): boolean {
     a.questionType !== b.questionType ||
     JSON.stringify(a.choices) !== JSON.stringify(b.choices) ||
     JSON.stringify(a.table ?? null) !== JSON.stringify(b.table ?? null) ||
+    JSON.stringify(a.dataTable ?? null) !== JSON.stringify(b.dataTable ?? null) ||
     JSON.stringify(a.laws ?? null) !== JSON.stringify(b.laws ?? null) ||
     JSON.stringify(a.figure ?? null) !== JSON.stringify(b.figure ?? null) ||
     JSON.stringify(a.chart ?? null) !== JSON.stringify(b.chart ?? null) ||
@@ -1012,6 +1017,7 @@ export function reconcileStarredItemsWithQuizzes(
       questionType: qq.questionType,
       laws: qq.laws,
       table: qq.table,
+      dataTable: qq.dataTable,
       chart: qq.chart,
       figure: qq.figure,
       explanationChart: qq.explanationChart,

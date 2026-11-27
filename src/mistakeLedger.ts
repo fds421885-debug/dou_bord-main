@@ -25,7 +25,7 @@ function fnv1aHex(input: string, seed = 0x811c9dc5): string {
  * مما يتيح مطابقة السؤال نفسه في المحاولات اللاحقة واختبارات المساعد الذكي.
  */
 export function computeQuestionFingerprint(
-  q: Pick<ExamQuestion | QuizQuestion, 'text' | 'questionType' | 'choices' | 'table'> | null | undefined
+  q: Pick<ExamQuestion | QuizQuestion, 'text' | 'questionType' | 'choices' | 'table' | 'dataTable'> | null | undefined
 ): string {
   if (!q || typeof q !== 'object') {
     return 'err_invalid';
@@ -65,7 +65,16 @@ export function computeQuestionFingerprint(
     detail = `mcq::${choices}`;
   }
 
-  const base = `${normText}##${detail}`;
+  let dataSig = '';
+  if (q.dataTable && typeof q.dataTable === 'object') {
+    const dtHeaders = (Array.isArray(q.dataTable.headers) ? q.dataTable.headers : []).map(normalizeText).join('|');
+    const dtRows = (Array.isArray(q.dataTable.rows) ? q.dataTable.rows : [])
+      .map((r) => unwrapRowArray(r).map(normalizeText).join(','))
+      .join(';');
+    dataSig = `##dt::${dtHeaders}::${dtRows}`;
+  }
+
+  const base = `${normText}##${detail}${dataSig}`;
   return `err_${fnv1aHex(base, 0x811c9dc5)}${fnv1aHex(base.split('').reverse().join(''), 0x9e3779b9)}`;
 }
 
@@ -138,6 +147,7 @@ function examQuestionToQuizQuestion(eq: ExamQuestion, fp: string): QuizQuestion 
     explanation: asSafeText((eq as { explanation?: unknown }).explanation),
     ...(Array.isArray(eq.laws) && eq.laws.length > 0 ? { laws: eq.laws.slice() } : {}),
     ...(eq.table ? { table: eq.table } : {}),
+    ...(eq.dataTable ? { dataTable: eq.dataTable } : {}),
     ...(eq.chart ? { chart: eq.chart } : {}),
     ...(eq.figure ? { figure: eq.figure } : {}),
     ...(eq.explanationChart ? { explanationChart: eq.explanationChart } : {}),

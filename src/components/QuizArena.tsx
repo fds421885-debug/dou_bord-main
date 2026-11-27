@@ -87,6 +87,7 @@ import type {
   QuizQuestion,
   Room,
   SharedExplainBoard,
+  QuestionDataTable,
   SlideLayer,
   Stroke,
   StudentBoard,
@@ -117,7 +118,9 @@ import {
 } from './WhiteboardCanvas';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
+import { decodeQuizQuestionFromFirestore, encodeDataTableForFirestore } from '../quizTable';
 import {
   buildRoomQuizPool,
   type RoomQuizEntry,
@@ -209,6 +212,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
   const [includeQuizChoices, setIncludeQuizChoices] = useState(true);
   const [draftQuizAttachment, setDraftQuizAttachment] = useState<{
     choices?: string[];
+    dataTable?: QuestionDataTable;
     chart?: QuizChart;
     figure?: QuizFigure;
     answerMeta?: StoredQuizAnswerMeta;
@@ -371,7 +375,11 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       qRef,
       (snap) => {
         const list: Question[] = [];
-        snap.forEach((d) => list.push(d.data() as Question));
+        snap.forEach((d) =>
+          list.push(
+            decodeQuizQuestionFromFirestore(d.data() as Record<string, unknown>) as unknown as Question
+          )
+        );
         list.sort((a, b) => a.orderIndex - b.orderIndex);
         setQuestions(list);
       },
@@ -941,6 +949,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     text: string;
     imageData: string;
     choices?: string[];
+    dataTable?: QuestionDataTable;
     chart?: QuizChart;
     figure?: QuizFigure;
     sourceQuizTitle?: string;
@@ -974,6 +983,12 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       };
       if (params.choices && params.choices.length > 0) {
         payload.choices = params.choices.slice(0, 8);
+      }
+      if (params.dataTable) {
+        const encodedDataTable = encodeDataTableForFirestore(params.dataTable);
+        if (encodedDataTable) {
+          payload.dataTable = encodedDataTable;
+        }
       }
       if (params.chart) {
         payload.chart = params.chart;
@@ -1022,7 +1037,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
 
     const { text: cleanText, imageData: finalImageData } = getDraftPayload();
 
-    if (!cleanText && !finalImageData && !draftQuizAttachment?.chart && !draftQuizAttachment?.figure) {
+    if (!cleanText && !finalImageData && !draftQuizAttachment?.dataTable && !draftQuizAttachment?.chart && !draftQuizAttachment?.figure) {
       setDraftError(
         composerTab === 'pdf'
           ? 'ارفع ملف PDF وحدد الصفحة المطلوب إظهارها للطلاب أولاً'
@@ -1040,6 +1055,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         includeQuizChoices && draftQuizAttachment?.choices?.length
           ? draftQuizAttachment.choices
           : undefined,
+      dataTable: draftQuizAttachment?.dataTable,
       chart: draftQuizAttachment?.chart,
       figure: draftQuizAttachment?.figure,
       sourceQuizTitle: draftQuizAttachment?.answerMeta?.sourceQuizTitle,
@@ -1056,6 +1072,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
       text: qq.text.slice(0, 2000),
       imageData: '',
       choices: includeQuizChoices && qq.choices?.length ? qq.choices : undefined,
+      dataTable: qq.dataTable,
       chart: qq.chart,
       figure: qq.figure,
       sourceQuizTitle: entry.quiz.title,
@@ -1064,6 +1081,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         correctIndex: qq.correctIndex,
         answer: answerText,
         explanation: qq.explanation || '',
+        ...(qq.dataTable ? { dataTable: qq.dataTable } : {}),
         ...(qq.explanationChart ? { explanationChart: qq.explanationChart } : {}),
         ...(qq.explanationFigure ? { explanationFigure: qq.explanationFigure } : {}),
         sourceQuizTitle: entry.quiz.title,
@@ -1080,6 +1098,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
     setDraftImage('');
     setDraftQuizAttachment({
       choices: qq.choices,
+      dataTable: qq.dataTable,
       chart: qq.chart,
       figure: qq.figure,
       answerMeta: {
@@ -1087,6 +1106,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
         correctIndex: qq.correctIndex,
         answer: answerText,
         explanation: qq.explanation || '',
+        ...(qq.dataTable ? { dataTable: qq.dataTable } : {}),
         ...(qq.explanationChart ? { explanationChart: qq.explanationChart } : {}),
         ...(qq.explanationFigure ? { explanationFigure: qq.explanationFigure } : {}),
         sourceQuizTitle: entry.quiz.title,
@@ -2922,6 +2942,10 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
               )}
             </div>
 
+            {currentQuestion.dataTable && (
+              <DataTableView table={currentQuestion.dataTable} className="max-w-xl w-full" />
+            )}
+
             {currentQuestion.chart && (
               <ChartView chart={currentQuestion.chart} className="max-w-xl w-full" />
             )}
@@ -3451,6 +3475,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                                   className="text-sm sm:text-base font-black text-[#3C3C3C]"
                                 />
 
+                                {qq.dataTable && <DataTableView table={qq.dataTable} className="max-w-md w-full" compact />}
                                 {qq.chart && <ChartView chart={qq.chart} className="max-w-md w-full" />}
                                 {qq.figure && <FigureView figure={qq.figure} className="max-w-md w-full" compact />}
 
@@ -3496,6 +3521,7 @@ export const QuizArena: React.FC<QuizArenaProps> = ({
                     <div className="p-3 rounded-2xl bg-[#F3E8FF] border-2 border-[#CE82FF] flex flex-wrap items-center justify-between gap-2">
                       <span className="text-xs font-black text-[#6D23B6]">
                         مرفق سؤال من الاختبار ({draftQuizAttachment.answerMeta?.sourceQuizTitle || 'اختبار'})
+                        {draftQuizAttachment.dataTable ? ' · يحتوي جدول معطيات' : ''}
                         {draftQuizAttachment.chart ? ' · يحتوي رسم بياني' : ''}
                         {draftQuizAttachment.figure ? ' · يحتوي شكل هندسي' : ''}
                         {draftQuizAttachment.choices?.length ? ` · ${draftQuizAttachment.choices.length} خيارات` : ''}

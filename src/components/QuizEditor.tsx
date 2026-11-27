@@ -26,6 +26,7 @@ import { MathText } from '../mathText';
 import { applySnippet, MathToolbar } from './MathToolbar';
 import { QuizChartEditor } from './QuizChartEditor';
 import { QuizFigureEditor } from './QuizFigureEditor';
+import { QuizDataTableEditor } from './DataTableView';
 import { QuestionTableView, QuizTableEditor } from './QuestionTableView';
 import { RichExplanationView } from './RichExplanationView';
 import { createDefaultTableQuestion } from '../quizTable';
@@ -797,6 +798,7 @@ export const QuizEditor: React.FC<Props> = ({
             )}
 
             <div className="flex flex-wrap items-start gap-2">
+              <QuizDataTableEditor dataTable={q.dataTable} onChange={(dt) => patch(q.id, { dataTable: dt })} />
               <QuizChartEditor chart={q.chart} onChange={(c) => patch(q.id, { chart: c })} />
               <QuizFigureEditor figure={q.figure} onChange={(f) => patch(q.id, { figure: f })} />
             </div>

@@ -2,8 +2,10 @@ import React from 'react';
 import { Lightbulb, Scale, Table2 } from 'lucide-react';
 import type { ExplanationComparison, ExplanationTable, QuizChart, QuizFigure } from '../types';
 import { MathText } from '../mathText';
+import { parseMarkdownTextBlocks } from '../markdownTable';
 import { unwrapRowArray } from '../quizTable';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
 
 interface Props {
@@ -12,63 +14,6 @@ interface Props {
   explanationComparison?: ExplanationComparison;
   explanationChart?: QuizChart;
   explanationFigure?: QuizFigure;
-}
-
-type TextBlock =
-  | { kind: 'text'; text: string }
-  | { kind: 'table'; headers: string[]; rows: string[][] };
-
-function isMarkdownDividerRow(line: string): boolean {
-  const clean = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-  const parts = clean.split('|').map((s) => s.trim());
-  return parts.length >= 2 && parts.every((p) => /^:?-{2,}:?$/.test(p));
-}
-
-function splitMarkdownCells(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((s) => s.trim());
-}
-
-/** يقسّم النص إلى فقرات وجداول Markdown إن وُجدت داخل explanation */
-function parseExplanationBlocks(input: string): TextBlock[] {
-  const lines = input.split('\n');
-  const blocks: TextBlock[] = [];
-  let textBuf: string[] = [];
-  let i = 0;
-
-  const flushText = () => {
-    const joined = textBuf.join('\n').trim();
-    if (joined) blocks.push({ kind: 'text', text: joined });
-    textBuf = [];
-  };
-
-  while (i < lines.length) {
-    const cur = lines[i] ?? '';
-    const next = lines[i + 1] ?? '';
-    if (cur.includes('|') && next.includes('|') && isMarkdownDividerRow(next)) {
-      const headers = splitMarkdownCells(cur);
-      const rows: string[][] = [];
-      let j = i + 2;
-      while (j < lines.length && lines[j].includes('|') && lines[j].trim().length > 0) {
-        rows.push(splitMarkdownCells(lines[j]));
-        j++;
-      }
-      if (headers.length >= 2 && rows.length >= 1) {
-        flushText();
-        blocks.push({ kind: 'table', headers, rows });
-        i = j;
-        continue;
-      }
-    }
-    textBuf.push(cur);
-    i++;
-  }
-  flushText();
-  return blocks;
 }
 
 export const RichExplanationView: React.FC<Props> = ({
@@ -87,7 +32,7 @@ export const RichExplanationView: React.FC<Props> = ({
   );
   if (!hasAny) return null;
 
-  const blocks = explanation?.trim() ? parseExplanationBlocks(explanation) : [];
+  const blocks = explanation?.trim() ? parseMarkdownTextBlocks(explanation) : [];
 
   return (
     <div
@@ -103,36 +48,7 @@ export const RichExplanationView: React.FC<Props> = ({
         b.kind === 'text' ? (
           <MathText key={idx} text={b.text} className="leading-relaxed" />
         ) : (
-          <div key={idx} className="w-full overflow-x-auto rounded-2xl border border-[#D0E7F9] bg-white">
-            <table className="w-full border-collapse text-xs">
-              <thead>
-                <tr className="bg-[#DDF4FF] border-b border-[#BCE3FA]">
-                  {b.headers.map((h, hi) => (
-                    <th
-                      key={hi}
-                      className="px-3 py-2 text-right font-black text-[#0E6BA8] border-l last:border-l-0 border-[#BCE3FA]"
-                    >
-                      <MathText text={h} />
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {b.rows.map((r, ri) => (
-                  <tr key={ri} className="border-b last:border-b-0 border-[#E5E5E5] even:bg-[#FAFAFA]">
-                    {b.headers.map((_, ci) => (
-                      <td
-                        key={ci}
-                        className="px-3 py-2 text-right font-bold text-[#3C3C3C] border-l last:border-l-0 border-[#E5E5E5]"
-                      >
-                        <MathText text={r[ci] ?? ''} />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTableView key={idx} table={b.table} compact />
         )
       )}
 

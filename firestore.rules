@@ -159,7 +159,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'roomId', 'orderIndex', 'text', 'imageData', 'choices', 'chart', 'figure',
-          'questionType', 'table', 'explanationTable', 'explanationComparison', 'sourceQuizTitle',
+          'questionType', 'table', 'dataTable', 'explanationTable', 'explanationComparison', 'sourceQuizTitle',
           'status', 'attemptsUsed', 'wrongStudentIds', 'winnerId', 'winnerName', 'timerSeconds',
           'createdAt', 'updatedAt'
         ])
@@ -177,6 +177,7 @@ service cloud.firestore {
         && (!('figure' in data) || data.figure is map)
         && (!('questionType' in data) || data.questionType in ['mcq', 'table'])
         && (!('table' in data) || data.table is map)
+        && (!('dataTable' in data) || data.dataTable is map)
         && (!('explanationTable' in data) || data.explanationTable is map)
         && (!('explanationComparison' in data) || data.explanationComparison is map)
         && (!('sourceQuizTitle' in data) || (data.sourceQuizTitle is string && data.sourceQuizTitle.size() <= 120))
@@ -308,7 +309,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'ownerId', 'orderIndex', 'text', 'imageData',
           'choices', 'correctIndex', 'explanation', 'chart', 'figure', 'explanationChart', 'explanationFigure',
-          'questionType', 'table', 'explanationTable', 'explanationComparison', 'winnerTimeMs',
+          'questionType', 'table', 'dataTable', 'explanationTable', 'explanationComparison', 'winnerTimeMs',
           'status', 'winnerName', 'boards', 'createdAt'
         ])
         && isValidId(data.id)
@@ -326,6 +327,7 @@ service cloud.firestore {
         && (!('explanationFigure' in data) || data.explanationFigure is map)
         && (!('questionType' in data) || data.questionType in ['mcq', 'table'])
         && (!('table' in data) || data.table is map)
+        && (!('dataTable' in data) || data.dataTable is map)
         && (!('explanationTable' in data) || data.explanationTable is map)
         && (!('explanationComparison' in data) || data.explanationComparison is map)
         && (!('winnerTimeMs' in data) || (data.winnerTimeMs is int && data.winnerTimeMs >= 0 && data.winnerTimeMs <= 172800000))

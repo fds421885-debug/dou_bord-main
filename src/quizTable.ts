@@ -2,6 +2,7 @@ import type {
   ExplanationComparison,
   ExplanationTable,
   MyQuiz,
+  QuestionDataTable,
   QuizAttempt,
   QuizTableQuestion,
   SharedQuiz,
@@ -9,6 +10,7 @@ import type {
   TableCellConfig,
   TableCellInputType,
 } from './types';
+import { inferDataTableSemantics, parseSingleMarkdownTable } from './markdownTable';
 
 export function unwrapRowArray(row: unknown): unknown[] {
   if (Array.isArray(row)) return row;
@@ -29,6 +31,15 @@ export const TABLE_LIMITS = {
   cellText: 240,
   cue: 40,
   expected: 240,
+} as const;
+
+export const DATA_TABLE_LIMITS = {
+  maxRows: 24,
+  maxCols: 10,
+  title: 140,
+  caption: 240,
+  legend: 200,
+  cellText: 240,
 } as const;
 
 export function emptyTableCell(value = ''): TableCellConfig {
@@ -351,6 +362,173 @@ export function sanitizeExplanationComparison(raw: unknown): ExplanationComparis
   };
 }
 
+function extractDataCellText(cell: unknown): string {
+  if (typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean') {
+    return String(cell).trim().slice(0, DATA_TABLE_LIMITS.cellText);
+  }
+  if (cell && typeof cell === 'object') {
+    const o = cell as Record<string, unknown>;
+    const raw = o.value ?? o.text ?? o.label ?? o.expectedAnswer ?? '';
+    return String(raw).trim().slice(0, DATA_TABLE_LIMITS.cellText);
+  }
+  return '';
+}
+
+export function sanitizeDataTable(raw: unknown): QuestionDataTable | null {
+  if (typeof raw === 'string') {
+    const parsedMd = parseSingleMarkdownTable(raw);
+    return parsedMd ? sanitizeDataTable(parsedMd) : null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const rawRowsSource = Array.isArray(o.rows)
+    ? o.rows
+    : Array.isArray(o.data)
+    ? o.data
+    : Array.isArray(o.body)
+    ? o.body
+    : [];
+  const rawRows = rawRowsSource.slice(0, DATA_TABLE_LIMITS.maxRows);
+
+  const rawHeadersSource = Array.isArray(o.headers)
+    ? o.headers
+    : Array.isArray(o.columns)
+    ? o.columns
+    : Array.isArray(o.cols)
+    ? o.cols
+    : [];
+  const rawHeaders = rawHeadersSource
+    .slice(0, DATA_TABLE_LIMITS.maxCols)
+    .map((h) => extractDataCellText(h));
+
+  let colCount = rawHeaders.length;
+  for (const r of rawRows) {
+    const arr = unwrapRowArray(r);
+    if (arr.length > 0) {
+      colCount = Math.max(colCount, Math.min(DATA_TABLE_LIMITS.maxCols, arr.length));
+    }
+  }
+  if (colCount === 0 || rawRows.length === 0) return null;
+
+  const headers = Array.from({ length: colCount }, (_, c) => rawHeaders[c] ?? '');
+  const rows = rawRows.map((r) => {
+    const arr = unwrapRowArray(r);
+    return Array.from({ length: colCount }, (_, c) => extractDataCellText(arr[c]));
+  });
+
+  const title = typeof o.title === 'string' ? o.title.trim().slice(0, DATA_TABLE_LIMITS.title) : '';
+  const caption = typeof o.caption === 'string' ? o.caption.trim().slice(0, DATA_TABLE_LIMITS.caption) : '';
+  const rawLegend = o.legend ?? o.key ?? o.tableKey ?? o['مفتاح'] ?? o['المفتاح'] ?? '';
+  const legend =
+    typeof rawLegend === 'string' ? rawLegend.trim().slice(0, DATA_TABLE_LIMITS.legend) : '';
+  const hasHeaderRow =
+    typeof o.hasHeaderRow === 'boolean'
+      ? o.hasHeaderRow
+      : headers.some((h) => h.trim().length > 0);
+
+  const sem = inferDataTableSemantics(
+    headers,
+    rows,
+    o.variant ?? o.kind ?? o.tableType ?? o['النوع'],
+    typeof o.stemColIndex === 'number' ? o.stemColIndex : undefined,
+    title,
+    legend
+  );
+
+  return {
+    ...(title ? { title } : {}),
+    ...(caption ? { caption } : {}),
+    ...(legend ? { legend } : {}),
+    ...(sem.variant !== 'default' ? { variant: sem.variant } : {}),
+    ...(sem.stemColIndex !== undefined && sem.stemColIndex < colCount
+      ? { stemColIndex: sem.stemColIndex }
+      : {}),
+    hasHeaderRow,
+    headers,
+    rows,
+  };
+}
+
+export function createDefaultDataTable(
+  preset: 'normal' | 'stemLeafSingle' | 'stemLeafDouble' = 'normal'
+): QuestionDataTable {
+  if (preset === 'stemLeafSingle') {
+    return {
+      title: 'تمثيل البيانات بالساق والورقة',
+      legend: 'مفتاح: 3|8 = 38',
+      variant: 'stemLeaf',
+      stemColIndex: 0,
+      hasHeaderRow: true,
+      headers: ['الساق', 'الأوراق'],
+      rows: [
+        ['3', '8 9'],
+        ['4', '1 3 4 5 7'],
+        ['5', '0 1 2'],
+      ],
+    };
+  }
+  if (preset === 'stemLeafDouble') {
+    return {
+      title: 'تمثيل الساق والورقة المزدوج للأوزان (كجم)',
+      legend: '8∣3 = 38 ، و 3∣9 = 39',
+      variant: 'stemLeaf',
+      stemColIndex: 1,
+      hasHeaderRow: true,
+      headers: ['6/ب (الأوراق)', 'الساق', '6/أ (الأوراق)'],
+      rows: [
+        ['9 9 9', '3', '8 9'],
+        ['6 6 4 2 2 2', '4', '1 3 4 4 5 7 9'],
+        ['5 2 1 1 1', '5', '0 1 2 3'],
+        ['3 0', '6', '0 0'],
+      ],
+    };
+  }
+  return {
+    title: 'جدول معطيات السؤال',
+    hasHeaderRow: true,
+    headers: ['الفئة', 'التكرار'],
+    rows: [
+      ['الأولى', '12'],
+      ['الثانية', '18'],
+      ['الثالثة', '10'],
+    ],
+  };
+}
+
+export function hasInteractiveTableBlanks(table: QuizTableQuestion | null | undefined): boolean {
+  if (!table || !Array.isArray(table.rows)) return false;
+  return table.rows.some((rawRow) =>
+    unwrapRowArray(rawRow).some((c) => Boolean(c && typeof c === 'object' && (c as TableCellConfig).isBlank))
+  );
+}
+
+export function interactiveTableToDataTable(
+  table: QuizTableQuestion | null | undefined
+): QuestionDataTable | null {
+  if (!table || !Array.isArray(table.rows) || table.rows.length === 0) return null;
+  const rows = table.rows.map((rawRow) =>
+    unwrapRowArray(rawRow).map((c) => extractDataCellText(c))
+  );
+  return sanitizeDataTable({
+    ...(table.title ? { title: table.title } : {}),
+    ...(table.caption ? { caption: table.caption } : {}),
+    hasHeaderRow: table.hasHeaderRow,
+    headers: table.headers ?? [],
+    rows,
+  });
+}
+
+export function dataTableProblem(dt: QuestionDataTable | undefined): string | null {
+  if (!dt || typeof dt !== 'object' || !Array.isArray(dt.rows) || dt.rows.length === 0) {
+    return 'أضف صفاً واحداً على الأقل في جدول المعطيات.';
+  }
+  const clean = sanitizeDataTable(dt);
+  if (!clean) return 'جدول المعطيات غير صالح.';
+  const hasAnyCell = clean.rows.some((r) => r.some((c) => c.trim().length > 0));
+  if (!hasAnyCell) return 'املأ خلية واحدة على الأقل في جدول المعطيات.';
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /*  تشفير وفك الجداول لقاعدة Firestore (لا تدعم مصفوفات داخل مصفوفات) */
 /* ------------------------------------------------------------------ */
@@ -379,12 +557,34 @@ export function encodeExplanationTableForFirestore(
   };
 }
 
+export function encodeDataTableForFirestore(
+  rawDataTable: unknown
+): Record<string, unknown> | null {
+  const clean = sanitizeDataTable(rawDataTable);
+  if (!clean) return null;
+  return {
+    ...(clean.title ? { title: clean.title } : {}),
+    ...(clean.caption ? { caption: clean.caption } : {}),
+    ...(clean.legend ? { legend: clean.legend } : {}),
+    ...(clean.variant && clean.variant !== 'default' ? { variant: clean.variant } : {}),
+    ...(typeof clean.stemColIndex === 'number' ? { stemColIndex: clean.stemColIndex } : {}),
+    hasHeaderRow: Boolean(clean.hasHeaderRow),
+    headers: clean.headers,
+    rows: clean.rows.map((cells) => ({ cells })),
+  };
+}
+
 export function encodeQuestionFieldsForFirestore<T extends Record<string, unknown>>(q: T): T {
   const out: Record<string, unknown> = { ...q };
   if ('table' in out) {
     const encodedTable = out.table ? encodeTableForFirestore(out.table) : null;
     if (encodedTable) out.table = encodedTable;
     else delete out.table;
+  }
+  if ('dataTable' in out) {
+    const encodedDataTable = out.dataTable ? encodeDataTableForFirestore(out.dataTable) : null;
+    if (encodedDataTable) out.dataTable = encodedDataTable;
+    else delete out.dataTable;
   }
   if ('explanationTable' in out) {
     const encodedExp = out.explanationTable
@@ -472,6 +672,16 @@ export function decodeQuizQuestionFromFirestore<T extends Record<string, unknown
       changed = true;
     } else {
       delete out.table;
+      changed = true;
+    }
+  }
+  if (out.dataTable) {
+    const decodedData = sanitizeDataTable(out.dataTable);
+    if (decodedData) {
+      out.dataTable = decodedData;
+      changed = true;
+    } else {
+      delete out.dataTable;
       changed = true;
     }
   }

@@ -99,6 +99,7 @@ export interface Question {
   figure?: QuizFigure;
   questionType?: QuestionKind;
   table?: QuizTableQuestion;
+  dataTable?: QuestionDataTable;
   explanationTable?: ExplanationTable;
   explanationComparison?: ExplanationComparison;
   sourceQuizTitle?: string;
@@ -160,6 +161,7 @@ export interface SavedQuestion {
   explanationFigure?: QuizFigure;
   questionType?: QuestionKind;
   table?: QuizTableQuestion;
+  dataTable?: QuestionDataTable;
   explanationTable?: ExplanationTable;
   explanationComparison?: ExplanationComparison;
   winnerTimeMs?: number;
@@ -329,6 +331,22 @@ export interface QuizTableQuestion {
   rows: TableCellConfig[][];
 }
 
+export type DataTableVariant = 'default' | 'stemLeaf' | 'frequency';
+
+/** جدول معطيات / استخراج معلومات للقراءة فقط (مثل الساق والورقة، الجداول التكرارية، الإحصاء، الاحتمالات) */
+export interface QuestionDataTable {
+  title?: string;
+  caption?: string;
+  /** مفتاح قراءة الجدول (مهم جداً للساق والورقة، مثال: "8∣3 = 38 ، و 3∣9 = 39") */
+  legend?: string;
+  variant?: DataTableVariant;
+  /** فهرس عمود الساق المميّز إن وُجد */
+  stemColIndex?: number;
+  hasHeaderRow?: boolean;
+  headers: string[];
+  rows: string[][];
+}
+
 export interface ExplanationTable {
   title?: string;
   headers: string[];
@@ -356,6 +374,7 @@ export interface QuizQuestion {
   explanation: string;
   laws?: string[];
   table?: QuizTableQuestion;
+  dataTable?: QuestionDataTable;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;
@@ -416,6 +435,7 @@ export interface ExamQuestion {
   explanation: string;
   laws?: string[];
   table?: QuizTableQuestion;
+  dataTable?: QuestionDataTable;
   chart?: QuizChart;
   figure?: QuizFigure;
   explanationChart?: QuizChart;

@@ -421,13 +421,16 @@ const DUOBOARD_QUESTION_SCHEMA_GUIDE = `
      * للمناطق المظللة: الشكل الخارجي أولاً (fill:"blue", fillOpacity:0.32) ثم الداخلي بعده (fill:"white", fillOpacity:1).
      * تسمية المثلث والرؤوس: اكتب في النص «المثلث $\\triangle\\text{ أ ب ج}$» أو «المثلث أ ب ج» وطابق الحروف نفسها حرفياً في figure.points مع labelPos مناسب للخارج وdot:true للرؤوس والمراكز.
      * أشرطة التطابق (ticks) وعلامات التساوي والتوازي (ضروري جداً!): كلما وُجدت أضلاع أو قطع متطابقة (مثلث متطابق الضلعين/الأضلاع، تنصيف قطعة، أوتار أو أنصاف أقطار متساوية) أضف أشرطة التطابق بدقة: على polygon استخدم "ticks": [1,0,1] بمحاذاة ترتيب points (ticks[i] للضلع points[i]→points[i+1])، وعلى segment استخدم "ticks": 1 | 2 | 3 (عدد مختلف لكل مجموعة متطابقة). وللزوايا المتساوية استخدم "angle.arcs": 1 | 2، وللتوازي استخدم "segment.parallel": 1 | 2، وللزاوية القائمة "angle.right": true.
+   - "dataTable": جدول معطيات قرائي لاستخراج المعلومات والإحصاء والاحتمالات وتمثيل الساق والورقة (يُستخدم مع "mcq" وليس بدل "table" التفاعلي):
+     { "title": "تمثيل الساق والورقة المزدوج", "legend": "8∣3 = 38 ، و 3∣9 = 39", "variant": "stemLeaf", "stemColIndex": 1, "hasHeaderRow": true, "headers": ["6/ب (الأوراق)", "الساق", "6/أ (الأوراق)"], "rows": [["9 9 9", "3", "8 9"], ["6 6 4 2 2 2", "4", "1 3 4 4 5 7 9"]], "caption": "..." }.
+     اجعل "variant" هو "stemLeaf" للساق والورقة، أو "frequency" للجداول التكرارية، أو "default" لجداول البيانات العادية.
    - "chart": رسم بياني { "type": "bar"|"hbar"|"line"|"pie", "title": "...", "xLabel": "...", "yLabel": "...", "labels": ["..."], "series": [{"name":"...","values":[10,20]}] }.
-   - "table": لأسئلة الجدول التفاعلي { "title":"...", "hasHeaderRow":true, "headers":["القيمة","النسبة"], "rows":[[{"value":"50","isBlank":false},{"value":"","isBlank":true,"inputType":"number","cue":"س","expectedAnswer":"25"}]] }.
+   - "table": لأسئلة الجدول التفاعلي التي يملؤها الطالب فقط (يجب وجود خلية واحدة على الأقل فيها isBlank: true) { "title":"...", "hasHeaderRow":true, "headers":["القيمة","النسبة"], "rows":[[{"value":"50","isBlank":false},{"value":"","isBlank":true,"inputType":"number","cue":"س","expectedAnswer":"25"}]] }.
    - "explanationTable": { "title": "خطوات الحل", "headers": ["الخطوة","النتيجة"], "rows": [["...","..."]] }.
    - "explanationComparison": { "title": "المقارنة", "firstLabel": "القيمة الأولى", "firstValue": "...", "secondLabel": "القيمة الثانية", "secondValue": "...", "verdict": "القيمة الأولى أكبر" }.
    - "explanationChart" أو "explanationFigure": اختياريان للشرح البصري.
    - "sourceMistakeFp": (اختياري) ضع فيه معرف الخطأ "fp" بالضبط إذا كان السؤال مستخرجاً من قائمة أخطاء الطالب السابقة لتصحيحها وحذفها من الأخطاء عند إجابته بشكل صحيح.
-3. تأكد 100% من صحة الحسابات الرياضية وتطابق choices[correctIndex] مع الشرح وanswer، ومن وجود "figure" في كل سؤال هندسي قبل الإرسال.
+3. تأكد 100% من صحة الحسابات الرياضية والعدّ الإحصائي وتطابق choices[correctIndex] مع الشرح وanswer، ومن وجود "figure" في كل سؤال هندسي قبل الإرسال.
 `;
 
 export interface AnalyzeRequestPayload {

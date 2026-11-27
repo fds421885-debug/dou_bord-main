@@ -3,6 +3,7 @@ import { CheckCircle2, Dumbbell, MinusCircle, Star, XCircle } from 'lucide-react
 import type { ExamQuestion } from '../types';
 import { MathText } from '../mathText';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
 import { QuestionLawsBox } from './QuestionLawsBox';
 import { QuestionTableView } from './QuestionTableView';
@@ -178,6 +179,7 @@ export const ExamReview: React.FC<Props> = ({
               <QuestionLawsBox laws={q.laws} variant="review" compact />
             )}
             <MathText text={q.text} className="text-sm font-black text-[#3C3C3C]" />
+            {q.dataTable && <DataTableView table={q.dataTable} />}
             {q.chart && <ChartView chart={q.chart} />}
             {q.figure && <FigureView figure={q.figure} />}
 

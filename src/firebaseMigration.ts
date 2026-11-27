@@ -30,6 +30,7 @@ import {
   decodeQuizQuestionFromFirestore,
   decodeSharedQuizFromFirestore,
   decodeStarredQuestionFromFirestore,
+  encodeDataTableForFirestore,
   encodeExplanationTableForFirestore,
   encodeTableForFirestore,
   sanitizeExplanationComparison,
@@ -1549,6 +1550,7 @@ function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<s
   const chart = q.chart ? sanitizeChart(q.chart) : null;
   const figure = q.figure ? sanitizeFigure(q.figure) : null;
   const table = q.table ? encodeTableForFirestore(q.table) : null;
+  const dataTable = q.dataTable ? encodeDataTableForFirestore(q.dataTable) : null;
   const expChart = q.explanationChart ? sanitizeChart(q.explanationChart) : null;
   const expFigure = q.explanationFigure ? sanitizeFigure(q.explanationFigure) : null;
   const expTable = q.explanationTable ? encodeExplanationTableForFirestore(q.explanationTable) : null;
@@ -1561,6 +1563,7 @@ function cleanQuizQuestionForFirestore(q: MyQuiz['questions'][number]): Record<s
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
     ...(table ? { questionType: 'table', table } : {}),
+    ...(dataTable ? { dataTable } : {}),
     ...(expChart ? { explanationChart: expChart } : {}),
     ...(expFigure ? { explanationFigure: expFigure } : {}),
     ...(expTable ? { explanationTable: expTable } : {}),
@@ -1601,6 +1604,7 @@ function cleanSavedQuestionForFirestore(
   const chart = sq.chart ? sanitizeChart(sq.chart) : null;
   const figure = sq.figure ? sanitizeFigure(sq.figure) : null;
   const table = sq.table ? encodeTableForFirestore(sq.table) : null;
+  const dataTable = sq.dataTable ? encodeDataTableForFirestore(sq.dataTable) : null;
   const expChart = sq.explanationChart ? sanitizeChart(sq.explanationChart) : null;
   const expFigure = sq.explanationFigure ? sanitizeFigure(sq.explanationFigure) : null;
   const expTable = sq.explanationTable ? encodeExplanationTableForFirestore(sq.explanationTable) : null;
@@ -1626,6 +1630,7 @@ function cleanSavedQuestionForFirestore(
     ...(chart ? { chart } : {}),
     ...(figure ? { figure } : {}),
     ...(table ? { questionType: 'table', table } : {}),
+    ...(dataTable ? { dataTable } : {}),
     ...(expChart ? { explanationChart: expChart } : {}),
     ...(expFigure ? { explanationFigure: expFigure } : {}),
     ...(expTable ? { explanationTable: expTable } : {}),

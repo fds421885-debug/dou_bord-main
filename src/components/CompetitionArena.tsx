@@ -54,7 +54,7 @@ import {
   type StoredSavedTestsSnapshot,
 } from '../localDraftStore';
 import { MathText } from '../mathText';
-import { decodeQuizQuestionFromFirestore, encodeQuestionFieldsForFirestore } from '../quizTable';
+import { decodeQuizQuestionFromFirestore, encodeDataTableForFirestore, encodeQuestionFieldsForFirestore } from '../quizTable';
 import { buildRoomQuizPool, useMyQuizzes, useRoomSharedQuizzes } from '../roomQuizzes';
 import type {
   Competition,
@@ -74,6 +74,7 @@ import type {
   UserProfile,
 } from '../types';
 import { ChartView } from './ChartView';
+import { DataTableView } from './DataTableView';
 import { FigureView } from './FigureView';
 import {
   DuoCheckBadge,
@@ -1243,6 +1244,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
             choices: cq.question.choices,
             correctIndex: cq.question.correctIndex,
             explanation: (cq.question.explanation || '').slice(0, 2000),
+            ...(cq.question.dataTable ? { dataTable: cq.question.dataTable } : {}),
             ...(cq.question.chart ? { chart: cq.question.chart } : {}),
             ...(cq.question.figure ? { figure: cq.question.figure } : {}),
             ...(cq.question.explanationChart ? { explanationChart: cq.question.explanationChart } : {}),
@@ -1351,6 +1353,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                     ? { correctIndex: sq.correctIndex }
                     : {}),
                   ...(sq.explanation ? { explanation: sq.explanation } : {}),
+                  ...(sq.dataTable ? { dataTable: encodeDataTableForFirestore(sq.dataTable) } : {}),
                   ...(sq.chart ? { chart: sq.chart } : {}),
                   ...(sq.figure ? { figure: sq.figure } : {}),
                   ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
@@ -1383,6 +1386,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                       ? { correctIndex: sq.correctIndex }
                       : {}),
                     ...(sq.explanation ? { explanation: sq.explanation } : {}),
+                    ...(sq.dataTable ? { dataTable: encodeDataTableForFirestore(sq.dataTable) } : {}),
                     ...(sq.chart ? { chart: sq.chart } : {}),
                     ...(sq.figure ? { figure: sq.figure } : {}),
                     ...(sq.explanationChart ? { explanationChart: sq.explanationChart } : {}),
@@ -1603,6 +1607,7 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                     )}
                   </div>
 
+                  {q.dataTable && <DataTableView table={q.dataTable} className="max-w-lg" />}
                   {q.chart && <ChartView chart={q.chart} className="max-w-lg" />}
                   {q.figure && <FigureView figure={q.figure} className="max-w-lg" />}
 
@@ -2011,6 +2016,9 @@ export const CompetitionArena: React.FC<CompetitionArenaProps> = ({
                 className="text-base sm:text-lg font-black text-[#3C3C3C] leading-relaxed"
               />
 
+              {activeQuestion.question.dataTable && (
+                <DataTableView table={activeQuestion.question.dataTable} />
+              )}
               {activeQuestion.question.chart && (
                 <ChartView chart={activeQuestion.question.chart} />
               )}

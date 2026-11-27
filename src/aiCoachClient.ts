@@ -362,6 +362,7 @@ export function normalizeGeneratedQuestions(
       ...(orig?.figure && !q.figure ? { figure: orig.figure } : {}),
       ...(orig?.chart && !q.chart ? { chart: orig.chart } : {}),
       ...(orig?.table && !q.table ? { table: orig.table } : {}),
+      ...(orig?.dataTable && !q.dataTable ? { dataTable: orig.dataTable } : {}),
       ...(orig?.explanationFigure && !q.explanationFigure ? { explanationFigure: orig.explanationFigure } : {}),
       ...(orig?.explanationChart && !q.explanationChart ? { explanationChart: orig.explanationChart } : {}),
       redeemsFingerprint: matchedFp,

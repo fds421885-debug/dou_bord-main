@@ -66,6 +66,7 @@ import {
   type ParsedQuizBundle,
 } from '../myQuizzes';
 import { decodeExamAttemptFromFirestore, decodeMyQuizFromFirestore } from '../quizTable';
+import { DataTableView } from './DataTableView';
 import {
   computeStarredQuestionId,
   removeStarredQuestion,
@@ -832,6 +833,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
               <QuestionLawsBox laws={qq.laws} variant="review" compact />
             )}
             <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C]" />
+            {qq.dataTable && <DataTableView table={qq.dataTable} />}
             {qq.chart && <ChartView chart={qq.chart} />}
             {qq.figure && <FigureView figure={qq.figure} />}
             {qq.questionType === 'table' && qq.table ? (
@@ -1242,6 +1244,7 @@ export const MyQuizzesView: React.FC<Props> = ({ profile }) => {
                     <QuestionLawsBox laws={qq.laws} variant="review" compact />
                   )}
                   <MathText text={qq.text} className="text-sm font-black text-[#3C3C3C] leading-relaxed" />
+                  {qq.dataTable && <DataTableView table={qq.dataTable} />}
                   {qq.chart && <ChartView chart={qq.chart} />}
                   {qq.figure && <FigureView figure={qq.figure} />}
 

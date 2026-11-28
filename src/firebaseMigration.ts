@@ -1,4 +1,5 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
+import { limit as fsLimit } from 'firebase/firestore';
 import {
   getAuth,
   GoogleAuthProvider,
@@ -22,6 +23,10 @@ import {
   type Firestore,
 } from './firestoreTracked';
 import { isBackendServerDetected, resolveApiUrl } from './apiBase';
+import {
+  hasCompletedPersonalSyncForDb,
+  markCompletedPersonalSyncForDb,
+} from './dbNoticeState';
 import { sanitizeChart } from './quizChart';
 import { sanitizeFigure } from './quizFigure';
 import {
@@ -2223,6 +2228,7 @@ async function writePersonalCollectionsToDb(params: {
   myQuizzes: MyQuiz[];
   quizAttempts: QuizAttempt[];
   starredQuestions?: StarredQuestion[];
+  skipExisting?: boolean;
   onItemDone?: (kind: 'saved' | 'quiz' | 'attempt' | 'starred', label: string) => void;
 }): Promise<{
   migratedSavedTestsCount: number;
@@ -2238,6 +2244,7 @@ async function writePersonalCollectionsToDb(params: {
     myQuizzes,
     quizAttempts,
     starredQuestions = [],
+    skipExisting = false,
     onItemDone,
   } = params;
 
@@ -2248,6 +2255,9 @@ async function writePersonalCollectionsToDb(params: {
     const savedQuestions = savedQuestionsByTestId[test.id] ?? [];
 
     if (existingSaved.exists()) {
+      if (skipExisting) {
+        continue;
+      }
       // Explicitly update existing savedTest metadata + sync any missing or updated savedQuestions
       for (const sq of savedQuestions) {
         const sqRef = doc(targetDb, 'users', targetUid, 'savedTests', test.id, 'questions', sq.id);
@@ -2358,6 +2368,9 @@ async function writePersonalCollectionsToDb(params: {
     };
 
     if (existingQuiz.exists()) {
+      if (skipExisting) {
+        continue;
+      }
       // Always update existing quiz on target DB so edits/additions sync completely
       try {
         await updateDoc(quizRef, { ...coreUpdatePayload, ...metaFields });
@@ -2391,6 +2404,9 @@ async function writePersonalCollectionsToDb(params: {
     const atRef = doc(targetDb, 'users', targetUid, 'quizAttempts', at.id);
     const existingAt = await getDoc(atRef);
     if (existingAt.exists()) {
+      if (skipExisting) {
+        continue;
+      }
       migratedAttemptsCount++;
       onItemDone?.('attempt', at.title);
       continue;
@@ -2460,9 +2476,12 @@ async function writePersonalCollectionsToDb(params: {
       const existingSt = await getDoc(stRef);
       if (!existingSt.exists()) {
         await setDoc(stRef, cleanStarredQuestionForFirestore(st, targetUid));
+        migratedStarredCount++;
+        onItemDone?.('starred', st.sourceTitle || 'سؤال مميز');
+      } else if (!skipExisting) {
+        migratedStarredCount++;
+        onItemDone?.('starred', st.sourceTitle || 'سؤال مميز');
       }
-      migratedStarredCount++;
-      onItemDone?.('starred', st.sourceTitle || 'سؤال مميز');
     } catch {
       // Isolated fallback in case target DB hasn't updated rules yet
     }
@@ -4091,10 +4110,17 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
 }): Promise<{ synced: boolean; count: number; needsInteractiveSignIn: boolean }> {
   const { targetUser, interactiveAuthIfNeeded = false, onProgress } = params;
   const targetUid = targetUser.uid;
+  const activeTargetKey = firebaseTargetKey(activeFirebaseConfig);
+
+  if (!interactiveAuthIfNeeded && hasCompletedPersonalSyncForDb(targetUid, activeTargetKey)) {
+    return { synced: false, count: 0, needsInteractiveSignIn: false };
+  }
+
   const previousConfigs = getPreviousFirebaseConfigs().filter(
     (c) => !isSameFirebaseTarget(c, activeFirebaseConfig)
   );
   if (previousConfigs.length === 0) {
+    markCompletedPersonalSyncForDb(targetUid, activeTargetKey);
     return { synced: false, count: 0, needsInteractiveSignIn: false };
   }
 
@@ -4102,7 +4128,33 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
   const pendingConfigs = previousConfigs.filter(
     (cfg) => !alreadySynced.includes(firebaseTargetKey(cfg))
   );
-  if (pendingConfigs.length === 0) {
+  const localCacheDoneKey = `local_cache::${activeTargetKey}`;
+  const localCacheAlreadyDone = alreadySynced.includes(localCacheDoneKey);
+
+  if (pendingConfigs.length === 0 && localCacheAlreadyDone) {
+    markCompletedPersonalSyncForDb(targetUid, activeTargetKey);
+    return { synced: false, count: 0, needsInteractiveSignIn: false };
+  }
+
+  // Detect whether the active database already holds personal quizzes/tests/attempts
+  // so we never falsely report or prompt to re-import data that is already present.
+  let activeDbHasExistingData = false;
+  try {
+    const [qSnap, sSnap, aSnap] = await withTimeout(
+      Promise.all([
+        getDocs(query(collection(sourceDb, 'users', targetUid, 'myQuizzes'), fsLimit(1))),
+        getDocs(query(collection(sourceDb, 'users', targetUid, 'savedTests'), fsLimit(1))),
+        getDocs(query(collection(sourceDb, 'users', targetUid, 'quizAttempts'), fsLimit(1))),
+      ]),
+      1800
+    );
+    activeDbHasExistingData = !qSnap.empty || !sSnap.empty || !aSnap.empty;
+  } catch {
+    activeDbHasExistingData = false;
+  }
+
+  if (!interactiveAuthIfNeeded && activeDbHasExistingData && localCacheAlreadyDone) {
+    markCompletedPersonalSyncForDb(targetUid, activeTargetKey);
     return { synced: false, count: 0, needsInteractiveSignIn: false };
   }
 
@@ -4159,21 +4211,17 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         myQuizzes: srcData.myQuizzes,
         quizAttempts: srcData.quizAttempts,
         starredQuestions: srcData.starredQuestions,
+        skipExisting: true,
       });
 
-      totalSyncedItems +=
+      const importedNow =
         counts.migratedSavedTestsCount +
         counts.migratedMyQuizzesCount +
         counts.migratedAttemptsCount +
         counts.migratedStarredCount;
+      totalSyncedItems += importedNow;
 
-      if (
-        counts.migratedSavedTestsCount > 0 ||
-        counts.migratedMyQuizzesCount > 0 ||
-        counts.migratedAttemptsCount > 0 ||
-        counts.migratedStarredCount > 0 ||
-        srcData.profile
-      ) {
+      if (importedNow > 0 || srcData.profile) {
         await cleanupMigratedPersonalDocsOnDb({
           srcDb,
           oldUid: srcUser.uid,
@@ -4197,7 +4245,7 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
     }
   }
 
-  if (totalSyncedItems === 0) {
+  if (totalSyncedItems === 0 && !localCacheAlreadyDone) {
     try {
       const cachedSaved = await loadSessionSnapshot<StoredSavedTestsSnapshot>('saved_tests');
       const cachedQuizzes = await loadSessionSnapshot<StoredMyQuizzesSnapshot>('my_quizzes');
@@ -4214,6 +4262,7 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         myQuizzes: cachedQuizzes?.quizzes ?? [],
         quizAttempts: cachedAttempts?.attempts ?? [],
         starredQuestions: cachedStarred?.items ?? [],
+        skipExisting: true,
       });
       totalSyncedItems +=
         counts.migratedSavedTestsCount +
@@ -4222,13 +4271,22 @@ export async function syncPersonalAccountFromPreviousDbs(params: {
         counts.migratedStarredCount;
     } catch {
       // Non-fatal
+    } finally {
+      markSourceKeySynced(targetUid, localCacheDoneKey);
     }
+  }
+
+  const effectiveNeedsInteractiveSignIn =
+    !interactiveAuthIfNeeded && activeDbHasExistingData ? false : needsInteractiveSignIn;
+
+  if (totalSyncedItems > 0 || !effectiveNeedsInteractiveSignIn || interactiveAuthIfNeeded) {
+    markCompletedPersonalSyncForDb(targetUid, activeTargetKey);
   }
 
   return {
     synced: totalSyncedItems > 0,
     count: totalSyncedItems,
-    needsInteractiveSignIn,
+    needsInteractiveSignIn: effectiveNeedsInteractiveSignIn,
   };
 }
 

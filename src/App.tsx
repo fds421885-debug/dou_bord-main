@@ -81,6 +81,7 @@ import {
   type PlatformMigrationPointer,
 } from './firebaseMigration';
 import { subscribeRulesUpdateNeeded } from './starredQuestions';
+import { dismissDbNotice, isDbNoticeDismissed } from './dbNoticeState';
 import {
   deleteSessionSnapshot,
   loadSessionSnapshot,
@@ -345,15 +346,26 @@ export default function App() {
   const [roomClosedNotice, setRoomClosedNotice] = useState<string | null>(null);
   const [closingRoomBusy, setClosingRoomBusy] = useState<boolean>(false);
   const [showCloseRoomModal, setShowCloseRoomModal] = useState<boolean>(false);
+  const activeDbTargetKey = firebaseTargetKey(activeFirebaseConfig);
   const [consolidatedNoticeProject, setConsolidatedNoticeProject] = useState<
     string | null
-  >(() => (justConsolidatedFrom ? null : consumeConsolidatedProjectNotice()));
+  >(() =>
+    justConsolidatedFrom ||
+    isDbNoticeDismissed('consolidated_notice', firebaseTargetKey(activeFirebaseConfig))
+      ? null
+      : consumeConsolidatedProjectNotice()
+  );
   const [quotaSelectorOpen, setQuotaSelectorOpen] = useState<boolean>(false);
+  const [quotaStripDismissed, setQuotaStripDismissed] = useState<boolean>(() =>
+    isDbNoticeDismissed('quota_capacity_strip', firebaseTargetKey(activeFirebaseConfig))
+  );
   const [rulesOutdatedReason, setRulesOutdatedReason] = useState<{
     projectId: string;
     reason: string;
   } | null>(null);
-  const [rulesAlertDismissed, setRulesAlertDismissed] = useState<boolean>(false);
+  const [rulesAlertDismissed, setRulesAlertDismissed] = useState<boolean>(() =>
+    isDbNoticeDismissed('rules_outdated_banner', firebaseTargetKey(activeFirebaseConfig))
+  );
   const [rulesCheckResults, setRulesCheckResults] = useState<DatabaseRulesCheckResult[]>([]);
   const [rulesModalOpen, setRulesModalOpen] = useState<boolean>(false);
   const [rulesModalChecking, setRulesModalChecking] = useState<boolean>(false);
@@ -564,20 +576,28 @@ export default function App() {
 
   const triggerQuotaFailoverCheck = useCallback(() => {
     void checkBackupAnnouncementSignal();
+    if (isDbNoticeDismissed('quota_selector_auto', activeDbTargetKey)) {
+      return;
+    }
     if (quotaSelectorTimerRef.current) {
       window.clearTimeout(quotaSelectorTimerRef.current);
     }
     quotaSelectorTimerRef.current = window.setTimeout(() => {
       quotaSelectorTimerRef.current = null;
-      if (!switchingInProgressRef.current) {
+      if (
+        !switchingInProgressRef.current &&
+        !isDbNoticeDismissed('quota_selector_auto', activeDbTargetKey)
+      ) {
         setQuotaSelectorOpen(true);
       }
     }, 1800);
-  }, [checkBackupAnnouncementSignal]);
+  }, [activeDbTargetKey, checkBackupAnnouncementSignal]);
 
   useEffect(() => {
     const unsubErr = subscribeQuotaError(() => {
-      setQuotaAlert(true);
+      if (!isDbNoticeDismissed('quota_alert', activeDbTargetKey)) {
+        setQuotaAlert(true);
+      }
       reportFirestoreQuotaExhausted(activeProjectId);
       triggerQuotaFailoverCheck();
     });
@@ -585,17 +605,25 @@ export default function App() {
       if (status.projectId === activeProjectId) {
         setLiveQuotaStatus(status);
         if (status.exhausted && !quotaSelectorTimerRef.current) {
-          setQuotaAlert(true);
+          if (!isDbNoticeDismissed('quota_alert', activeDbTargetKey)) {
+            setQuotaAlert(true);
+          }
           triggerQuotaFailoverCheck();
         }
       }
     });
     const unsubRules = subscribeRulesUpdateNeeded((info) => {
-      setRulesOutdatedReason({
-        projectId: info.projectId,
-        reason: 'قواعد الأمان الحالية تحتاج تحديثاً لدعم الأسئلة المميزة وجداول الاختبارات وأكثر من 100 سؤال.',
-      });
-      if (firebaseUserRef.current && hasAutoCheckedRulesUidRef.current) {
+      if (!isDbNoticeDismissed('rules_outdated_banner', activeDbTargetKey)) {
+        setRulesOutdatedReason({
+          projectId: info.projectId,
+          reason: 'قواعد الأمان الحالية تحتاج تحديثاً لدعم الأسئلة المميزة وجداول الاختبارات وأكثر من 100 سؤال.',
+        });
+      }
+      if (
+        firebaseUserRef.current &&
+        hasAutoCheckedRulesUidRef.current &&
+        !isDbNoticeDismissed('rules_outdated_modal', activeDbTargetKey)
+      ) {
         setRulesModalOpen(true);
       }
     });
@@ -615,9 +643,9 @@ export default function App() {
         quotaSelectorTimerRef.current = null;
       }
     };
-  }, [triggerQuotaFailoverCheck]);
+  }, [activeDbTargetKey, triggerQuotaFailoverCheck]);
 
-  // Fire supervisor/programmer notification at <= 5.0% remaining AND on every 0.5% decrement (4.5%, 4.0%, ... 0.0%)
+  // Fire supervisor/programmer notification at <= 5.0% remaining unless permanently dismissed for this DB
   const canReceiveQuotaAlerts = Boolean(
     (room && profile && room.supervisorId === profile.uid) || isProgrammer
   );
@@ -625,6 +653,8 @@ export default function App() {
   useEffect(() => {
     if (!canReceiveQuotaAlerts) return;
     if (liveQuotaStatus.projectId !== activeProjectId) return;
+    if (isDbNoticeDismissed('quota_alert', activeDbTargetKey)) return;
+    if (dismissedQuotaStep !== null) return;
     const step = liveQuotaStatus.alertStep;
     if (step === null) return;
 
@@ -636,10 +666,6 @@ export default function App() {
     const prevStep = lastAlertedStepRef.current.step;
     if (prevStep === null || step < prevStep) {
       lastAlertedStepRef.current.step = step;
-      // Re-open banner on every new -0.5% drop even if user dismissed previous step
-      setDismissedQuotaStep((prevDismissed) =>
-        prevDismissed !== null && step >= prevDismissed ? prevDismissed : null
-      );
       const metricLabel = formatQuotaMetricArabic(liveQuotaStatus.bottleneckMetric);
       setQuotaToastNotification({
         step,
@@ -663,7 +689,9 @@ export default function App() {
       }
     }
   }, [
+    activeDbTargetKey,
     canReceiveQuotaAlerts,
+    dismissedQuotaStep,
     liveQuotaStatus.projectId,
     liveQuotaStatus.dateKey,
     liveQuotaStatus.alertStep,
@@ -801,14 +829,16 @@ export default function App() {
         const outdatedList = results.filter((r) => r.status === 'outdated');
         if (outdatedList.length > 0) {
           const first = outdatedList[0];
-          setRulesOutdatedReason({
-            projectId: first.projectId,
-            reason:
-              first.reason ||
-              'قواعد الأمان (firestore.rules) في إحدى القواعد تحتاج إلى تحديث ونشر.',
-          });
-          setRulesAlertDismissed(false);
-          if (openOnFail) {
+          if (!isDbNoticeDismissed('rules_outdated_banner', activeDbTargetKey)) {
+            setRulesOutdatedReason({
+              projectId: first.projectId,
+              reason:
+                first.reason ||
+                'قواعد الأمان (firestore.rules) في إحدى القواعد تحتاج إلى تحديث ونشر.',
+            });
+            setRulesAlertDismissed(false);
+          }
+          if (openOnFail && !isDbNoticeDismissed('rules_outdated_modal', activeDbTargetKey)) {
             setRulesModalOpen(true);
             playDuoSound('wrong');
           }
@@ -823,7 +853,7 @@ export default function App() {
         setRulesModalSigningKey(null);
       }
     },
-    []
+    [activeDbTargetKey]
   );
 
   useEffect(() => {
@@ -838,9 +868,10 @@ export default function App() {
     hasAutoCheckedRulesUidRef.current = firebaseUser.uid;
     void runProgrammerRulesAudit(firebaseUser, {
       bypassCache: true,
-      openOnFail: true,
+      openOnFail: !isDbNoticeDismissed('rules_outdated_modal', activeDbTargetKey),
     });
   }, [
+    activeDbTargetKey,
     firebaseUser?.uid,
     isProgrammer,
     programmerLoading,
@@ -1503,8 +1534,15 @@ export default function App() {
               interactiveAuthIfNeeded: false,
               onProgress: resolvedProfile ? undefined : (p) => setPersonalSyncProgress(p),
             });
-            setNeedsInteractiveSync(syncRes.needsInteractiveSignIn);
-            if (syncRes.synced && syncRes.count > 0) {
+            setNeedsInteractiveSync(
+              syncRes.needsInteractiveSignIn &&
+                !isDbNoticeDismissed('needs_interactive_sync', activeDbTargetKey)
+            );
+            if (
+              syncRes.synced &&
+              syncRes.count > 0 &&
+              !isDbNoticeDismissed('sync_success', activeDbTargetKey)
+            ) {
               setSyncSuccessNotice(
                 `تم استيراد ${syncRes.count} عنصر من بياناتك واختباراتك تلقائياً إلى القاعدة الجديدة!`
               );
@@ -1683,7 +1721,9 @@ export default function App() {
       }
 
       if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
-        setQuotaAlert(true);
+        if (!isDbNoticeDismissed('quota_alert', activeDbTargetKey)) {
+          setQuotaAlert(true);
+        }
         triggerQuotaFailoverCheck();
         setProfileLoadError(
           'تم الوصول للحد اليومي للقاعدة الحالية — يمكنك التبديل الآن لأي قاعدة بيانات متاحة لتفعيلها عند الجميع.'
@@ -2014,7 +2054,10 @@ export default function App() {
           checking={rulesModalChecking}
           signingInKey={rulesModalSigningKey}
           results={rulesCheckResults}
-          onClose={() => setRulesModalOpen(false)}
+          onClose={() => {
+            dismissDbNotice('rules_outdated_modal', activeDbTargetKey);
+            setRulesModalOpen(false);
+          }}
           onRecheckAll={() =>
             void runProgrammerRulesAudit(firebaseUser, {
               bypassCache: true,
@@ -2091,7 +2134,12 @@ export default function App() {
         </div>
         <QuotaFullDbSelectorModal
           open={quotaSelectorOpen}
-          onClose={() => setQuotaSelectorOpen(false)}
+          onClose={() => {
+            if (quotaAlert || liveQuotaStatus.exhausted) {
+              dismissDbNotice('quota_selector_auto', activeDbTargetKey);
+            }
+            setQuotaSelectorOpen(false);
+          }}
           firebaseUser={firebaseUser}
           quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
         />
@@ -2123,33 +2171,51 @@ export default function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setConsolidatedNoticeProject(null)}
+                onClick={() => {
+                  dismissDbNotice('consolidated_notice', activeDbTargetKey);
+                  setConsolidatedNoticeProject(null);
+                }}
                 className="p-1 rounded-lg hover:bg-white/60 cursor-pointer"
-                title="إخفاء"
+                title="إخفاء نهائياً لهذه القاعدة"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
           </div>
         )}
-        {quotaAlert && (
+        {quotaAlert && !isDbNoticeDismissed('quota_alert', activeDbTargetKey) && (
           <div className="bg-[#FFDFE0] border-b-2 border-[#FF4B4B] px-4 py-3">
             <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3 text-[#EA2B2B] text-xs sm:text-sm font-black">
               <span>
                 القاعدة الحالية ({activeProjectId}) امتلت حصتها — يمكنك اختيار قاعدة بديلة وتفعيلها للجميع فوراً.
               </span>
-              <button
-                type="button"
-                onClick={() => setQuotaSelectorOpen(true)}
-                className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
-              >
-                <Database className="w-4 h-4" />
-                <span>عرض القواعد واختيار قاعدة متاحة</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQuotaSelectorOpen(true)}
+                  className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#58CC02] border-2 border-b-4 border-[#46A302] text-white text-xs font-black cursor-pointer"
+                >
+                  <Database className="w-4 h-4" />
+                  <span>عرض القواعد واختيار قاعدة متاحة</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    dismissDbNotice('quota_alert', activeDbTargetKey);
+                    setQuotaAlert(false);
+                  }}
+                  className="p-1.5 rounded-lg hover:bg-white/60 cursor-pointer"
+                  title="إخفاء نهائياً لهذه القاعدة"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
-        {firebaseUser && needsInteractiveSync && (
+        {firebaseUser &&
+          needsInteractiveSync &&
+          !isDbNoticeDismissed('needs_interactive_sync', activeDbTargetKey) && (
           <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-4 py-3">
             <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
@@ -2158,14 +2224,27 @@ export default function App() {
                   أهلاً بك! يمكنك استيراد حسابك واختباراتك السابقة بضغطة واحدة.
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => void handleInteractivePersonalSync()}
-                className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>استيراد حسابي واختباراتي الآن</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleInteractivePersonalSync()}
+                  className="duo-btn flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#1CB0F6] hover:bg-[#33BCFF] border-2 border-b-4 border-[#1899D6] text-white text-xs font-black cursor-pointer"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>استيراد حسابي واختباراتي الآن</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    dismissDbNotice('needs_interactive_sync', activeDbTargetKey);
+                    setNeedsInteractiveSync(false);
+                  }}
+                  className="p-1.5 rounded-lg text-[#1899D6] hover:bg-white/70 cursor-pointer"
+                  title="إخفاء نهائياً لهذه القاعدة"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -2189,13 +2268,20 @@ export default function App() {
             }
           }}
           onQuotaDetected={() => {
-            setQuotaAlert(true);
+            if (!isDbNoticeDismissed('quota_alert', activeDbTargetKey)) {
+              setQuotaAlert(true);
+            }
             triggerQuotaFailoverCheck();
           }}
         />
         <QuotaFullDbSelectorModal
           open={quotaSelectorOpen}
-          onClose={() => setQuotaSelectorOpen(false)}
+          onClose={() => {
+            if (quotaAlert || liveQuotaStatus.exhausted) {
+              dismissDbNotice('quota_selector_auto', activeDbTargetKey);
+            }
+            setQuotaSelectorOpen(false);
+          }}
           firebaseUser={firebaseUser}
           quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
         />
@@ -2415,11 +2501,12 @@ export default function App() {
           </div>
         </header>
 
-        {/* Live <= 5% Free Quota & -0.5% Step Supervisor Alert Banner */}
-        {(quotaAlert ||
-          (canReceiveQuotaAlerts &&
-            liveQuotaStatus.alertStep !== null &&
-            dismissedQuotaStep !== liveQuotaStatus.alertStep)) && (
+        {/* Live <= 5% Free Quota Supervisor Alert Banner (dismisses permanently per DB) */}
+        {!isDbNoticeDismissed('quota_alert', activeDbTargetKey) &&
+          (quotaAlert ||
+            (canReceiveQuotaAlerts &&
+              liveQuotaStatus.alertStep !== null &&
+              dismissedQuotaStep !== liveQuotaStatus.alertStep)) && (
           <div
             className={`border-b-2 px-3 sm:px-6 py-3 ${
               quotaAlert || (liveQuotaStatus.alertStep !== null && liveQuotaStatus.alertStep <= 2.0)
@@ -2508,14 +2595,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    dismissDbNotice('quota_alert', activeDbTargetKey);
                     setQuotaAlert(false);
                     setQuotaToastNotification(null);
-                    if (liveQuotaStatus.alertStep !== null) {
-                      setDismissedQuotaStep(liveQuotaStatus.alertStep);
-                    }
+                    setDismissedQuotaStep(liveQuotaStatus.alertStep ?? -1);
                   }}
                   className="p-1.5 rounded-lg text-[#3C3C3C] hover:bg-white/60 cursor-pointer"
-                  title="تم الاستلام (سيتكرر التنبيه عند النقص 0.5% القادم)"
+                  title="إغلاق نهائياً لهذه القاعدة (لن يظهر مجدداً إلا عند النقل لقاعدة أخرى)"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2525,7 +2611,11 @@ export default function App() {
         )}
 
         {/* Programmer Alert Banner when Firestore Rules need update for Tables & Starred Questions */}
-        {effectiveIsProgrammer && rulesOutdatedReason && !rulesAlertDismissed && tab !== 'programmer' && (
+        {effectiveIsProgrammer &&
+          rulesOutdatedReason &&
+          !rulesAlertDismissed &&
+          !isDbNoticeDismissed('rules_outdated_banner', activeDbTargetKey) &&
+          tab !== 'programmer' && (
           <div className="bg-[#F3E8FF] border-b-2 border-[#A560E8] px-3 sm:px-6 py-3">
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-start gap-2.5 text-[#6D28D9] text-xs sm:text-sm font-black">
@@ -2560,9 +2650,12 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRulesAlertDismissed(true)}
+                  onClick={() => {
+                    dismissDbNotice('rules_outdated_banner', activeDbTargetKey);
+                    setRulesAlertDismissed(true);
+                  }}
                   className="p-1.5 rounded-lg text-[#6D28D9] hover:bg-white/60 cursor-pointer"
-                  title="إخفاء مؤقتاً"
+                  title="إخفاء نهائياً لهذه القاعدة"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2572,7 +2665,7 @@ export default function App() {
         )}
 
         {/* Live Capacity Bar & Percentage Strip (Supervisors & Programmers Only) */}
-        {canReceiveQuotaAlerts && tab !== 'programmer' && (
+        {canReceiveQuotaAlerts && !quotaStripDismissed && tab !== 'programmer' && (
           <div className="bg-[#F8FAFC] border-b border-[#E5E5E5] px-3 sm:px-6 py-2">
             <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
               <div className="flex flex-wrap items-center gap-2 font-black text-[#3C3C3C]">
@@ -2601,7 +2694,7 @@ export default function App() {
                 </span>
               </div>
 
-              <div className="flex items-center gap-2.5 sm:w-72 shrink-0">
+              <div className="flex items-center gap-2.5 sm:w-80 shrink-0">
                 <div className="flex-1 h-3 rounded-full bg-[#E5E5E5] overflow-hidden relative border border-[#D0D0D0]">
                   <svg className="w-full h-full block" aria-hidden="true">
                     <rect
@@ -2623,6 +2716,17 @@ export default function App() {
                 <span dir="ltr" className="font-latin text-[11px] font-black text-[#3C3C3C] w-14 text-right">
                   {liveQuotaStatus.minRemainingPct.toFixed(1)}%
                 </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    dismissDbNotice('quota_capacity_strip', activeDbTargetKey);
+                    setQuotaStripDismissed(true);
+                  }}
+                  className="p-1 rounded-lg text-[#777777] hover:bg-[#E5E5E5]/60 cursor-pointer shrink-0"
+                  title="إخفاء شريط السعة لهذه القاعدة"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
           </div>
@@ -2639,9 +2743,12 @@ export default function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setConsolidatedNoticeProject(null)}
+                onClick={() => {
+                  dismissDbNotice('consolidated_notice', activeDbTargetKey);
+                  setConsolidatedNoticeProject(null);
+                }}
                 className="p-1.5 rounded-lg hover:bg-white/60 cursor-pointer"
-                title="إخفاء"
+                title="إخفاء نهائياً لهذه القاعدة"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2650,7 +2757,9 @@ export default function App() {
         )}
 
         {/* Auto-import Personal Data Banner when user arrives on a switched DB with unsynced source DBs */}
-        {needsInteractiveSync && !activeRoomId && (
+        {needsInteractiveSync &&
+          !isDbNoticeDismissed('needs_interactive_sync', activeDbTargetKey) &&
+          !activeRoomId && (
           <div className="bg-[#F0F9FF] border-b-2 border-[#1CB0F6] px-3 sm:px-6 py-3">
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-[#1899D6] text-xs sm:text-sm font-black">
@@ -2670,9 +2779,12 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setNeedsInteractiveSync(false)}
+                  onClick={() => {
+                    dismissDbNotice('needs_interactive_sync', activeDbTargetKey);
+                    setNeedsInteractiveSync(false);
+                  }}
                   className="p-1.5 rounded-lg text-[#1899D6] hover:bg-white/70 cursor-pointer"
-                  title="إخفاء"
+                  title="إخفاء نهائياً لهذه القاعدة"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2687,9 +2799,12 @@ export default function App() {
               <span>✅ {syncSuccessNotice}</span>
               <button
                 type="button"
-                onClick={() => setSyncSuccessNotice(null)}
+                onClick={() => {
+                  dismissDbNotice('sync_success', activeDbTargetKey);
+                  setSyncSuccessNotice(null);
+                }}
                 className="p-1 rounded-lg hover:bg-white/50 cursor-pointer"
-                title="إغلاق"
+                title="إغلاق نهائياً لهذه القاعدة"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2962,7 +3077,9 @@ export default function App() {
           setTab('leaderboard');
         }}
       />
-      {canReceiveQuotaAlerts && quotaToastNotification && (
+      {canReceiveQuotaAlerts &&
+        quotaToastNotification &&
+        !isDbNoticeDismissed('quota_alert', activeDbTargetKey) && (
         <div
           className="fixed bottom-4 left-4 z-50 max-w-sm w-[calc(100vw-2rem)]"
           role="alert"
@@ -3001,9 +3118,14 @@ export default function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setQuotaToastNotification(null)}
+                onClick={() => {
+                  dismissDbNotice('quota_alert', activeDbTargetKey);
+                  setQuotaToastNotification(null);
+                  setQuotaAlert(false);
+                  setDismissedQuotaStep(liveQuotaStatus.alertStep ?? -1);
+                }}
                 className="p-1 rounded-lg text-[#3C3C3C] hover:bg-white/60 cursor-pointer shrink-0"
-                title="إغلاق هذا الإشعار (سيصلك تنبيه جديد عند النقص 0.5% القادم)"
+                title="إغلاق نهائياً لهذه القاعدة (لن يظهر مجدداً إلا عند النقل لقاعدة أخرى)"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -3034,7 +3156,12 @@ export default function App() {
       )}
       <QuotaFullDbSelectorModal
         open={quotaSelectorOpen}
-        onClose={() => setQuotaSelectorOpen(false)}
+        onClose={() => {
+          if (quotaAlert || liveQuotaStatus.exhausted) {
+            dismissDbNotice('quota_selector_auto', activeDbTargetKey);
+          }
+          setQuotaSelectorOpen(false);
+        }}
         firebaseUser={firebaseUser}
         quotaExceededDetected={quotaAlert || liveQuotaStatus.exhausted}
       />
@@ -3044,7 +3171,10 @@ export default function App() {
           checking={rulesModalChecking}
           signingInKey={rulesModalSigningKey}
           results={rulesCheckResults}
-          onClose={() => setRulesModalOpen(false)}
+          onClose={() => {
+            dismissDbNotice('rules_outdated_modal', activeDbTargetKey);
+            setRulesModalOpen(false);
+          }}
           onRecheckAll={() =>
             void runProgrammerRulesAudit(firebaseUser, {
               bypassCache: true,

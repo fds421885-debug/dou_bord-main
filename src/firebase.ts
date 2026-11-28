@@ -50,6 +50,11 @@ import {
   type ResolvedRemotePointer,
   type ServerPlatformPointer,
 } from './firebaseConfigBootstrap';
+import {
+  clearDismissedDbNoticesForTarget,
+  clearPersonalSyncForTarget,
+  isDbNoticeDismissed,
+} from './dbNoticeState';
 
 export {
   clearManualDbPin,
@@ -262,6 +267,8 @@ function resolveInitialConfig(): {
         const outgoing = savedCustom ?? defaultFirebaseConfig;
         if (!isSameFirebaseTarget(outgoing, decoded)) {
           savePreviousFirebaseConfigs([outgoing, defaultFirebaseConfig, ...prevList], decoded);
+          clearDismissedDbNoticesForTarget(decoded);
+          clearPersonalSyncForTarget(decoded);
         }
 
         if (isSameFirebaseTarget(decoded, defaultFirebaseConfig)) {
@@ -335,6 +342,9 @@ export function consumeConsolidatedProjectNotice(): string | null {
     const val = sessionStorage.getItem(CONSOLIDATED_FROM_SESSION_KEY);
     if (val) {
       sessionStorage.removeItem(CONSOLIDATED_FROM_SESSION_KEY);
+      if (isDbNoticeDismissed('consolidated_notice', firebaseTargetKey(resolved.config))) {
+        return null;
+      }
       return val;
     }
     return null;
@@ -387,6 +397,10 @@ export function activateCustomFirebaseConfig(
       [activeFirebaseConfig, defaultFirebaseConfig, ...extraPreviousConfigs, ...existingPrev],
       config
     );
+    if (!isSameFirebaseTarget(config, activeFirebaseConfig)) {
+      clearDismissedDbNoticesForTarget(config);
+      clearPersonalSyncForTarget(config);
+    }
     if (isSameFirebaseTarget(config, defaultFirebaseConfig)) {
       localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
     } else {
@@ -405,6 +419,10 @@ export function resetToDefaultFirebaseConfig(): void {
     localStorage.setItem(DB_EPOCH_STORAGE_KEY, CURRENT_DB_EPOCH);
     const existingPrev = getPreviousFirebaseConfigs();
     savePreviousFirebaseConfigs([activeFirebaseConfig, ...existingPrev], defaultFirebaseConfig);
+    if (!isSameFirebaseTarget(activeFirebaseConfig, defaultFirebaseConfig)) {
+      clearDismissedDbNoticesForTarget(defaultFirebaseConfig);
+      clearPersonalSyncForTarget(defaultFirebaseConfig);
+    }
     localStorage.removeItem(CUSTOM_CONFIG_STORAGE_KEY);
     clearStaleRoomAndSessionKeys();
   } catch {
